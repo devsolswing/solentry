@@ -23,7 +23,7 @@ class TestLoginPage(unittest.TestCase):
         html = self._page()
         self.assertIn("SolEntry", html)
         self.assertIn("AUTOMATED TRADING TOOL", html)
-        self.assertIn("hero-shiba.jpg", html)
+        self.assertIn("data:image/jpeg;base64", html)
         self.assertIn("Version:", html)
         self.assertIn("1.00", html)
         self.assertIn("J. Gordon", html)

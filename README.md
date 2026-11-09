@@ -135,3 +135,5 @@ redeploys unless a volume is attached — attach a Railway volume at the
   placeholders only.
 - Never move real SOL on an ambiguous instruction. Sends always need
   the confirm step.
+
+Note: the login hero image is embedded as a base64 data URI in `tradingbot/templates/login.html` (GitHub snapshot pushes accept text only). The master file is `tradingbot/static/hero-shiba.jpg` — if you replace it, re-embed it the same way.
