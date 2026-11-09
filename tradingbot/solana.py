@@ -20,6 +20,9 @@ import time
 import urllib.request
 
 SYSTEM_PROGRAM = "11111111111111111111111111111111"
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+RENT_SYSVAR = "SysvarRent111111111111111111111111111111111"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 # ---------------------------------------------------------------------------
@@ -254,6 +257,115 @@ def build_signed_transfer(seed: bytes, fee_payer_b58: str, to_b58: str,
 
 
 # ---------------------------------------------------------------------------
+# Program-derived addresses (PDAs) and generic legacy messages
+# ---------------------------------------------------------------------------
+def _is_on_curve(candidate: bytes) -> bool:
+    """True when `candidate` (32 bytes) decompresses to a point on the
+    Ed25519 curve — i.e. it is NOT a valid program-derived address."""
+    y = int.from_bytes(candidate, "little") & ((1 << 255) - 1)
+    sign = (candidate[31] >> 7) & 1
+    x = _ed_xrecover(y)
+    if sign and x != 0:
+        x = _ED_Q - x
+    return (-x * x + y * y - 1 - _ED_D * x * x * y * y) % _ED_Q == 0
+
+
+def find_program_address(seeds: list, program_id: str) -> tuple[str, int]:
+    """Solana createProgramAddress: SHA-256 over seeds + bump +
+    program id + "ProgramDerivedAddress", first bump (255 down) whose
+    hash is off the curve. Returns (address_base58, bump).
+
+    Verified against the pump.fun global account: seeds [b"global"]
+    with the pump.fun program give 4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf.
+    """
+    program_bytes = base58_decode(program_id)
+    for bump in range(255, -1, -1):
+        data = b"".join(seeds) + bytes([bump]) + program_bytes \
+            + b"ProgramDerivedAddress"
+        digest = hashlib.sha256(data).digest()
+        if not _is_on_curve(digest):
+            return base58_encode(digest), bump
+    raise ValueError("no program-derived address found")
+
+
+def find_associated_token_address(owner_b58: str, mint_b58: str) -> str:
+    """The associated token account for (owner, mint)."""
+    address, _bump = find_program_address(
+        [base58_decode(owner_b58), base58_decode(TOKEN_PROGRAM),
+         base58_decode(mint_b58)],
+        ASSOCIATED_TOKEN_PROGRAM)
+    return address
+
+
+def build_message(fee_payer_b58: str, instructions: list,
+                  blockhash_b58: str) -> bytes:
+    """Generic legacy message for any list of instructions.
+
+    Each instruction is {"program_id": str, "accounts": [{"pubkey",
+    "is_signer", "is_writable"}], "data": bytes}. Account keys are
+    ordered canonically: fee payer first, then other signers, then
+    writable non-signers, then readonly non-signers (program ids last).
+    For a single SystemProgram transfer this reproduces
+    build_transfer_message exactly.
+    """
+    metas: dict = {}
+    order: list = []
+
+    def _add(pubkey: str, is_signer: bool, is_writable: bool) -> None:
+        if pubkey not in metas:
+            metas[pubkey] = {"is_signer": bool(is_signer),
+                             "is_writable": bool(is_writable)}
+            order.append(pubkey)
+        else:
+            metas[pubkey]["is_signer"] |= bool(is_signer)
+            metas[pubkey]["is_writable"] |= bool(is_writable)
+
+    _add(fee_payer_b58, True, True)
+    for ins in instructions:
+        for acct in ins["accounts"]:
+            _add(acct["pubkey"], acct.get("is_signer", False),
+                 acct.get("is_writable", False))
+    program_ids: list = []
+    for ins in instructions:
+        if ins["program_id"] not in program_ids:
+            program_ids.append(ins["program_id"])
+    for pid in program_ids:
+        _add(pid, False, False)
+    signers = [k for k in order if metas[k]["is_signer"]]
+    writable = [k for k in order
+                if not metas[k]["is_signer"] and metas[k]["is_writable"]]
+    readonly = [k for k in order
+                if not metas[k]["is_signer"] and not metas[k]["is_writable"]]
+    account_keys = signers + writable + readonly
+    header = bytes([
+        len(signers),
+        sum(1 for k in signers if not metas[k]["is_writable"]),
+        len(readonly),
+    ])
+    out = bytearray(header)
+    out += compact_u16_encode(len(account_keys))
+    for key in account_keys:
+        out += base58_decode(key)
+    out += base58_decode(blockhash_b58)
+    out += compact_u16_encode(len(instructions))
+    for ins in instructions:
+        out.append(account_keys.index(ins["program_id"]))
+        out += compact_u16_encode(len(ins["accounts"]))
+        for acct in ins["accounts"]:
+            out.append(account_keys.index(acct["pubkey"]))
+        out += compact_u16_encode(len(ins["data"]))
+        out += ins["data"]
+    return bytes(out)
+
+
+def sign_message(seed: bytes, message: bytes) -> tuple[str, str]:
+    """Sign a message. Returns (signed_tx_base64, signature_base58)."""
+    signature = ed25519_sign(seed, message)
+    serialized = compact_u16_encode(1) + signature + message
+    return base64.b64encode(serialized).decode("ascii"), base58_encode(signature)
+
+
+# ---------------------------------------------------------------------------
 # Minimal Solana JSON-RPC client (stdlib; injectable for tests)
 # ---------------------------------------------------------------------------
 class RpcError(Exception):
@@ -291,6 +403,37 @@ class SolanaRpcClient:
         if not result or "value" not in result:
             raise RpcError("bad getBalance result")
         return int(result["value"])
+
+    def get_account_info(self, pubkey: str) -> dict | None:
+        """Account data as {"data": bytes, "lamports": int,
+        "executable": bool, "owner": str}, or None when the account
+        does not exist."""
+        result = self._call("getAccountInfo",
+                            [pubkey, {"encoding": "base64"}])
+        if not result or not result.get("value"):
+            return None
+        value = result["value"]
+        raw = value.get("data") or []
+        if not raw:
+            return None
+        return {"data": base64.b64decode(raw[0]),
+                "lamports": int(value.get("lamports") or 0),
+                "executable": bool(value.get("executable")),
+                "owner": value.get("owner") or ""}
+
+    def get_token_account_balance(self, pubkey: str) -> int:
+        """Token balance in base units (smallest denomination)."""
+        result = self._call("getTokenAccountBalance", [pubkey])
+        if not result or "value" not in result:
+            raise RpcError("bad getTokenAccountBalance result")
+        return int(result["value"]["amount"])
+
+    def get_latest_blockhash(self) -> str:
+        result = self._call("getLatestBlockhash", [])
+        blockhash = (result or {}).get("value", {}).get("blockhash")
+        if not blockhash:
+            raise RpcError("no blockhash")
+        return blockhash
 
     def get_recent_blockhash(self) -> str:
         result = self._call("getRecentBlockhash", [])

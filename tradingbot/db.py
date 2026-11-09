@@ -170,6 +170,18 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
+-- Per-account dedicated signing bot: the bot that signs the
+-- account's real trades. support_id is exactly 8 digits, unique
+-- across accounts, and IMMUTABLE — the only writes to this table
+-- are INSERTs (signup / backfill). No route, form, or code path
+-- anywhere in this app can change it.
+CREATE TABLE IF NOT EXISTS signing_bots (
+    user_id INTEGER PRIMARY KEY,
+    support_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
 -- Project donation wallet: ONE wallet for the whole project, generated
 -- once at first use, encrypted like user wallets. It belongs to the
 -- project — never to any user's personal wallet, and never to James's
@@ -263,6 +275,17 @@ def _backfill_pumpfun_wallets(conn: sqlite3.Connection) -> None:
         "(SELECT 1 FROM wallets WHERE wallets.user_id = users.id)")
 
 
+def _backfill_signing_bots(conn: sqlite3.Connection) -> None:
+    """One-time, idempotent backfill: users created before signing
+    bots existed get one (with a fresh support ID)."""
+    from .signing_bot import ensure_signing_bot
+
+    user_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM users").fetchall()]
+    for user_id in user_ids:
+        ensure_signing_bot(conn, user_id)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, column, ddl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(
@@ -277,5 +300,6 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate(conn)
     _backfill_pumpfun_wallets(conn)
+    _backfill_signing_bots(conn)
     conn.commit()
     return conn

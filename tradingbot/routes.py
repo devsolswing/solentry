@@ -8,8 +8,11 @@ Security notes:
   secret, encryption key, or token value. Bot API tokens are shown
   exactly once, on the creation response.
 - Real-money movement only ever happens through the two-step send
-  flow (create intent -> explicit confirm). The bot never sends
-  autonomously in v1.
+  flow (create intent -> explicit confirm). Real TRADES are signed
+  autonomously, but only by the account's dedicated signing bot, only
+  on devnet, only for trades the rules engine allows, and only
+  within the bot's limits (see executor.py). The signing bot never
+  sends to an arbitrary destination.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from . import assistant as assistant_mod
 from . import donations as donations_mod
 from . import passkey as passkey_mod
 from . import pnl as pnl_mod
+from . import signing_bot as signing_bot_mod
 from .config import Config
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
@@ -313,6 +317,9 @@ def register_routes(app: Flask) -> None:
             db.execute(
                 "UPDATE users SET pumpfun_wallet = ? WHERE id = ?",
                 (pubkey, user_id))
+            # Every account gets ONE dedicated signing bot (with its
+            # immutable 8-digit support ID) at signup.
+            signing_bot_mod.ensure_signing_bot(db, user_id)
             db.execute(
                 "INSERT INTO paper_portfolio (user_id, cash_usd) "
                 "VALUES (?, ?)", (user_id, _cfg(app).paper_start_cash))
@@ -375,12 +382,15 @@ def register_routes(app: Flask) -> None:
             "SELECT id, credential_id, transports, created_at "
             "FROM passkey_credentials WHERE user_id = ? ORDER BY id DESC",
             (user["id"],)).fetchall()
+        signing_bot = signing_bot_mod.get_signing_bot(_db(app),
+                                                      user["id"])
         return render_template(
             "settings.html",
             has_recovery=bool(row["recovery_answer_hash"]),
             recovery_question=row["recovery_question"],
             recovery_hint=row["recovery_hint"],
-            passkeys=passkeys)
+            passkeys=passkeys,
+            support_id=signing_bot["support_id"] if signing_bot else "")
 
     @app.route("/settings/recovery-question", methods=["POST"])
     @login_required
@@ -784,11 +794,14 @@ def register_routes(app: Flask) -> None:
             "SELECT kind, detail, created_at FROM activity "
             "WHERE user_id = ? ORDER BY id DESC LIMIT 20",
             (user["id"],)).fetchall()
+        signing_bot = signing_bot_mod.get_signing_bot(_db(app),
+                                                      user["id"])
         return render_template(
             "dashboard.html", wallet=wallet, real_sol=real_sol,
             paper_cash=_paper(app, user["id"]), holdings=holdings,
             holdings_value=holdings_value, prices=prices, bots=bots,
-            activity=activity)
+            activity=activity,
+            support_id=signing_bot["support_id"] if signing_bot else "")
 
     @app.route("/mode", methods=["POST"])
     @login_required

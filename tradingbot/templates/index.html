@@ -2,7 +2,7 @@
 {% block content %}
 <div class="hero">
   <h1>Trade with a bot. Your call.</h1>
-  <p class="sub">A friendly trading app for a small community. Practice with fake money, or trade real SOL — the bot suggests, you approve, nothing moves without you.</p>
+  <p class="sub">A friendly trading app for a small community. Practice with fake money, or trade real SOL on devnet — manual trades need your approval, and silent bots trade on their own only when you switch them on, within your limits.</p>
   {% if not current_user %}
   <p><a class="btn big" href="{{ url_for('signup') }}">Create an account</a>
   <a class="btn ghost big" href="{{ url_for('login') }}">Log in</a></p>
@@ -17,7 +17,7 @@
   </div>
   <div class="card">
     <h2>◎ Real SOL Trading</h2>
-    <p>Your own app wallet, your own bots. The bot proposes trades and <strong>you approve each one</strong> before anything moves. No autonomous real-money trading.</p>
+    <p>Your own app wallet, your own bots. Manual trades need <strong>your approval</strong> before anything moves. Silent bots trade on their own on devnet — only when you switch silent trading on for that bot, only within its rules and limits, and every trade is logged.</p>
     {% if current_user %}<a class="btn" href="{{ url_for('bots') }}">Set up a bot</a>{% endif %}
   </div>
   <div class="card">

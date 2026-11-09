@@ -17,11 +17,14 @@ Guardrails (non-negotiable, from James's own rules):
   5. Real-money silent trading runs on the configured NETWORK
      (default devnet). Nothing mainnet unless NETWORK is mainnet.
 
-Real swaps: the app has NO on-chain swap path in v1 (only plain SOL
-transfers). The default real executor therefore SKIPS every real trade
-with "real swap not available in v1" and logs it — it NEVER fakes a
-fill. A real executor can be injected (tests do this); the wiring for
-it is `real_executor(bot, user_id, coin, side, amount, price, db, cfg)`.
+Real swaps: the dedicated signing bot executes real trades on
+devnet only, through pump.fun bonding-curve buys/sells (see
+executor.py). A real trade is refused plainly — never faked —
+whenever it is unverified: mainnet, a coin that is not a pump.fun
+token mint, a token with no bonding curve on devnet, or a trade
+outside the bot's limits. A real executor can still be injected
+(tests do this); the wiring for it is `real_executor(bot, user_id,
+coin, side, amount, price, db, cfg)`.
 
 How it runs on Railway: the loop is a daemon thread inside the web
 process, started only when SILENT_LOOP_ENABLED=1 (see
@@ -43,6 +46,7 @@ from datetime import datetime, timezone
 
 from .config import Config
 from .db import init_db
+from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
 from .pnl import portfolio_totals, record_snapshot
@@ -70,9 +74,11 @@ def _log(db: sqlite3.Connection, user_id: int, kind: str,
 
 def default_real_executor(bot, user_id: int, coin: str, side: str,
                          amount: float, price: float, db, cfg) -> dict:
-    """v1 real executor: there is no swap path, so every real trade is
-    skipped honestly. Never fakes a fill."""
-    return {"status": "skipped", "reason": REAL_SWAP_UNAVAILABLE}
+    """Real executor: the account's dedicated signing bot executes
+    pump.fun trades on devnet (see executor.py). Anything unverified
+    is skipped honestly — never a fake fill."""
+    return execute_real_trade(bot, user_id, coin, side, amount, price,
+                              db, cfg)
 
 
 def _positions(db: sqlite3.Connection, bot_id: int) -> dict:
@@ -189,7 +195,7 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             actions.append({"action": "skip", "coin": coin,
                             "reason": "holding smaller than position"})
         return
-    # Real mode: the executor decides. v1 has no swap path.
+    # Real mode: the signing bot executes on devnet (executor decides).
     result = real_executor(bot, bot["user_id"], coin, "sell", amount, price,
                            db, cfg)
     if result.get("status") == "executed":
@@ -202,7 +208,8 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         _log(db, bot["user_id"], "silent_sell",
              f"Silent bot '{bot['name']}' sold {amount:.4f} {coin} "
              f"({reason}). Signature: "
-             f"{str(result.get('signature', ''))[:12]}...")
+             f"{str(result.get('signature', ''))[:12]}... "
+             f"Signing bot: {result.get('signing_bot', '')}.")
         actions.append({"action": "sell", "coin": coin, "amount": amount,
                         "reason": reason})
     else:
@@ -288,7 +295,8 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {coin} for "
              f"{amount_sol:.4f} SOL. Signature: "
-             f"{str(result.get('signature', ''))[:12]}...")
+             f"{str(result.get('signature', ''))[:12]}... "
+             f"Signing bot: {result.get('signing_bot', '')}.")
         actions.append({"action": "buy", "coin": coin,
                         "amount_sol": amount_sol})
     else:
