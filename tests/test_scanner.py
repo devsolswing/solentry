@@ -689,15 +689,37 @@ class TestScannerRoutes(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(len(self._bots()), 1)
 
-    def test_bots_page_lists_scanner_section(self):
+    def test_bots_page_has_no_standalone_scanner_card(self):
+        # The scanner lives in Edit Bots under the Memecoin build
+        # category now — its standalone card on the Bots page is
+        # gone, preset route and agent flow unchanged.
         token = csrf(self.client, "/bots")
         self.client.post("/bots/preset/scanner",
                          data={"csrf_token": token}, follow_redirects=False)
+        # First load consumes the creation flash (which names the
+        # scanner); the page itself must not carry the card.
+        self.client.get("/bots")
         resp = self.client.get("/bots")
         html = resp.get_data(as_text=True)
+        self.assertNotIn("Create the Scanner bot", html)
+        self.assertNotIn(SCANNER_DISPLAY, html)
+        # The scanner bot itself still lists with the other bots.
+        self.assertIn("Scanner", html)
+
+    def test_edit_form_offers_scanner_category(self):
+        token = csrf(self.client, "/bots")
+        self.client.post("/bots/preset/scanner",
+                         data={"csrf_token": token}, follow_redirects=False)
+        bot = self._bots()[0]
+        # Consume the creation flash so only the form can put the
+        # scanner name on the edit page.
+        self.client.get("/bots")
+        resp = self.client.get(f"/bots/{bot['id']}/edit")
+        html = resp.get_data(as_text=True)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('value="scanner"', html)
         self.assertIn(SCANNER_DISPLAY, html)
-        self.assertIn("Create the Scanner bot", html)
-        self.assertIn("5% in 3 minutes", html)
+        self.assertIn("Memecoin build", html)
 
     def test_agent_create_scanner_needs_yes(self):
         data = self._ask("create a scanner bot")

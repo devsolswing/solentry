@@ -31,29 +31,6 @@
   {% endif %}
 </div>
 
-<div class="card">
-  <h2>🔍 {{ scanner_display }}</h2>
-  <p class="muted">Sniper bots that scan pump.fun and PumpSwap every 30 seconds for gainers and keep track of improving coins. They follow strict rules you set — and never trade outside them or their limits.</p>
-  <form method="post" action="{{ url_for('bot_preset_scanner') }}" class="inline">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button class="btn" type="submit">+ Create the Scanner bot</button>
-  </form>
-  <p class="muted small">Scanner (paper): buys any coin gaining 5% in 3 minutes (strongest gainer wins, at most one new position per scan), watches the top 10 wallets of every coin it holds, and sells everything if their combined holdings drop 10% — the proceeds stay in SOL. Or ask the assistant: “create the scanner bot”.</p>
-  {% if scanner_bots %}
-  <div class="cards">
-  {% for b in scanner_bots %}
-    <div class="card">
-      <h2><a href="{{ url_for('bot_detail', bot_id=b.id) }}">{{ b.name }}</a> {% if b.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</h2>
-      <p>Mode: <strong>{{ b.mode }}</strong> · Platform: <strong>{{ b.platform or 'pump.fun' }}</strong> · Strategy: <strong>{{ b.strategy }}</strong><br>
-      Buy size: {{ b.buy_size_pct }}% · Stop loss: {{ b.stop_loss_pct }}% · Max open: {{ b.max_open_trades }}</p>
-      <p><a class="btn small" href="{{ url_for('bot_detail', bot_id=b.id) }}">Open</a>
-      <a class="btn ghost small" href="{{ url_for('bot_edit', bot_id=b.id) }}">Edit</a>
-      <a class="btn danger small" href="{{ url_for('bot_delete_confirm', bot_id=b.id) }}">Delete</a></p>
-    </div>
-  {% endfor %}
-  </div>
-  {% endif %}
-</div>
 {% endif %}
 
 {% if bots %}

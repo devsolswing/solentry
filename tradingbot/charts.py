@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import http.client
 import json
+import time
 import urllib.parse
 import urllib.request
 
-from .prices import COINS
+from .prices import COINS, get_prices
 from .trenches import DEXSCREENER_BASE, TOKENS_URL, _best_pair
 
 # Range key -> (label shown on the button, CoinGecko `days` value).
@@ -56,6 +57,101 @@ def _default_get(url: str):
         if partial:
             return json.loads(partial.decode("utf-8"))
         raise
+
+
+# Live coin search (quick Buy/Sell popup): one search per query is
+# cached 30 seconds so typing does not hammer the feeds.
+SEARCH_CACHE_TTL_SECONDS = 30
+_search_cache: dict = {}
+
+
+def search_coins(query: str, http_get=None, prices_fn=None) -> dict:
+    """Live coin search: {"results", "error", "source"}.
+
+    `query` is a name, symbol, or mint fragment the user typed.
+    Known coins (the app's price list) match by name or symbol and
+    carry their live price from the price feed. Anything else comes
+    from DexScreener's free token search (Solana pairs only, best
+    liquidity first, at most 8). A feed that does not answer returns
+    an error and no invented coins — the popup says so instead of
+    guessing. A query shorter than 2 characters returns no results:
+    single letters match nearly everything and are not useful.
+    """
+    q = (query or "").strip()
+    if len(q) < 2:
+        return {"results": [], "error": None, "source": "live"}
+    key = q.lower()
+    now = time.time()
+    cached = _search_cache.get(key)
+    if cached and now - cached["at"] < SEARCH_CACHE_TTL_SECONDS:
+        return {"results": [dict(r) for r in cached["results"]],
+                "error": cached["error"], "source": cached["source"]}
+    results = []
+    error = None
+    source = "live"
+    get_live = prices_fn or get_prices
+    try:
+        data = get_live()
+        source = data.get("source", "live")
+        for symbol, info in COINS.items():
+            if key in info["name"].lower() or key in symbol.lower():
+                entry = (data.get("prices") or {}).get(symbol) or {}
+                results.append({
+                    "coin_id": symbol, "name": info["name"],
+                    "symbol": symbol,
+                    "price_usd": entry.get("price"),
+                    "change_24h": entry.get("change_24h"),
+                    "is_mint": False})
+    except Exception:
+        error = "price feed unavailable right now"
+    seen_symbols = {r["symbol"].upper() for r in results}
+    http_get = http_get or _default_get
+    try:
+        data = http_get(DEXSCREENER_SEARCH_URL.format(
+            urllib.parse.quote(q)))
+        pairs = [p for p in (data.get("pairs") or [])
+                 if p.get("chainId") == "solana"]
+        by_mint: dict = {}
+        for pair in pairs:
+            base = pair.get("baseToken") or {}
+            mint = base.get("address")
+            if not mint:
+                continue
+            price = pair.get("priceUsd")
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+            if price is None:
+                continue
+            liq = (pair.get("liquidity") or {}).get("usd") or 0.0
+            try:
+                liq = float(liq)
+            except (TypeError, ValueError):
+                liq = 0.0
+            prev = by_mint.get(mint)
+            if prev is None or liq > prev[0]:
+                by_mint[mint] = (liq, {
+                    "coin_id": mint,
+                    "name": base.get("name") or base.get("symbol") or mint,
+                    "symbol": (base.get("symbol") or mint[:8]).upper(),
+                    "price_usd": price, "change_24h": None,
+                    "is_mint": True})
+        ranked = sorted(by_mint.values(), key=lambda item: -item[0])
+        for _liq, entry in ranked:
+            if entry["symbol"] in seen_symbols:
+                continue
+            results.append(entry)
+            seen_symbols.add(entry["symbol"])
+            if len(results) >= 8:
+                break
+    except Exception:
+        error = "coin search feed unavailable right now"
+    results = results[:8]
+    _search_cache[key] = {"at": now, "results": [dict(r) for r in results],
+                          "error": error, "source": source}
+    return {"results": [dict(r) for r in results],
+            "error": error, "source": source}
 
 
 def fetch_market_chart(coin_id: str, days, http_get=None) -> dict:

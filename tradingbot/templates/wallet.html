@@ -28,6 +28,9 @@
         <span class="coin-pnl">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
       </a>
       {% endfor %}
+      {% if not coin_rows %}
+      <p class="muted">You hold no coins in {{ mode_label }} yet — buy one from the Coins page.</p>
+      {% endif %}
     </div>
   </div>
   <p class="muted small">Tap a coin for its chart, 24h high/low, buyers &amp; sellers, and Buy / Sell / Sell all in SOL. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>

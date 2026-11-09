@@ -2,7 +2,7 @@
 {% block title %}{{ coin.name }} — SolEntry{% endblock %}
 {% block content %}
 <div class="one-screen">
-  <p><a class="btn ghost small" href="{{ url_for('wallet') }}">← Wallet</a> <a class="btn ghost small" href="{{ url_for('dashboard') }}">Coins</a></p>
+  <p><a class="btn ghost small" href="{{ url_for('wallet') }}">← Wallet</a> <a class="btn ghost small" href="{{ url_for('dashboard') }}">Coins</a> <a class="btn small" href="{{ url_for('coin_detail', coin_id=coin.coin_id, range=range_key) }}">↻ Refresh</a></p>
   <h1>{{ coin.name }} <span class="muted">({{ coin.ticker }})</span></h1>
   <p class="muted small">{{ mode_label }}</p>
   <p class="big-num">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>

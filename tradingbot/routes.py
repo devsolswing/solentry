@@ -43,12 +43,12 @@ from . import pnl as pnl_mod
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
 from .charts import (CHART_RANGES, fetch_market_chart, fetch_trade_flow,
-                     high_low_24h, to_pnl_points)
+                     high_low_24h, search_coins, to_pnl_points)
 from .config import Config
 from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
-from .prices import COINS, get_prices
+from .prices import COINS, clear_price_cache, get_prices
 from .rules import (RUG_SELL_DEFAULT, SCANNER_CATEGORY, SCANNER_DISPLAY,
                     SCANNER_PRESET_NAME, TRENCHES_CATEGORY,
                     TRENCHES_PRESET_NAME, load_rules, scanner_ruleset,
@@ -436,12 +436,13 @@ def _real_avg_price(app, mint: str, amount_sol: float,
 
 
 def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
-    """The coins list: every coin in the price list with its name,
-    ticker, current price and P&L in the ACTIVE mode, plus any extra
-    coins the user holds that are not in the price list (trenches
-    mints). P&L is (current price − average cost) × amount; a coin
-    with no holding has P&L None, and a holding with no current
-    price has P&L None and is valued at cost — never guessed."""
+    """The coins list: ONLY the coins the user holds in the ACTIVE
+    mode, with name, ticker, current price and P&L. Coins the user
+    does not hold are not listed here at all — the trenches list and
+    the quick Buy/Sell popup (with live search) are how new coins
+    are found. P&L is (current price − average cost) × amount; a
+    holding with no current price has P&L None and is valued at
+    cost — never guessed."""
     price_map = {c: e.get("price") for c, e in prices["prices"].items()}
     if mode == "devnet":
         held = {h["coin_id"]: h for h in _real_holdings_view(db, user_id)}
@@ -459,17 +460,19 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
             pass
     rows = []
     for symbol, info in COINS.items():
-        price = price_map.get(symbol)
         h = held.get(symbol)
+        if h is None:
+            continue
+        price = price_map.get(symbol)
         pnl = None
-        if h is not None and price is not None:
+        if price is not None:
             pnl = (float(price) - float(h["avg_price"])) * float(h["amount"])
         rows.append({"coin_id": symbol, "name": info["name"],
                      "ticker": symbol, "price": price,
                      "change_24h": prices["prices"].get(symbol, {}).get(
                          "change_24h"),
-                     "held": float(h["amount"]) if h else 0.0,
-                     "avg_price": float(h["avg_price"]) if h else None,
+                     "held": float(h["amount"]),
+                     "avg_price": float(h["avg_price"]),
                      "pnl": pnl, "is_mint": False})
     for mint in sorted(held):
         if mint in COINS:
@@ -1338,6 +1341,65 @@ def register_routes(app: Flask) -> None:
         return render_template("dashboard.html",
                                **_dashboard_data(app, user))
 
+    @app.route("/dashboard/refresh", methods=["POST"])
+    @login_required
+    def dashboard_refresh():
+        """Refresh every chart with live data: drop the cached price
+        list, the cached on-chain balance and the cached trenches
+        list, record a fresh portfolio snapshot (so the portfolio
+        chart gains a live point), and send the user back to the
+        coins page. The page then re-renders from live feeds. A feed
+        that does not answer still falls back to the labelled
+        snapshot — refreshed, never invented."""
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        clear_price_cache()
+        _REAL_BALANCE_CACHE["at"].clear()
+        _REAL_BALANCE_CACHE["value"].clear()
+        _TRENCHES_CACHE.update({"at": 0.0, "rows": None, "error": None})
+        prices = get_prices()
+        _record_pnl_snapshot(
+            app, user["id"],
+            {c: e.get("price", 0.0) for c, e in prices["prices"].items()})
+        _log(app, user["id"], "refresh",
+             "Refreshed the coins page with live data.",
+             _active_mode(db, user["id"]))
+        flash("Refreshed with live data.")
+        return redirect(url_for("dashboard"))
+
+    @app.route("/api/coins/search")
+    @login_required
+    def coin_search():
+        """Live coin search for the quick Buy/Sell popup: type a name
+        and get matching coins with live prices. Known coins come
+        from the price feed; anything else comes from DexScreener's
+        token search. A feed that does not answer returns an error
+        and no invented coins. Each result also carries how much of
+        that coin the user holds in the active mode, so the popup
+        can offer Sell all when there is something to sell."""
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        q = (request.args.get("q") or "").strip()
+        found = search_coins(q, prices_fn=get_prices)
+        if mode == "devnet":
+            held_rows = db.execute(
+                "SELECT coin_id, amount FROM real_holdings "
+                "WHERE user_id = ?", (user["id"],)).fetchall()
+        else:
+            held_rows = db.execute(
+                "SELECT coin_id, amount FROM paper_holdings "
+                "WHERE user_id = ?", (user["id"],)).fetchall()
+        held = {h["coin_id"]: float(h["amount"]) for h in held_rows}
+        results = []
+        for result in found["results"]:
+            entry = dict(result)
+            entry["held"] = held.get(entry["coin_id"], 0.0)
+            results.append(entry)
+        return jsonify({"results": results, "error": found["error"],
+                        "source": found["source"]})
+
     @app.route("/choose-mode", methods=["POST"])
     @login_required
     def choose_mode():
@@ -1550,6 +1612,29 @@ def register_routes(app: Flask) -> None:
                         ["SOL price unavailable right now."],
                         False, coin_id_resolved, label)
                 usd = amount_sol * sol_price
+            elif (request.form.get("amount_tokens") or "").strip():
+                # Quick Buy/Sell popup: buy a token amount. Convert
+                # at the server's own live price — the price the
+                # popup showed is never trusted for the trade.
+                try:
+                    tokens = float(request.form.get("amount_tokens"))
+                except ValueError:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["Amount must be a number."], False,
+                        coin_id_resolved, label)
+                if tokens <= 0:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["Amount must be more than 0."], False,
+                        coin_id_resolved, label)
+                if price is None or price <= 0:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["Price unavailable right now — the buy needs "
+                         "a current price to convert tokens."],
+                        False, coin_id_resolved, label)
+                usd = tokens * price
             else:
                 try:
                     usd = float(request.form.get("usd") or 0)
@@ -1573,9 +1658,38 @@ def register_routes(app: Flask) -> None:
                 lines, result["ok"], coin_id_resolved, label)
         # Real mode: the EXISTING pump.fun executor, with the same
         # guards as the silent loop. Anything it refuses is shown
-        # plainly with no fill — never faked.
+        # plainly with no fill — never faked. Amounts arrive as SOL
+        # (detail page / popup ticket), as a token amount, or as $
+        # (quick Buy/Sell popup) — all convert at the server's own
+        # live prices, never at a price the browser sent.
+        amount_sol_raw = (request.form.get("amount_sol") or "").strip()
+        amount_tokens_raw = (request.form.get("amount_tokens")
+                             or "").strip()
+        amount_usd_raw = (request.form.get("amount_usd") or "").strip()
         try:
-            amount_sol = float(request.form.get("amount_sol") or 0)
+            if amount_sol_raw:
+                amount_sol = float(amount_sol_raw)
+            elif amount_tokens_raw:
+                tokens = float(amount_tokens_raw)
+                sol_price = _sol_price_usd()
+                if price is None or price <= 0 or sol_price is None:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["Price unavailable right now — the buy needs "
+                         "current prices to convert tokens."],
+                        False, coin_id_resolved, label)
+                amount_sol = tokens * price / sol_price
+            elif amount_usd_raw:
+                amount_usd = float(amount_usd_raw)
+                sol_price = _sol_price_usd()
+                if sol_price is None:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["SOL price unavailable right now."],
+                        False, coin_id_resolved, label)
+                amount_sol = amount_usd / sol_price
+            else:
+                amount_sol = 0.0
         except ValueError:
             return _coin_result(
                 "Nothing was bought", ["Amount must be a number."],
@@ -1693,6 +1807,26 @@ def register_routes(app: Flask) -> None:
                      "current price to convert SOL."],
                     False, coin_id_resolved, label)
             amount = amount_sol * sol_price / price
+        elif (request.form.get("amount_usd") or "").strip():
+            # Quick Buy/Sell popup: sell a $ amount. Convert at the
+            # server's own live price — never at a browser-sent price.
+            try:
+                amount_usd = float(request.form.get("amount_usd"))
+            except ValueError:
+                return _coin_result(
+                    "Nothing was sold", ["Amount must be a number."],
+                    False, coin_id_resolved, label)
+            if amount_usd <= 0:
+                return _coin_result(
+                    "Nothing was sold", ["Amount must be more than 0."],
+                    False, coin_id_resolved, label)
+            if price is None or price <= 0:
+                return _coin_result(
+                    "Nothing was sold",
+                    ["Price unavailable right now — the sell needs a "
+                     "current price to convert $."],
+                    False, coin_id_resolved, label)
+            amount = amount_usd / price
         else:
             try:
                 amount = float(request.form.get("amount") or 0)
@@ -2241,12 +2375,8 @@ def register_routes(app: Flask) -> None:
             ).fetchall()
         memecoin_bots = [b for b in bots
                          if b["category"] == TRENCHES_CATEGORY]
-        scanner_bots = [b for b in bots
-                        if b["category"] == SCANNER_CATEGORY]
         return render_template("bots.html", bots=bots,
                                memecoin_bots=memecoin_bots,
-                               scanner_bots=scanner_bots,
-                               scanner_display=SCANNER_DISPLAY,
                                mode=mode, mode_label=_mode_label(mode))
 
     @app.route("/bots/create", methods=["GET", "POST"])
@@ -2295,17 +2425,34 @@ def register_routes(app: Flask) -> None:
             max_open = min(max(max_open, 1), 5)
             token = new_token()
             db = _db(app)
+            # Picking ∆scanner∆ in the form gives the bot the scanner
+            # sniper rules (one per user, like the preset route). Any
+            # other category is a label only — its rules come from the
+            # assistant or the preset, as before.
+            rules_json = ""
+            if category == SCANNER_CATEGORY:
+                existing_scanner = db.execute(
+                    "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+                    "AND rules_json LIKE ?",
+                    (user["id"], SCANNER_CATEGORY,
+                     '%"kind": "scanner"%')).fetchone()
+                if existing_scanner:
+                    flash("You already have a Scanner bot.")
+                    return redirect(url_for(
+                        "bot_detail", bot_id=existing_scanner["id"]))
+                rules_json = json.dumps(scanner_ruleset())
             # Silent is NEVER on at creation — the user enables it
             # afterwards through the confirm flow. Any silent value in
             # the form is ignored on purpose.
             cur = db.execute(
                 "INSERT INTO bots (user_id, name, strategy, coins, "
                 "buy_size_pct, stop_loss_pct, mode, silent, "
-                "max_open_trades, api_token_hash, category, platform) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+                "max_open_trades, api_token_hash, category, platform, "
+                "rules_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
                 (user["id"], name, strategy, json.dumps(coins),
                  buy_size, stop_loss, mode, max_open, hash_token(token),
-                 category, platform))
+                 category, platform, rules_json))
             db.commit()
             _log(app, user["id"], "bot_create",
                  f"Created bot '{name}' ({strategy}, {mode}, "
@@ -2445,6 +2592,26 @@ def register_routes(app: Flask) -> None:
                 (request.form.get("category")
                  if request.form.get("category") is not None
                  else bot["category"] or "").strip())
+            # Picking ∆scanner∆ gives the bot the scanner sniper
+            # rules — unless it already follows scanner rules
+            # (possibly customised through the assistant), which are
+            # left alone. One scanner bot per user: if another one
+            # already exists, go to it instead of making a second.
+            rules_json = bot["rules_json"]
+            if category == SCANNER_CATEGORY:
+                current_rules, _rules_err = load_rules(bot)
+                if (current_rules is None
+                        or current_rules.get("kind") != "scanner"):
+                    other_scanner = db.execute(
+                        "SELECT id FROM bots WHERE user_id = ? AND id != ? "
+                        "AND category = ? AND rules_json LIKE ?",
+                        (user["id"], bot_id, SCANNER_CATEGORY,
+                         '%"kind": "scanner"%')).fetchone()
+                    if other_scanner:
+                        flash("You already have a Scanner bot.")
+                        return redirect(url_for(
+                            "bot_detail", bot_id=other_scanner["id"]))
+                    rules_json = json.dumps(scanner_ruleset())
             coins = [c.strip().upper() for c in
                      (request.form.get("coins") or "").split(",")]
             coins = [c for c in coins if c in COINS] or json.loads(bot["coins"])
@@ -2472,12 +2639,12 @@ def register_routes(app: Flask) -> None:
                 "UPDATE bots SET name = ?, strategy = ?, coins = ?, "
                 "buy_size_pct = ?, stop_loss_pct = ?, mode = ?, "
                 "max_open_trades = ?, category = ?, platform = ?, "
-                "updated_at = ? "
+                "rules_json = ?, updated_at = ? "
                 "WHERE id = ? AND user_id = ?",
                 (name, strategy, json.dumps(coins), min(max(buy_size, 1), 100),
                  min(max(stop_loss, 1), 50), mode,
-                 min(max(max_open, 1), 5), category, platform, _now(),
-                 bot_id, user["id"]))
+                 min(max(max_open, 1), 5), category, platform, rules_json,
+                 _now(), bot_id, user["id"]))
             db.commit()
             _log(app, user["id"], "bot_edit", f"Edited bot '{name}'.", mode)
             # Silent is changed only through the confirm flow, never by

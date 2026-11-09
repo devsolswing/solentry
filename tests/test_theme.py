@@ -102,6 +102,12 @@ class TestOneTheme(ThemeBase):
 class TestChange24h(ThemeBase):
     def test_coins_list_shows_24h_change_alongside_pnl(self):
         self._set_prices({"SOL": 5.25, "BTC": -2.5})
+        # The coins list shows held coins only — hold both coins
+        # first so their rows (and 24h changes) render.
+        for coin in ("SOL", "BTC"):
+            self.client.post(f"/coins/{coin}/buy", data={
+                "csrf_token": csrf(self.client, f"/coins/{coin}"),
+                "usd": "100", "bot_id": ""})
         html = self._html("/dashboard")
         self.assertIn("coin-change", html)
         self.assertIn("+5.2%", html)
@@ -123,6 +129,11 @@ class TestChange24h(ThemeBase):
         self.prices_patch.start()
         self.addCleanup(self.price_patch.stop)
         self.addCleanup(self.prices_patch.stop)
+        # The coins list shows held coins only — hold one first so
+        # its row (with no change data) renders at all.
+        self.client.post("/coins/SOL/buy", data={
+            "csrf_token": csrf(self.client, "/coins/SOL"),
+            "usd": "100", "bot_id": ""})
         html = self._html("/dashboard")
         self.assertIn(
             'class="coin-change"><span class="muted">—</span>', html)

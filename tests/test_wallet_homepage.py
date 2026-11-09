@@ -20,7 +20,6 @@ Rules under test:
 No SOL moves in these tests; real execution is a recording mock.
 """
 
-import re
 import tempfile
 import unittest
 from unittest import mock
@@ -28,7 +27,7 @@ from unittest import mock
 import tradingbot.prices as prices
 import tradingbot.routes as routes
 from helpers import csrf, login, make_client, signup
-from tradingbot.solana import generate_keypair, sol_to_lamports
+from tradingbot.solana import generate_keypair
 
 DEST = "11111111111111111111111111111111"
 
@@ -452,6 +451,11 @@ class TestOneScreen(HomeBase):
             self.assertIn(token, css, f"red/yellow {token} missing")
 
     def test_coin_rows_link_to_detail_not_popup(self):
+        # The coins list shows held coins only — hold both first.
+        self._buy_sol()
+        self.client.post("/coins/BTC/buy", data={
+            "csrf_token": csrf(self.client, "/coins/BTC"),
+            "usd": "74", "bot_id": ""})
         html = self._html("/dashboard")
         self.assertIn("/coins/SOL/detail", html)
         self.assertIn("/coins/BTC/detail", html)

@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Coins — SolEntry{% endblock %}
 {% block content %}
+<form method="post" action="{{ url_for('dashboard_refresh') }}" class="refresh-row">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button class="btn small" type="submit">↻ Refresh live data</button>
+  <span class="muted small">Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</span>
+</form>
 <div class="card portfolio-head">
   <p class="portfolio-mode"><strong>{{ mode_label }}</strong></p>
   <p class="portfolio-total">{% if mode == 'paper' %}${{ "%.2f"|format(portfolio_usd) }}{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "%.2f"|format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable{% endif %}{% endif %}</p>
@@ -21,8 +26,13 @@
     <span class="coin-pnl">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
   </a>
   {% endfor %}
+  {% if not coin_rows %}
+  <p class="muted">You hold no coins in {{ mode_label }} yet — buy one below.</p>
+  {% endif %}
 </div>
 <p class="muted small">Tap a coin for its chart, 24h high/low, buyers &amp; sellers, and Buy / Sell / Sell all in SOL. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>
+
+<p><button class="btn small" type="button" id="quick-trade-open">Buy or Sell Coin</button></p>
 
 <h2 class="section-title">🔥 Trenches</h2>
 <div class="coin-list trenches-list">
@@ -55,6 +65,80 @@
   {% if activity %}
   <ul>{% for a in activity %}<li><span class="muted small">{{ a.created_at }}</span> — <strong>{{ a.kind }}</strong>: {{ a.detail }}</li>{% endfor %}</ul>
   {% else %}<p class="muted">Nothing yet in {{ mode_label }}.</p>{% endif %}
+</div>
+
+{# Quick Buy/Sell popup: full screen. Type a coin name and live
+   results appear as you type; pick one, enter an amount in $ or
+   tokens at the live price, and buy or sell through the same
+   coin endpoints as the popup and detail page. #}
+<div class="overlay overlay-fullscreen hidden" id="quick-trade-overlay" role="dialog" aria-label="Buy or sell a coin">
+  <div class="coin-popup quick-trade-popup">
+    <p class="popup-head"><button class="popup-close" type="button" id="quick-trade-close" aria-label="Close">✕</button></p>
+    <h2>Buy or Sell Coin</h2>
+    <p class="muted small">Type a coin name — live results appear as you type. Amounts in $ or tokens, at the live price.</p>
+    <label>Coin<input id="quick-trade-search" type="text" placeholder="Type a coin name…" autocomplete="off"></label>
+    <div id="quick-trade-results" class="search-results"></div>
+    <div id="quick-trade-selected" class="hidden">
+      <p><strong id="quick-trade-name">—</strong> <span class="muted small" id="quick-trade-symbol"></span></p>
+      <p class="big-num" id="quick-trade-price">—</p>
+      <p class="muted small" id="quick-trade-source"></p>
+      <p id="quick-trade-held"></p>
+      <div class="amount-kind" role="group" aria-label="Amount in dollars or tokens">
+        <label><input type="radio" name="quick-amount-kind" value="usd" checked> $</label>
+        <label><input type="radio" name="quick-amount-kind" value="tokens"> tokens</label>
+      </div>
+      <p class="muted small" id="quick-trade-equiv"></p>
+      <h3>Buy</h3>
+      <form id="quick-trade-buy-form" method="post" action="{{ url_for('coin_buy', coin_id='SOL') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Amount <input id="quick-trade-buy-amount" type="number" name="usd" step="any" min="0" placeholder="0" required></label>
+        {% if mode == 'paper' %}
+        <label>Bot to look after this coin (optional)
+          <select name="bot_id">
+            <option value="">No bot — just buy it</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
+          </select>
+        </label>
+        {% else %}
+        <label>Real bot to manage this buy (required — its buy-size limit is the cap)
+          <select name="bot_id" required>
+            <option value="">Choose a real bot…</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button class="btn big" type="submit" id="quick-trade-buy-btn" disabled>Buy</button>
+      </form>
+      <h3>Sell</h3>
+      <form id="quick-trade-sell-form" method="post" action="{{ url_for('coin_sell', coin_id='SOL') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Amount <input id="quick-trade-sell-amount" type="number" name="amount_usd" step="any" min="0" placeholder="0" required></label>
+        {% if mode != 'paper' %}
+        <label>Real bot to manage this sell (required)
+          <select name="bot_id" required>
+            <option value="">Choose a real bot…</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button class="btn big" type="submit" id="quick-trade-sell-btn" disabled>Sell</button>
+      </form>
+      <form id="quick-trade-sellall-form" method="post" action="{{ url_for('coin_sell', coin_id='SOL') }}" class="hidden">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="sell_all" value="1">
+        {% if mode != 'paper' %}
+        <label>Real bot to manage this sell (required)
+          <select name="bot_id" required>
+            <option value="">Choose a real bot…</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button class="btn big" type="submit">Sell all</button>
+      </form>
+    </div>
+    <p><button class="btn ghost big" type="button" id="quick-trade-back">← Back to coins</button></p>
+  </div>
 </div>
 
 {% if popup_coin %}
@@ -119,5 +203,103 @@ document.getElementById('chat-form').addEventListener('submit', async (e) => {
   log.innerHTML += '<p><strong>Assistant:</strong> ' + reply + '</p>';
   log.scrollTop = log.scrollHeight;
 });
+
+// Quick Buy/Sell popup: live coin search as you type, $/tokens
+// amount at the live price, same buy/sell endpoints as the popup.
+const qtOverlay = document.getElementById('quick-trade-overlay');
+const qtOpen = document.getElementById('quick-trade-open');
+const qtSearch = document.getElementById('quick-trade-search');
+const qtResults = document.getElementById('quick-trade-results');
+const qtSelected = document.getElementById('quick-trade-selected');
+const qtBuyForm = document.getElementById('quick-trade-buy-form');
+const qtSellForm = document.getElementById('quick-trade-sell-form');
+const qtSellAllForm = document.getElementById('quick-trade-sellall-form');
+const qtBuyAmount = document.getElementById('quick-trade-buy-amount');
+const qtSellAmount = document.getElementById('quick-trade-sell-amount');
+let qtCoin = null;
+let qtTimer = null;
+function qtClose() { if (qtOverlay) qtOverlay.classList.add('hidden'); }
+function qtAmountKind() {
+  const kind = (document.querySelector('input[name="quick-amount-kind"]:checked') || {}).value || 'usd';
+  qtBuyAmount.name = kind === 'tokens' ? 'amount_tokens' : 'usd';
+  qtSellAmount.name = kind === 'tokens' ? 'amount' : 'amount_usd';
+  qtEquiv();
+}
+function qtEquiv() {
+  const el = document.getElementById('quick-trade-equiv');
+  if (!qtCoin || qtCoin.price_usd == null) { el.textContent = ''; return; }
+  const kind = (document.querySelector('input[name="quick-amount-kind"]:checked') || {}).value || 'usd';
+  const buyVal = parseFloat(qtBuyAmount.value);
+  const sellVal = parseFloat(qtSellAmount.value);
+  const val = !isNaN(buyVal) && buyVal > 0 ? buyVal : (!isNaN(sellVal) && sellVal > 0 ? sellVal : null);
+  if (val == null) {
+    el.textContent = 'Live price: $' + qtCoin.price_usd + ' per ' + qtCoin.symbol + '.';
+    return;
+  }
+  if (kind === 'usd') {
+    el.textContent = '$' + val + ' ≈ ' + (val / qtCoin.price_usd).toFixed(4) + ' ' + qtCoin.symbol + ' at the live price.';
+  } else {
+    el.textContent = val + ' ' + qtCoin.symbol + ' ≈ $' + (val * qtCoin.price_usd).toFixed(2) + ' at the live price.';
+  }
+}
+function qtSelect(r) {
+  qtCoin = r;
+  document.getElementById('quick-trade-name').textContent = r.name;
+  document.getElementById('quick-trade-symbol').textContent = '(' + r.symbol + ')';
+  document.getElementById('quick-trade-price').textContent = r.price_usd != null ? '$' + r.price_usd : 'Price unavailable';
+  document.getElementById('quick-trade-source').textContent = r.price_usd != null ? 'Live price.' : 'No live price right now — the trade will be refused rather than guessed.';
+  document.getElementById('quick-trade-held').textContent = (r.held > 0)
+    ? 'You hold ' + r.held + ' ' + r.symbol + ' in {{ mode_label }}.'
+    : 'You hold none of this coin in {{ mode_label }}.';
+  qtBuyForm.action = '/coins/' + encodeURIComponent(r.coin_id) + '/buy';
+  qtSellForm.action = '/coins/' + encodeURIComponent(r.coin_id) + '/sell';
+  qtSellAllForm.action = '/coins/' + encodeURIComponent(r.coin_id) + '/sell';
+  const canTrade = r.price_usd != null;
+  document.getElementById('quick-trade-buy-btn').disabled = !canTrade;
+  document.getElementById('quick-trade-sell-btn').disabled = !canTrade;
+  qtSellAllForm.classList.toggle('hidden', !(r.held > 0));
+  qtSelected.classList.remove('hidden');
+  qtResults.innerHTML = '';
+  qtAmountKind();
+}
+if (qtOpen && qtOverlay) {
+  qtOpen.addEventListener('click', () => { qtOverlay.classList.remove('hidden'); qtSearch.focus(); });
+  document.getElementById('quick-trade-close').addEventListener('click', qtClose);
+  document.getElementById('quick-trade-back').addEventListener('click', qtClose);
+  qtOverlay.addEventListener('click', (e) => { if (e.target === qtOverlay) qtClose(); });
+  qtSearch.addEventListener('input', () => {
+    clearTimeout(qtTimer);
+    const q = qtSearch.value.trim();
+    if (q.length < 2) { qtResults.innerHTML = ''; return; }
+    qtTimer = setTimeout(async () => {
+      let data;
+      try {
+        const res = await fetch('{{ url_for('coin_search') }}?q=' + encodeURIComponent(q));
+        data = await res.json();
+      } catch (e) {
+        qtResults.innerHTML = '<p class="muted">Search unavailable right now.</p>';
+        return;
+      }
+      if (!data.results || !data.results.length) {
+        qtResults.innerHTML = '<p class="muted">' + (data.error ? String(data.error).replace(/</g, '&lt;') : 'No coins found — try another name.') + '</p>';
+        return;
+      }
+      qtResults.innerHTML = '';
+      data.results.forEach((r) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'search-result';
+        b.textContent = r.name + ' (' + r.symbol + ')' + (r.price_usd != null ? ' — $' + r.price_usd : ' — price unavailable');
+        b.addEventListener('click', () => qtSelect(r));
+        qtResults.appendChild(b);
+      });
+    }, 300);
+  });
+  document.querySelectorAll('input[name="quick-amount-kind"]').forEach((radio) => {
+    radio.addEventListener('change', qtAmountKind);
+  });
+  qtBuyAmount.addEventListener('input', qtEquiv);
+  qtSellAmount.addEventListener('input', qtEquiv);
+}
 </script>
 {% endblock %}

@@ -127,6 +127,18 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .popup-actions h3 { margin: 18px 0 6px; }
 .popup-actions label { margin: 8px 0; }
 
+/* Quick Buy/Sell popup: full screen, hidden until opened. The
+   refresh row sits at the top of the coins page. */
+.hidden { display: none; }
+.overlay.hidden { display: none; }
+.overlay-fullscreen { align-items: stretch; }
+.overlay-fullscreen .coin-popup { max-width: none; width: 100%; max-height: none; height: 100dvh; border: none; border-radius: 0; }
+.refresh-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.search-results { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.search-result { text-align: left; background: #1a0805; border: 1px solid #ffb300; border-radius: 10px; color: #e8ecf1; padding: 10px; font-weight: 700; cursor: pointer; }
+.amount-kind { display: flex; gap: 16px; margin: 8px 0; }
+.amount-kind label { display: inline-flex; align-items: center; gap: 6px; }
+
 /* Trade ticket: one Buy/Sell switch over the coin popup's buy and
    sell forms. CSS-only radio switch — no JavaScript, so it works
    in any in-app browser. Same forms, same endpoints as before. */

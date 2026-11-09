@@ -62,6 +62,16 @@ def _fetch_live() -> dict | None:
     return out
 
 
+def clear_price_cache() -> None:
+    """Drop the cached price list so the next get_prices() call
+    re-fetches live. Used by the dashboard Refresh button — the
+    user asked for live numbers on demand, not up-to-60-second-old
+    ones. A feed that does not answer still falls back to the
+    labelled snapshot, as always."""
+    _cache["at"] = 0.0
+    _cache["data"] = None
+
+
 def get_prices() -> dict:
     """Return {coin: {price, change_24h}, source, as_of}.
 

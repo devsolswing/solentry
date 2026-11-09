@@ -8,7 +8,6 @@ support ID.
 """
 
 import os
-import re
 import tempfile
 import unittest
 
