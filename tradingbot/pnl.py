@@ -131,9 +131,39 @@ def chart_points(db: sqlite3.Connection, user_id: int,
     return points, len(points) > 0
 
 
-def chart_svg(points: list, width: int = 640, height: int = 200) -> str:
+def chart_points_real(db: sqlite3.Connection, user_id: int,
+                      range_key: str) -> tuple[list, bool]:
+    """Snapshot points for the REAL mode chart: the recorded on-chain
+    wallet SOL balance over time. Points are ONLY rows actually
+    recorded with a real_sol value — an empty range returns ([], False)
+    and the page says "no data yet". The values are SOL, not USD."""
+    _label, seconds = RANGES.get(range_key, RANGES["all"])
+    if seconds is None:
+        rows = db.execute(
+            "SELECT created_at, real_sol FROM portfolio_snapshots "
+            "WHERE user_id = ? AND real_sol IS NOT NULL "
+            "ORDER BY created_at ASC, id ASC",
+            (user_id,)).fetchall()
+    else:
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(seconds=seconds)).strftime(_FMT)
+        rows = db.execute(
+            "SELECT created_at, real_sol FROM portfolio_snapshots "
+            "WHERE user_id = ? AND real_sol IS NOT NULL "
+            "AND created_at >= ? ORDER BY created_at ASC, id ASC",
+            (user_id, cutoff)).fetchall()
+    points = [{"created_at": r["created_at"],
+               "total_value_usd": float(r["real_sol"])}
+              for r in rows]
+    return points, len(points) > 0
+
+
+def chart_svg(points: list, width: int = 640, height: int = 200,
+              unit: str = "$") -> str:
     """A plain SVG line chart from recorded points. Empty string when
-    there are fewer than two points (the page says so instead)."""
+    there are fewer than two points (the page says so instead).
+    `unit` is the axis label prefix ("$" for USD, "SOL " for the
+    real-mode wallet chart)."""
     if len(points) < 2:
         return ""
     times = [_parse_ts(p["created_at"]) for p in points]
@@ -167,7 +197,7 @@ def chart_svg(points: list, width: int = 640, height: int = 200) -> str:
         f'<circle cx="{last.split(",")[0]}" cy="{last.split(",")[1]}" '
         f'r="3" fill="#22c55e"/>'
         f'<text x="{pad_x}" y="{pad_y - 2}" fill="#aaa" font-size="11">'
-        f'${v1:,.2f}</text>'
+        f'{unit}{v1:,.2f}</text>'
         f'<text x="{pad_x}" y="{height - 2}" fill="#aaa" font-size="11">'
-        f'${v0:,.2f}</text>'
+        f'{unit}{v0:,.2f}</text>'
         f'</svg>')

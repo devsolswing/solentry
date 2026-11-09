@@ -1,29 +1,30 @@
 {% extends "base.html" %}
-{% block title %}P&amp;L — Trading Bot{% endblock %}
+{% block title %}P&amp;L — SolEntry{% endblock %}
 {% block content %}
 <h1>📈 P&amp;L</h1>
+<p class="mode-banner"><strong>{{ mode_label }}</strong> — only {{ mode_label }} data is shown here.</p>
 
-<div class="cards">
-  <div class="card">
-    <h2>Balance — paper portfolio</h2>
-    <p class="big-num">${{ "%.2f"|format(totals.total_value_usd) }}</p>
-    <p class="muted">Cash: ${{ "%.2f"|format(totals.cash_usd) }} · Holdings: ${{ "%.2f"|format(totals.holdings_value_usd) }}</p>
-    <p>P&amp;L vs ${{ "%.2f"|format(start_cash) }} starting paper cash:
-      <strong>{% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}</strong></p>
-    <p class="muted small">Paper trading is fake money. Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
-  </div>
-
-  <div class="card">
-    <h2>◎ Real app wallet (on-chain)</h2>
-    {% if real_sol is not none %}
-    <p class="big-num">{{ "%.4f"|format(real_sol) }} SOL{% if real_sol_usd is not none %} <span class="muted">≈ ${{ "%.2f"|format(real_sol_usd) }}</span>{% endif %}</p>
-    {% else %}
-    <p class="big-num">Balance unavailable</p>
-    <p class="muted small">The RPC did not answer just now — this is shown as unavailable, never guessed.</p>
-    {% endif %}
-    <p class="muted small">Network: {{ network }} · This is your real on-chain balance, separate from the paper portfolio above. The chart tracks the paper portfolio only.</p>
-  </div>
+{% if mode == 'paper' %}
+<div class="card">
+  <h2>Balance — paper portfolio</h2>
+  <p class="big-num">${{ "%.2f"|format(totals.total_value_usd) }}</p>
+  <p class="muted">Cash: ${{ "%.2f"|format(totals.cash_usd) }} · Holdings: ${{ "%.2f"|format(totals.holdings_value_usd) }}</p>
+  <p>P&amp;L vs ${{ "%.2f"|format(start_cash) }} starting paper cash:
+    <strong>{% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}</strong></p>
+  <p class="muted small">Paper trading is fake money. Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
 </div>
+{% else %}
+<div class="card">
+  <h2>◎ Real app wallet (on-chain, devnet)</h2>
+  {% if real_sol is not none %}
+  <p class="big-num">{{ "%.4f"|format(real_sol) }} SOL{% if real_sol_usd is not none %} <span class="muted">≈ ${{ "%.2f"|format(real_sol_usd) }}</span>{% endif %}</p>
+  {% else %}
+  <p class="big-num">Balance unavailable</p>
+  <p class="muted small">The RPC did not answer just now — this is shown as unavailable, never guessed.</p>
+  {% endif %}
+  <p class="muted small">Network: {{ network }} · Real holdings below are worth ${{ "%.2f"|format(totals.holdings_value_usd) }} at current prices. Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
+</div>
+{% endif %}
 
 <div class="card">
   <h2>Current coins</h2>
@@ -38,21 +39,21 @@
     {% endfor %}
   </table>
   <p class="muted small">Coins with no current price are valued at their average cost and their P&amp;L is shown as —, never guessed.</p>
-  {% else %}<p class="muted">No coins held yet.</p>{% endif %}
+  {% else %}<p class="muted">No coins held yet in {{ mode_label }}.</p>{% endif %}
 </div>
 
 <div class="card">
-  <h2>P&amp;L chart — portfolio value over time</h2>
+  <h2>{% if mode == 'paper' %}P&amp;L chart — portfolio value over time{% else %}Wallet chart — SOL balance over time{% endif %}</h2>
   <p>
     {% for key, label in ranges.items() %}
     <a class="btn{% if key == range_key %} {% else %} ghost{% endif %}" href="{{ url_for('pnl', range=key) }}">{{ label[0] }}</a>
     {% endfor %}
   </p>
   {% if has_data %}
-    {% if chart_svg %}{{ chart_svg|safe }}{% else %}<p class="muted">Only one snapshot so far ({{ points|length }} point, ${{ "%.2f"|format(points[0].total_value_usd) }} at {{ points[0].created_at }}). The chart draws once there are two or more.</p>{% endif %}
+    {% if chart_svg %}{{ chart_svg|safe }}{% else %}<p class="muted">Only one snapshot so far ({{ points|length }} point{% if mode == 'paper' %}, ${{ "%.2f"|format(points[0].total_value_usd) }}{% else %}, {{ "%.4f"|format(points[0].total_value_usd) }} SOL{% endif %} at {{ points[0].created_at }}). The chart draws once there are two or more.</p>{% endif %}
     <p class="muted small">{{ points|length }} recorded snapshot(s) in this range · first {{ points[0].created_at }} · last {{ points[-1].created_at }} · from {{ ranges[range_key][0] }}</p>
   {% else %}
-    <p class="muted">No data yet for this range. Snapshots are recorded every time the silent loop runs and after every paper trade — check back after some trading, or pick a longer range.</p>
+    <p class="muted">No data yet for this range. Snapshots are recorded every time the silent loop runs and after every trade — check back after some trading, or pick a longer range.</p>
   {% endif %}
   <p class="muted small">The chart is built only from recorded snapshots. No history is invented: a range with no snapshots says so plainly.</p>
 </div>

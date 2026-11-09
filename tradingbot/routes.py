@@ -38,9 +38,11 @@ from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 from . import assistant as assistant_mod
 from . import donations as donations_mod
 from . import passkey as passkey_mod
+from . import platforms as platforms_mod
 from . import pnl as pnl_mod
 from . import signing_bot as signing_bot_mod
 from .config import Config
+from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, get_prices
@@ -107,10 +109,14 @@ def _new_csrf():
     return session["csrf_token"]
 
 
-def _log(app, user_id: int, kind: str, detail: str) -> None:
+def _log(app, user_id: int, kind: str, detail: str,
+         mode: str = "") -> None:
+    """Activity row, tagged with the trading mode it belongs to
+    ('paper' / 'real') so pages show each mode's activity separately.
+    Account-level rows pass mode='' and show in both modes."""
     _db(app).execute(
-        "INSERT INTO activity (user_id, kind, detail, created_at) "
-        "VALUES (?, ?, ?, ?)", (user_id, kind, detail, _now()))
+        "INSERT INTO activity (user_id, kind, detail, created_at, mode) "
+        "VALUES (?, ?, ?, ?, ?)", (user_id, kind, detail, _now(), mode))
     _db(app).commit()
 
 
@@ -157,6 +163,170 @@ def _active_mode(db, user_id: int) -> str:
         "SELECT active_mode FROM users WHERE id = ?", (user_id,)).fetchone()
     mode = (row["active_mode"] if row else None) or "paper"
     return mode if mode in ("paper", "devnet") else "paper"
+
+
+def _mode_label(mode: str) -> str:
+    """The plain-words label for a mode, used on every page so the
+    user always knows which side they are on."""
+    return "Real trading — devnet" if mode == "devnet" \
+        else "Demo trading (paper)"
+
+
+def _activity_for_mode(db, user_id: int, mode: str):
+    """Recent activity for one mode only. Trading rows are tagged
+    'paper' or 'real' and never cross over; account rows (mode='')
+    belong to neither trading mode and show in both."""
+    wanted = "real" if mode == "devnet" else "paper"
+    return db.execute(
+        "SELECT kind, detail, created_at FROM activity "
+        "WHERE user_id = ? AND (mode = ? OR mode = '') "
+        "ORDER BY id DESC LIMIT 20",
+        (user_id, wanted)).fetchall()
+
+
+def _real_holdings_view(db, user_id: int) -> list:
+    """The user's real positions, merged by coin: manual real
+    holdings (real_holdings) plus bot-managed real positions
+    (bot_positions, mode='real'). The two tables never hold the same
+    tokens, so merging them never double-counts. Returns
+    [{coin_id, amount, avg_price}] sorted by coin."""
+    merged: dict = {}
+    for table in ("real_holdings",):
+        for r in db.execute(
+                "SELECT coin_id, amount, avg_price FROM " + table +
+                " WHERE user_id = ?", (user_id,)).fetchall():
+            merged[r["coin_id"]] = {
+                "coin_id": r["coin_id"], "amount": float(r["amount"]),
+                "avg_price": float(r["avg_price"])}
+    for r in db.execute(
+            "SELECT coin_id, amount, avg_price FROM bot_positions "
+            "WHERE user_id = ? AND mode = 'real'", (user_id,)).fetchall():
+        entry = merged.get(r["coin_id"])
+        if entry is None:
+            merged[r["coin_id"]] = {
+                "coin_id": r["coin_id"], "amount": float(r["amount"]),
+                "avg_price": float(r["avg_price"])}
+        else:
+            total = entry["amount"] + float(r["amount"])
+            entry["avg_price"] = (
+                (entry["amount"] * entry["avg_price"]
+                 + float(r["amount"]) * float(r["avg_price"])) / total
+                if total > 0 else entry["avg_price"])
+            entry["amount"] = total
+    return [merged[k] for k in sorted(merged)]
+
+
+def _record_real_holding(db, user_id: int, mint: str, coin_amount: float,
+                         avg_price: float) -> None:
+    """Merge a real buy into real_holdings (manual real trades)."""
+    row = db.execute(
+        "SELECT amount, avg_price FROM real_holdings "
+        "WHERE user_id = ? AND coin_id = ?",
+        (user_id, mint)).fetchone()
+    if row:
+        total = float(row["amount"]) + coin_amount
+        avg = ((float(row["amount"]) * float(row["avg_price"]))
+               + coin_amount * avg_price) / total
+        db.execute("UPDATE real_holdings SET amount = ?, avg_price = ? "
+                   "WHERE user_id = ? AND coin_id = ?",
+                   (total, avg, user_id, mint))
+    else:
+        db.execute("INSERT INTO real_holdings (user_id, coin_id, amount, "
+                   "avg_price) VALUES (?, ?, ?, ?)",
+                   (user_id, mint, coin_amount, avg_price))
+    db.commit()
+
+
+def _remove_real_holding(db, user_id: int, mint: str,
+                         amount: float) -> None:
+    """Take `amount` out of real_holdings after a real sell."""
+    row = db.execute(
+        "SELECT amount FROM real_holdings WHERE user_id = ? AND coin_id = ?",
+        (user_id, mint)).fetchone()
+    if not row:
+        return
+    remaining = float(row["amount"]) - amount
+    if remaining <= 0:
+        db.execute("DELETE FROM real_holdings WHERE user_id = ? "
+                   "AND coin_id = ?", (user_id, mint))
+    else:
+        db.execute("UPDATE real_holdings SET amount = ? "
+                   "WHERE user_id = ? AND coin_id = ?",
+                   (remaining, user_id, mint))
+    db.commit()
+
+
+def _real_avg_price(app, mint: str, amount_sol: float,
+                    coin_amount: float) -> float:
+    """USD cost basis for a real buy: the mint's current price when
+    the feed has it, else the price implied by the SOL spent (SOL
+    price x SOL paid / tokens received). 0 when neither is known —
+    the holding is then shown with P&L '—', never guessed."""
+    try:
+        from .trenches import fetch_prices_for_mints
+        prices = fetch_prices_for_mints([mint])
+        if mint in prices:
+            return float(prices[mint])
+    except Exception:
+        pass
+    try:
+        sol_price, _s, _a = _paper_price("SOL")
+    except Exception:
+        sol_price = None
+    if sol_price and coin_amount > 0:
+        return amount_sol * float(sol_price) / coin_amount
+    return 0.0
+
+
+def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
+    """The coins list: every coin in the price list with its name,
+    ticker, current price and P&L in the ACTIVE mode, plus any extra
+    coins the user holds that are not in the price list (trenches
+    mints). P&L is (current price − average cost) × amount; a coin
+    with no holding has P&L None, and a holding with no current
+    price has P&L None and is valued at cost — never guessed."""
+    price_map = {c: e.get("price") for c, e in prices["prices"].items()}
+    if mode == "devnet":
+        held = {h["coin_id"]: h for h in _real_holdings_view(db, user_id)}
+    else:
+        held = {h["coin_id"]: h for h in db.execute(
+            "SELECT coin_id, amount, avg_price FROM paper_holdings "
+            "WHERE user_id = ?", (user_id,)).fetchall()}
+    mint_ids = [c for c in held if c not in price_map]
+    if mint_ids:
+        try:
+            for mint, price in fetch_prices_for_mints(
+                    mint_ids).items():
+                price_map[mint] = price
+        except Exception:
+            pass
+    rows = []
+    for symbol, info in COINS.items():
+        price = price_map.get(symbol)
+        h = held.get(symbol)
+        pnl = None
+        if h is not None and price is not None:
+            pnl = (float(price) - float(h["avg_price"])) * float(h["amount"])
+        rows.append({"coin_id": symbol, "name": info["name"],
+                     "ticker": symbol, "price": price,
+                     "held": float(h["amount"]) if h else 0.0,
+                     "avg_price": float(h["avg_price"]) if h else None,
+                     "pnl": pnl, "is_mint": False})
+    for mint in sorted(held):
+        if mint in COINS:
+            continue
+        price = price_map.get(mint)
+        h = held[mint]
+        pnl = None
+        if price is not None:
+            pnl = (float(price) - float(h["avg_price"])) * float(h["amount"])
+        rows.append({"coin_id": mint,
+                     "name": "Pump.fun token " + mint[:4] + "…" + mint[-4:],
+                     "ticker": mint[:4] + "…",
+                     "price": price, "held": float(h["amount"]),
+                     "avg_price": float(h["avg_price"]),
+                     "pnl": pnl, "is_mint": True})
+    return rows
 
 
 # On-chain SOL balances are cached 60 seconds per wallet so the
@@ -774,34 +944,73 @@ def register_routes(app: Flask) -> None:
     # ------------------------------------------------------------------
     # Dashboard
     # ------------------------------------------------------------------
+    def _dashboard_data(app, user, popup_coin=None):
+        """Everything the coins page (dashboard) renders, for the
+        ACTIVE mode only: paper shows the paper portfolio, paper
+        bots and paper activity; real (devnet) shows the real wallet,
+        real bots and real activity. The two modes never mix on a
+        page. `popup_coin` is the coin row for the open coin popup,
+        or None."""
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        wallet = _wallet(app, user["id"])
+        real_sol = (_real_balance(app, wallet["pubkey"])
+                    if wallet and mode == "devnet" else None)
+        prices = get_prices()
+        coin_rows = _coin_rows(db, user["id"], mode, prices)
+        holdings_value = sum(r["held"] * (r["price"] or 0.0)
+                             for r in coin_rows)
+        bots = db.execute(
+            "SELECT * FROM bots WHERE user_id = ? AND mode = ? "
+            "ORDER BY id DESC",
+            (user["id"], "real" if mode == "devnet" else "paper")
+            ).fetchall()
+        activity = _activity_for_mode(db, user["id"], mode)
+        signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
+        return {"wallet": wallet if mode == "devnet" else None,
+                "receive_address": wallet["pubkey"] if wallet else "",
+                "real_sol": real_sol,
+                "paper_cash": _paper(app, user["id"]),
+                "holdings_value": holdings_value, "prices": prices,
+                "bots": bots, "activity": activity,
+                "coin_rows": coin_rows, "mode": mode,
+                "mode_label": _mode_label(mode),
+                "show_mode_chooser": not session.get("mode_chosen"),
+                "support_id": signing_bot["support_id"]
+                if signing_bot else "",
+                "popup_coin": popup_coin}
+
     @app.route("/dashboard")
     @login_required
     def dashboard():
         user = _current_user(app)
-        wallet = _wallet(app, user["id"])
-        real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
-        prices = get_prices()
-        holdings = _db(app).execute(
-            "SELECT coin_id, amount, avg_price FROM paper_holdings "
-            "WHERE user_id = ?", (user["id"],)).fetchall()
-        holdings_value = sum(
-            h["amount"] * prices["prices"].get(h["coin_id"], {}).get("price", 0)
-            for h in holdings)
-        bots = _db(app).execute(
-            "SELECT * FROM bots WHERE user_id = ? ORDER BY id DESC",
-            (user["id"],)).fetchall()
-        activity = _db(app).execute(
-            "SELECT kind, detail, created_at FROM activity "
-            "WHERE user_id = ? ORDER BY id DESC LIMIT 20",
-            (user["id"],)).fetchall()
-        signing_bot = signing_bot_mod.get_signing_bot(_db(app),
-                                                      user["id"])
-        return render_template(
-            "dashboard.html", wallet=wallet, real_sol=real_sol,
-            paper_cash=_paper(app, user["id"]), holdings=holdings,
-            holdings_value=holdings_value, prices=prices, bots=bots,
-            activity=activity,
-            support_id=signing_bot["support_id"] if signing_bot else "")
+        return render_template("dashboard.html",
+                               **_dashboard_data(app, user))
+
+    @app.route("/choose-mode", methods=["POST"])
+    @login_required
+    def choose_mode():
+        """The post-sign-in mode chooser: Demo trading (paper) or
+        Real trading (devnet). Sets the user's active mode and
+        remembers the choice for this session, so the popup does not
+        come back on every page — only after the next sign-in (the
+        session is cleared on logout). The user can switch any time
+        from the HUD."""
+        _csrf_check()
+        user = _current_user(app)
+        mode = (request.form.get("mode") or "").lower()
+        if mode not in ("paper", "devnet"):
+            flash("Pick Demo trading or Real trading.")
+            return redirect(url_for("dashboard"))
+        db = _db(app)
+        db.execute("UPDATE users SET active_mode = ? WHERE id = ?",
+                   (mode, user["id"]))
+        db.commit()
+        session["mode_chosen"] = True
+        _log(app, user["id"], "mode_switch",
+             f"Trading mode chosen: {_mode_label(mode)}.")
+        flash(f"You are now on {_mode_label(mode)}.")
+        return redirect(url_for("dashboard"))
 
     @app.route("/mode", methods=["POST"])
     @login_required
@@ -830,6 +1039,253 @@ def register_routes(app: Flask) -> None:
         return redirect(path)
 
     # ------------------------------------------------------------------
+    # Coin popup: tap a coin on the coins page and get Buy / Sell /
+    # Send / Receive for it. After any action, a confirmation page
+    # states the result, then the user goes back to the coins screen.
+    # ------------------------------------------------------------------
+    @app.route("/coins/<coin_id>")
+    @login_required
+    def coin_popup(coin_id: str):
+        """The coins page with the popup open for one coin."""
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
+        if coin_id_resolved is None:
+            abort(404)
+        prices = get_prices()
+        rows = _coin_rows(db, user["id"], mode, prices)
+        row = next((r for r in rows
+                    if r["coin_id"] == coin_id_resolved), None)
+        if row is None:
+            # Known coin, not in the list (no holding, no price) —
+            # build its row from what we know.
+            info = COINS.get(coin_id_resolved)
+            row = {"coin_id": coin_id_resolved,
+                   "name": info["name"] if info else
+                   "Pump.fun token " + coin_id_resolved[:4] + "…" +
+                   coin_id_resolved[-4:],
+                   "ticker": coin_id_resolved if info else
+                   coin_id_resolved[:4] + "…",
+                   "price": price, "held": 0.0, "avg_price": None,
+                   "pnl": None, "is_mint": coin_id_resolved not in COINS}
+        data = _dashboard_data(app, user, popup_coin=row)
+        return render_template("dashboard.html", **data)
+
+    def _coin_result(heading: str, lines: list, ok: bool,
+                     coin_id: str, mode_label: str):
+        """The confirmation page after a popup action: what happened,
+        the amounts, and the new balance/position — then back to the
+        coins screen."""
+        return render_template(
+            "coin_result.html", heading=heading, lines=lines, ok=ok,
+            coin_id=coin_id, mode_label=mode_label)
+
+    def _real_bot_for_trade(app, user, bot_id_raw: str):
+        """The real bot a manual real trade is governed by. Returns
+        (bot, error_message). The bot's buy-size % is the per-trade
+        cap the executor enforces, and its platform must be one real
+        trading is built against (pump.fun)."""
+        db = _db(app)
+        if not (bot_id_raw or "").strip():
+            return None, ("Pick one of your real bots to manage this "
+                          "trade — its buy-size limit is the cap. "
+                          "Create a real bot first if you don't have "
+                          "one.")
+        try:
+            bot_id = int(bot_id_raw)
+        except ValueError:
+            return None, "That bot choice is not valid."
+        bot = db.execute(
+            "SELECT * FROM bots WHERE id = ? AND user_id = ?",
+            (bot_id, user["id"])).fetchone()
+        if not bot:
+            return None, "That bot isn't yours."
+        if bot["mode"] != "real":
+            return None, (f"Bot '{bot['name']}' is a paper bot — pick a "
+                          f"real bot for a real trade.")
+        platform = (bot["platform"] or "pump.fun")
+        if platform not in platforms_mod.REAL_TRADEABLE_PLATFORMS:
+            return None, (f"Bot '{bot['name']}' is on {platform} — real "
+                          f"trading on {platform} is not live yet. "
+                          f"No trade was placed.")
+        return bot, None
+
+    @app.route("/coins/<coin_id>/buy", methods=["POST"])
+    @login_required
+    def coin_buy(coin_id: str):
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        label = _mode_label(mode)
+        coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
+        if coin_id_resolved is None:
+            abort(404)
+        if mode == "paper":
+            try:
+                usd = float(request.form.get("usd") or 0)
+            except ValueError:
+                return _coin_result(
+                    "Nothing was bought",
+                    ["Amount must be a number."], False,
+                    coin_id_resolved, label)
+            result = _paper_buy_for(app, user, coin_id_resolved, usd,
+                                    request.form.get("bot_id") or "")
+            lines = [result["message"]]
+            if result["ok"]:
+                lines.append(
+                    f"New paper cash: ${result['cash']:,.2f}.")
+                if result.get("bot"):
+                    lines.append(
+                        f"Bot '{result['bot']['name']}' is looking "
+                        f"after this coin.")
+            return _coin_result(
+                "Bought" if result["ok"] else "Nothing was bought",
+                lines, result["ok"], coin_id_resolved, label)
+        # Real mode: the EXISTING pump.fun executor, with the same
+        # guards as the silent loop. Anything it refuses is shown
+        # plainly with no fill — never faked.
+        try:
+            amount_sol = float(request.form.get("amount_sol") or 0)
+        except ValueError:
+            return _coin_result(
+                "Nothing was bought", ["Amount must be a number."],
+                False, coin_id_resolved, label)
+        if amount_sol <= 0:
+            return _coin_result(
+                "Nothing was bought", ["Amount must be more than 0."],
+                False, coin_id_resolved, label)
+        bot, error = _real_bot_for_trade(
+            app, user, request.form.get("bot_id") or "")
+        if error:
+            return _coin_result("Nothing was bought", [error], False,
+                                coin_id_resolved, label)
+        result = execute_real_trade(
+            bot, user["id"], coin_id_resolved, "buy", amount_sol,
+            price or 0.0, db, _cfg(app))
+        if result.get("status") != "executed":
+            return _coin_result(
+                "Nothing was bought",
+                [f"No buy was placed — "
+                 f"{result.get('reason', 'real execution failed')}."],
+                False, coin_id_resolved, label)
+        coin_amount = float(result.get("coin_amount") or 0)
+        avg_price = _real_avg_price(app, coin_id_resolved, amount_sol,
+                                    coin_amount)
+        if coin_amount > 0:
+            _record_real_holding(db, user["id"], coin_id_resolved,
+                                 coin_amount, avg_price)
+        wallet = _wallet(app, user["id"])
+        new_sol = (_real_balance(app, wallet["pubkey"])
+                   if wallet else None)
+        _log(app, user["id"], "real_buy",
+             f"Bought {coin_amount:.4f} {coin_id_resolved} for "
+             f"{amount_sol:.4f} SOL on pump.fun (devnet). Signature: "
+             f"{str(result.get('signature', ''))[:12]}... Signing bot: "
+             f"{result.get('signing_bot', '')}.", "real")
+        _record_pnl_snapshot(
+            app, user["id"],
+            {c: e.get("price", 0.0)
+             for c, e in get_prices()["prices"].items()})
+        lines = [f"Bought {coin_amount:.4f} {coin_id_resolved} for "
+                 f"{amount_sol:.4f} SOL on pump.fun (devnet).",
+                 f"Signature: {result.get('signature', '')}",
+                 f"Signing bot: {result.get('signing_bot', '')}."]
+        if new_sol is not None:
+            lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
+        return _coin_result("Bought", lines, True, coin_id_resolved, label)
+
+    @app.route("/coins/<coin_id>/sell", methods=["POST"])
+    @login_required
+    def coin_sell(coin_id: str):
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        label = _mode_label(mode)
+        coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
+        if coin_id_resolved is None:
+            abort(404)
+        try:
+            amount = float(request.form.get("amount") or 0)
+        except ValueError:
+            return _coin_result(
+                "Nothing was sold", ["Amount must be a number."],
+                False, coin_id_resolved, label)
+        if amount <= 0:
+            return _coin_result(
+                "Nothing was sold", ["Amount must be more than 0."],
+                False, coin_id_resolved, label)
+        if mode == "paper":
+            result = _paper_sell_for(app, user, coin_id_resolved, amount)
+            lines = [result["message"]]
+            if result["ok"]:
+                lines.append(f"New paper cash: ${result['cash']:,.2f}.")
+            return _coin_result(
+                "Sold" if result["ok"] else "Nothing was sold",
+                lines, result["ok"], coin_id_resolved, label)
+        # Real mode: sell only the manually-held part. Tokens a bot
+        # is managing are sold by that bot's rules, not by hand, so
+        # the two ledgers never get out of step.
+        manual = db.execute(
+            "SELECT amount FROM real_holdings WHERE user_id = ? "
+            "AND coin_id = ?", (user["id"], coin_id_resolved)).fetchone()
+        manual_amount = float(manual["amount"]) if manual else 0.0
+        bot_managed = db.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM bot_positions "
+            "WHERE user_id = ? AND coin_id = ? AND mode = 'real'",
+            (user["id"], coin_id_resolved)).fetchone()["total"]
+        if amount > manual_amount:
+            if manual_amount <= 0 and bot_managed > 0:
+                return _coin_result(
+                    "Nothing was sold",
+                    [f"You hold {bot_managed:.4f} {coin_id_resolved} in "
+                     f"real mode, but a bot is managing it — the bot "
+                     f"sells it by its rules."],
+                    False, coin_id_resolved, label)
+            return _coin_result(
+                "Nothing was sold",
+                [f"You hold {manual_amount:.4f} {coin_id_resolved} in "
+                 f"real mode that you can sell by hand"
+                 + (f" ({bot_managed:.4f} more is managed by a bot)."
+                    if bot_managed > 0 else ".")],
+                False, coin_id_resolved, label)
+        bot, error = _real_bot_for_trade(
+            app, user, request.form.get("bot_id") or "")
+        if error:
+            return _coin_result("Nothing was sold", [error], False,
+                                coin_id_resolved, label)
+        result = execute_real_trade(
+            bot, user["id"], coin_id_resolved, "sell", amount,
+            price or 0.0, db, _cfg(app))
+        if result.get("status") != "executed":
+            return _coin_result(
+                "Nothing was sold",
+                [f"No sell was placed — "
+                 f"{result.get('reason', 'real execution failed')}."],
+                False, coin_id_resolved, label)
+        _remove_real_holding(db, user["id"], coin_id_resolved, amount)
+        wallet = _wallet(app, user["id"])
+        new_sol = (_real_balance(app, wallet["pubkey"])
+                   if wallet else None)
+        _log(app, user["id"], "real_sell",
+             f"Sold {amount:.4f} {coin_id_resolved} on pump.fun "
+             f"(devnet). Signature: "
+             f"{str(result.get('signature', ''))[:12]}... Signing bot: "
+             f"{result.get('signing_bot', '')}.", "real")
+        _record_pnl_snapshot(
+            app, user["id"],
+            {c: e.get("price", 0.0)
+             for c, e in get_prices()["prices"].items()})
+        lines = [f"Sold {amount:.4f} {coin_id_resolved} on pump.fun "
+                 f"(devnet).",
+                 f"Signature: {result.get('signature', '')}",
+                 f"Signing bot: {result.get('signing_bot', '')}."]
+        if new_sol is not None:
+            lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
+        return _coin_result("Sold", lines, True, coin_id_resolved, label)
+    # ------------------------------------------------------------------
     # P&L dashboard: balance, current coins with per-coin P&L, and a
     # P&L chart built ONLY from recorded snapshots (never invented
     # history). Ranges: All-time, 1 year, 1 month, 1 week, 1 day,
@@ -847,6 +1303,61 @@ def register_routes(app: Flask) -> None:
         price_map = {c: e.get("price")
                      for c, e in prices["prices"].items()}
         db = _db(app)
+        mode = _active_mode(db, user["id"])
+        wallet = _wallet(app, user["id"])
+        real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
+        sol_price = prices["prices"].get("SOL", {}).get("price")
+        real_sol_usd = (real_sol * sol_price
+                        if real_sol is not None and sol_price else None)
+        if mode == "devnet":
+            # Real mode: real holdings only (manual real_holdings +
+            # bot-managed real positions), the on-chain wallet, and a
+            # chart of the recorded wallet SOL balance over time.
+            # The paper portfolio is never shown here.
+            real_rows = _real_holdings_view(db, user["id"])
+            mint_ids = [h["coin_id"] for h in real_rows
+                        if h["coin_id"] not in price_map]
+            if mint_ids:
+                try:
+                    for mint, price in fetch_prices_for_mints(
+                            mint_ids).items():
+                        price_map[mint] = price
+                except Exception:
+                    pass
+            holdings = []
+            for h in real_rows:
+                raw_price = price_map.get(h["coin_id"])
+                price = float(raw_price) if raw_price is not None else None
+                amount = float(h["amount"])
+                avg = float(h["avg_price"])
+                if price is not None:
+                    value = amount * price
+                    pnl_value = (price - avg) * amount
+                else:
+                    value = amount * avg
+                    pnl_value = None
+                holdings.append({"coin_id": h["coin_id"], "amount": amount,
+                                 "avg_price": avg, "price": price,
+                                 "value": value, "pnl": pnl_value})
+            holdings_value = sum(h["value"] for h in holdings)
+            totals = {"cash_usd": 0.0, "holdings": holdings,
+                      "holdings_value_usd": holdings_value,
+                      "total_value_usd": holdings_value}
+            points, has_data = pnl_mod.chart_points_real(
+                db, user["id"], range_key)
+            return render_template(
+                "pnl.html", range_key=range_key,
+                ranges=pnl_mod.RANGES, totals=totals,
+                real_sol=real_sol, real_sol_usd=real_sol_usd,
+                sol_price=sol_price, start_cash=0.0,
+                total_pnl=holdings_value,
+                points=points, has_data=has_data,
+                chart_svg=pnl_mod.chart_svg(points, unit="SOL "),
+                prices_source=prices["source"],
+                prices_as_of=prices["as_of"],
+                mode=mode, mode_label=_mode_label(mode))
+        # Paper mode: the paper portfolio only. The real wallet is
+        # never shown here — switch to Real trading to see it.
         held = db.execute(
             "SELECT DISTINCT coin_id FROM paper_holdings WHERE user_id = ?",
             (user["id"],)).fetchall()
@@ -860,22 +1371,18 @@ def register_routes(app: Flask) -> None:
             except Exception:
                 pass
         totals = pnl_mod.portfolio_totals(db, user["id"], price_map)
-        wallet = _wallet(app, user["id"])
-        real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
-        sol_price = prices["prices"].get("SOL", {}).get("price")
-        real_sol_usd = (real_sol * sol_price
-                        if real_sol is not None and sol_price else None)
         start_cash = _cfg(app).paper_start_cash
         points, has_data = pnl_mod.chart_points(db, user["id"], range_key)
         return render_template(
             "pnl.html", range_key=range_key,
             ranges=pnl_mod.RANGES, totals=totals,
-            real_sol=real_sol, real_sol_usd=real_sol_usd,
+            real_sol=None, real_sol_usd=None,
             sol_price=sol_price, start_cash=start_cash,
             total_pnl=totals["total_value_usd"] - start_cash,
             points=points, has_data=has_data,
             chart_svg=pnl_mod.chart_svg(points),
-            prices_source=prices["source"], prices_as_of=prices["as_of"])
+            prices_source=prices["source"], prices_as_of=prices["as_of"],
+            mode=mode, mode_label=_mode_label(mode))
 
     # ------------------------------------------------------------------
     # Wallet: view / send (two-step) / deposit
@@ -884,18 +1391,43 @@ def register_routes(app: Flask) -> None:
     @login_required
     def wallet():
         user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        if mode == "paper":
+            # Paper mode: the paper balance only. The real wallet,
+            # send history and platform wallets live in Real trading
+            # — switch mode in the HUD to see them.
+            prices = get_prices()
+            price_map = {c: e.get("price", 0.0)
+                         for c, e in prices["prices"].items()}
+            cash = _paper(app, user["id"])
+            holdings_value = sum(
+                h["amount"] * price_map.get(h["coin_id"], 0.0)
+                for h in db.execute(
+                    "SELECT coin_id, amount FROM paper_holdings "
+                    "WHERE user_id = ?", (user["id"],)).fetchall())
+            return render_template(
+                "wallet.html", wallet=None, real_sol=None, intents=[],
+                pumpfun_wallet="", platform_wallets={},
+                mode=mode, mode_label=_mode_label(mode),
+                paper_cash=cash, holdings_value=holdings_value)
         wallet = _wallet(app, user["id"])
         real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
-        pumpfun_wallet = _db(app).execute(
+        pumpfun_wallet = db.execute(
             "SELECT pumpfun_wallet FROM users WHERE id = ?",
             (user["id"],)).fetchone()["pumpfun_wallet"]
-        intents = _db(app).execute(
+        intents = db.execute(
             "SELECT id, destination, amount_lamports, token, status, "
             "signature, created_at FROM send_intents WHERE user_id = ? "
             "ORDER BY id DESC LIMIT 20", (user["id"],)).fetchall()
-        return render_template("wallet.html", wallet=wallet,
-                               real_sol=real_sol, intents=intents,
-                               pumpfun_wallet=pumpfun_wallet)
+        return render_template(
+            "wallet.html", wallet=wallet,
+            real_sol=real_sol, intents=intents,
+            pumpfun_wallet=pumpfun_wallet,
+            platform_wallets=platforms_mod.get_platform_wallets(
+                db, user["id"]),
+            mode=mode, mode_label=_mode_label(mode),
+            paper_cash=0.0, holdings_value=0.0)
 
     @app.route("/wallet/send", methods=["GET", "POST"])
     @login_required
@@ -928,6 +1460,14 @@ def register_routes(app: Flask) -> None:
                 (user["id"], destination, lamports, token, _now()))
             db.commit()
             # Step 1 done: the user must confirm on the next screen.
+            # return_to=coins (from the coin popup's Send) carries
+            # through, so the completed send lands back on the coins
+            # screen instead of the wallet page.
+            return_to = (request.form.get("return_to") or "").strip()
+            if return_to == "coins":
+                return redirect(url_for("wallet_send_confirm",
+                                        intent_id=cur.lastrowid,
+                                        return_to="coins"))
             return redirect(url_for("wallet_send_confirm",
                                     intent_id=cur.lastrowid))
         return render_template("send.html")
@@ -942,11 +1482,16 @@ def register_routes(app: Flask) -> None:
             (intent_id, user["id"])).fetchone()
         if not intent:
             abort(404)
+        return_to = (request.args.get("return_to")
+                     or request.form.get("return_to") or "").strip()
+        if return_to != "coins":
+            return_to = ""
         if request.method == "POST":
             _csrf_check()
             if intent["status"] != "pending":
                 flash("This send was already handled.")
-                return redirect(url_for("wallet"))
+                return redirect(url_for("dashboard" if return_to else
+                                        "wallet"))
             wallet = _wallet(app, user["id"])
             try:
                 secret = decrypt_secret(wallet["encrypted_secret"],
@@ -971,7 +1516,7 @@ def register_routes(app: Flask) -> None:
                 _log(app, user["id"], "send",
                      f"Sent {lamports_to_sol(intent['amount_lamports'])} "
                      f"SOL to {intent['destination'][:8]}... "
-                     f"signature {tx_sig[:12]}...")
+                     f"signature {tx_sig[:12]}...", "real")
                 flash("Send submitted. Signature: " + tx_sig)
             except Exception as exc:
                 db.execute(
@@ -979,14 +1524,185 @@ def register_routes(app: Flask) -> None:
                     "WHERE id = ?", (str(exc)[:200], intent["id"]))
                 db.commit()
                 _log(app, user["id"], "send_failed",
-                     "Send failed: " + str(exc)[:120])
+                     "Send failed: " + str(exc)[:120], "real")
                 flash("Send failed: " + str(exc)[:200])
-            return redirect(url_for("wallet"))
-        return render_template("send_confirm.html", intent=intent)
+            return redirect(url_for("dashboard" if return_to else
+                                    "wallet"))
+        return render_template("send_confirm.html", intent=intent,
+                               return_to=return_to)
 
     # ------------------------------------------------------------------
-    # Paper trading
+    # Platform wallets: one wallet per trading platform, per user.
+    # The Create Wallet button on the bot form posts here. Creating
+    # is idempotent — asking again returns the wallet that already
+    # exists, it never makes a second one. The Phantom wallet's
+    # private key is shown exactly once, at creation, on its own
+    # page — never again, and never in a log.
     # ------------------------------------------------------------------
+    @app.route("/platforms/<platform>/create", methods=["POST"])
+    @login_required
+    def platform_wallet_create(platform: str):
+        _csrf_check()
+        user = _current_user(app)
+        if not platforms_mod.is_valid_platform(platform):
+            flash("That platform is not valid.")
+            return redirect(url_for("bots"))
+        return_to = (request.form.get("return_to") or "").strip()
+        if not return_to.startswith("/"):
+            return_to = url_for("bots")
+        db = _db(app)
+        if platform == "phantom":
+            pubkey, key_b58 = platforms_mod.create_phantom_wallet_with_key(
+                db, user["id"], _cfg(app).encryption_key)
+            if key_b58:
+                _log(app, user["id"], "platform_wallet",
+                     f"Created your Phantom wallet {pubkey[:8]}... "
+                     f"(private key shown once at creation).")
+                return render_template(
+                    "platform_wallet_created.html",
+                    platform=platform, pubkey=pubkey, key_b58=key_b58,
+                    return_to=return_to)
+            flash("You already have a Phantom wallet: " + pubkey)
+            return redirect(return_to)
+        pubkey, created = platforms_mod.create_platform_wallet(
+            db, user["id"], platform, _cfg(app).encryption_key)
+        if created:
+            _log(app, user["id"], "platform_wallet",
+                 f"Created your {platforms_mod.PLATFORM_LABELS[platform]} "
+                 f"wallet {pubkey[:8]}....")
+            flash("Created your "
+                  f"{platforms_mod.PLATFORM_LABELS[platform]} wallet: "
+                  + pubkey)
+        else:
+            flash("You already have a "
+                  f"{platforms_mod.PLATFORM_LABELS[platform]} wallet: "
+                  + pubkey)
+        return redirect(return_to)
+    # ------------------------------------------------------------------
+    # Paper trading (shared by the old buy/sell endpoints and the
+    # coin popup). Helpers return result dicts; the callers decide
+    # how to present them (flash + redirect, or the confirmation
+    # page). A coin is either a price-list symbol (SOL, BTC, ...) or
+    # a pump.fun mint address (a trenches token the user holds).
+    # Symbols are uppercased; mints are NEVER uppercased — base58
+    # addresses are case-sensitive.
+    # ------------------------------------------------------------------
+    def _resolve_coin_price(coin: str):
+        """(coin_id, price, source) for a symbol or a mint, or
+        (None, None, None) when the coin is unknown / unpriced."""
+        if not coin:
+            return None, None, None
+        upper = coin.upper()
+        if upper in COINS:
+            price, source, _as_of = _paper_price(upper)
+            return upper, price, source
+        if is_valid_address(coin):
+            try:
+                prices = fetch_prices_for_mints([coin])
+            except Exception:
+                prices = {}
+            if coin in prices:
+                return coin, float(prices[coin]), "trenches feed"
+            return coin, None, "trenches feed"
+        return None, None, None
+
+    def _paper_buy_for(app, user, coin: str, usd: float,
+                       bot_id_raw: str) -> dict:
+        """One paper buy. Returns {"ok", "message", ...}. The caller
+        presents the message. Never raises for a refused buy."""
+        db = _db(app)
+        coin_id, price, source = _resolve_coin_price(coin)
+        if coin_id is None:
+            return {"ok": False,
+                    "message": "Unknown coin — nothing was bought."}
+        if usd <= 0:
+            return {"ok": False,
+                    "message": "Amount must be more than 0."}
+        # Optional managing bot: the bot looks after this coin — the
+        # silent loop governs the position by that bot's rules once
+        # its silent trading is on. The bot must be the user's own
+        # and in paper mode, or the buy does not happen at all.
+        bot = None
+        if (bot_id_raw or "").strip():
+            try:
+                bot_id = int(bot_id_raw)
+            except ValueError:
+                return {"ok": False, "message":
+                        "That bot choice is not valid — nothing was "
+                        "bought."}
+            bot = db.execute(
+                "SELECT * FROM bots WHERE id = ? AND user_id = ?",
+                (bot_id, user["id"])).fetchone()
+            if not bot:
+                return {"ok": False, "message":
+                        "That bot isn't yours — nothing was bought."}
+            if bot["mode"] != "paper":
+                return {"ok": False, "message":
+                        f"Bot '{bot['name']}' is a real-mode bot — pick "
+                        f"a paper bot to look after a paper buy. "
+                        f"Nothing was bought."}
+        if price is None:
+            return {"ok": False,
+                    "message": "Price unavailable right now."}
+        try:
+            amount, usd = ledger_buy(db, user["id"], coin_id, usd, price,
+                                     _now())
+        except InsufficientCash:
+            return {"ok": False, "message": "Not enough paper cash."}
+        if bot is not None:
+            # Record the position under the managing bot so the silent
+            # loop's rule evaluation (stop loss, sell ladder, trailing
+            # stop) governs it per that bot's rules and limits.
+            _open_position(db, bot, coin_id, amount, price)
+        _log(app, user["id"], "paper_buy",
+             f"Bought {amount:.4f} {coin_id} for ${usd:.2f} (paper, "
+             f"price source: {source})"
+             + (f" — looked after by bot '{bot['name']}'." if bot else "."),
+             "paper")
+        _record_pnl_snapshot(
+            app, user["id"],
+            {c: e.get("price", 0.0)
+             for c, e in get_prices()["prices"].items()})
+        cash = _paper(app, user["id"])
+        return {"ok": True,
+                "message": f"Bought {amount:.4f} {coin_id} for "
+                           f"${usd:.2f} (paper).",
+                "amount": amount, "usd": usd, "bot": bot, "cash": cash,
+                "coin": coin_id}
+
+    def _paper_sell_for(app, user, coin: str, amount: float) -> dict:
+        """One paper sell. Returns {"ok", "message", ...}."""
+        db = _db(app)
+        coin_id, price, source = _resolve_coin_price(coin)
+        if coin_id is None:
+            return {"ok": False,
+                    "message": "Unknown coin — nothing was sold."}
+        if amount <= 0:
+            return {"ok": False,
+                    "message": "Amount must be more than 0."}
+        if price is None:
+            return {"ok": False,
+                    "message": "Price unavailable right now."}
+        try:
+            usd = ledger_sell(db, user["id"], coin_id, amount, price,
+                              _now())
+        except InsufficientHolding:
+            return {"ok": False,
+                    "message": "You don't hold that much."}
+        _log(app, user["id"], "paper_sell",
+             f"Sold {amount:.4f} {coin_id} for ${usd:.2f} (paper, "
+             f"price source: {source}).", "paper")
+        _record_pnl_snapshot(
+            app, user["id"],
+            {c: e.get("price", 0.0)
+             for c, e in get_prices()["prices"].items()})
+        cash = _paper(app, user["id"])
+        return {"ok": True,
+                "message": f"Sold {amount:.4f} {coin_id} for "
+                           f"${usd:.2f} (paper).",
+                "amount": amount, "usd": usd, "cash": cash,
+                "coin": coin_id}
+
     @app.route("/paper/buy", methods=["POST"])
     @login_required
     def paper_buy():
@@ -994,19 +1710,22 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         db = _db(app)
         # Mode comes from the buy form and defaults to the user's
-        # header mode. Real (devnet) token buying is NOT live in v1
-        # (no on-chain swap path) — choosing it refuses plainly and
-        # places no buy, records no fill, and touches no ledger.
+        # header mode. Real (devnet) buys are placed from the coin
+        # popup, which routes them through the pump.fun executor —
+        # this endpoint is the paper one, so a real choice is sent
+        # there instead of being refused into nothing.
         mode = (request.form.get("mode")
                 or _active_mode(db, user["id"])).lower()
         if mode not in ("paper", "real"):
             mode = _active_mode(db, user["id"])
-        if mode == "real":
-            flash("Real token buying is not live yet — no buy was "
-                  "placed and nothing was charged. Paper mode buys "
-                  "work today.")
-            return redirect(url_for("dashboard"))
         coin = (request.form.get("coin") or "").upper()
+        if mode == "real":
+            if coin not in COINS:
+                flash("Unknown coin.")
+                return redirect(url_for("dashboard"))
+            flash("Real buys are placed from the coin popup — tap the "
+                  "coin and choose Buy (real). Nothing was bought here.")
+            return redirect(url_for("coin_popup", coin_id=coin))
         if coin not in COINS:
             flash("Unknown coin.")
             return redirect(url_for("dashboard"))
@@ -1015,57 +1734,11 @@ def register_routes(app: Flask) -> None:
         except ValueError:
             flash("Amount must be a number.")
             return redirect(url_for("dashboard"))
-        if usd <= 0:
-            flash("Amount must be more than 0.")
-            return redirect(url_for("dashboard"))
-        # Optional managing bot: the bot looks after this coin — the
-        # silent loop governs the position by that bot's rules once
-        # its silent trading is on. The bot must be the user's own
-        # and in paper mode, or the buy does not happen at all.
-        bot = None
-        bot_id_raw = (request.form.get("bot_id") or "").strip()
-        if bot_id_raw:
-            try:
-                bot_id = int(bot_id_raw)
-            except ValueError:
-                flash("That bot choice is not valid — nothing was bought.")
-                return redirect(url_for("dashboard"))
-            bot = db.execute(
-                "SELECT * FROM bots WHERE id = ? AND user_id = ?",
-                (bot_id, user["id"])).fetchone()
-            if not bot:
-                flash("That bot isn't yours — nothing was bought.")
-                return redirect(url_for("dashboard"))
-            if bot["mode"] != "paper":
-                flash(f"Bot '{bot['name']}' is a real-mode bot — pick a "
-                      f"paper bot to look after a paper buy. Nothing "
-                      f"was bought.")
-                return redirect(url_for("dashboard"))
-        price, source, as_of = _paper_price(coin)
-        if price is None:
-            flash("Price unavailable right now.")
-            return redirect(url_for("dashboard"))
-        try:
-            amount, usd = ledger_buy(db, user["id"], coin, usd, price,
-                                     _now())
-        except InsufficientCash:
-            flash("Not enough paper cash.")
-            return redirect(url_for("dashboard"))
-        if bot is not None:
-            # Record the position under the managing bot so the silent
-            # loop's rule evaluation (stop loss, sell ladder, trailing
-            # stop) governs it per that bot's rules and limits.
-            _open_position(db, bot, coin, amount, price)
-        _log(app, user["id"], "paper_buy",
-             f"Bought {amount:.4f} {coin} for ${usd:.2f} (paper, "
-             f"price source: {source})"
-             + (f" — looked after by bot '{bot['name']}'." if bot else "."))
-        _record_pnl_snapshot(
-            app, user["id"],
-            {c: e.get("price", 0.0)
-             for c, e in get_prices()["prices"].items()})
-        flash(f"Bought {amount:.4f} {coin} (paper)."
-              + (f" Bot '{bot['name']}' is looking after it." if bot else ""))
+        result = _paper_buy_for(app, user, coin, usd,
+                                request.form.get("bot_id") or "")
+        flash(result["message"]
+              + (f" Bot '{result['bot']['name']}' is looking after it."
+                 if result["ok"] and result.get("bot") else ""))
         return redirect(url_for("dashboard"))
 
     @app.route("/paper/sell", methods=["POST"])
@@ -1082,29 +1755,9 @@ def register_routes(app: Flask) -> None:
         except ValueError:
             flash("Amount must be a number.")
             return redirect(url_for("dashboard"))
-        if amount <= 0:
-            flash("Amount must be more than 0.")
-            return redirect(url_for("dashboard"))
-        price, source, as_of = _paper_price(coin)
-        if price is None:
-            flash("Price unavailable right now.")
-            return redirect(url_for("dashboard"))
-        try:
-            usd = ledger_sell(_db(app), user["id"], coin, amount, price,
-                              _now())
-        except InsufficientHolding:
-            flash("You don't hold that much.")
-            return redirect(url_for("dashboard"))
-        _log(app, user["id"], "paper_sell",
-             f"Sold {amount:.4f} {coin} for ${usd:.2f} (paper, "
-             f"price source: {source}).")
-        _record_pnl_snapshot(
-            app, user["id"],
-            {c: e.get("price", 0.0)
-             for c, e in get_prices()["prices"].items()})
-        flash(f"Sold {amount:.4f} {coin} (paper).")
+        result = _paper_sell_for(app, user, coin, amount)
+        flash(result["message"])
         return redirect(url_for("dashboard"))
-
     # ------------------------------------------------------------------
     # Bots
     # ------------------------------------------------------------------
@@ -1112,13 +1765,21 @@ def register_routes(app: Flask) -> None:
     @login_required
     def bots():
         user = _current_user(app)
-        bots = _db(app).execute(
-            "SELECT * FROM bots WHERE user_id = ? ORDER BY id DESC",
-            (user["id"],)).fetchall()
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        # Only this mode's bots are shown — paper and real bots never
+        # mix on a page. The Trenches preset is a paper bot, so its
+        # card only appears in paper mode.
+        bots = db.execute(
+            "SELECT * FROM bots WHERE user_id = ? AND mode = ? "
+            "ORDER BY id DESC",
+            (user["id"], "real" if mode == "devnet" else "paper")
+            ).fetchall()
         memecoin_bots = [b for b in bots
                          if b["category"] == TRENCHES_CATEGORY]
         return render_template("bots.html", bots=bots,
-                               memecoin_bots=memecoin_bots)
+                               memecoin_bots=memecoin_bots,
+                               mode=mode, mode_label=_mode_label(mode))
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required
@@ -1133,6 +1794,14 @@ def register_routes(app: Flask) -> None:
             mode = (request.form.get("mode") or "paper").lower()
             if mode not in ("paper", "real"):
                 mode = "paper"
+            # Platform the bot trades on: pump.fun, Phantom or
+            # pumpSwap. An unknown value is not stored — the form is
+            # sent back with a plain message.
+            platform = (request.form.get("platform") or "pump.fun").strip()
+            if not platforms_mod.is_valid_platform(platform):
+                flash("That platform is not valid — pick pump.fun, "
+                      "Phantom, or pumpSwap.")
+                return redirect(url_for("bot_create"))
             category = _valid_category(
                 (request.form.get("category") or "").strip())
             coins = [c.strip().upper() for c in
@@ -1157,19 +1826,26 @@ def register_routes(app: Flask) -> None:
             cur = db.execute(
                 "INSERT INTO bots (user_id, name, strategy, coins, "
                 "buy_size_pct, stop_loss_pct, mode, silent, "
-                "max_open_trades, api_token_hash, category) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                "max_open_trades, api_token_hash, category, platform) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
                 (user["id"], name, strategy, json.dumps(coins),
                  buy_size, stop_loss, mode, max_open, hash_token(token),
-                 category))
+                 category, platform))
             db.commit()
             _log(app, user["id"], "bot_create",
-                 f"Created bot '{name}' ({strategy}, {mode}). "
-                 f"Silent trading is off.")
+                 f"Created bot '{name}' ({strategy}, {mode}, "
+                 f"{platform}). "
+                 f"Silent trading is off.", mode)
             # Token shown exactly once, on this page only.
             return render_template("bot_created.html", bot_id=cur.lastrowid,
                                    name=name, token=token)
-        return render_template("bot_form.html", bot=None)
+        return render_template(
+            "bot_form.html", bot=None,
+            platforms=platforms_mod.PLATFORMS,
+            platform_labels=platforms_mod.PLATFORM_LABELS,
+            platform_notes=platforms_mod.PLATFORM_NOTES,
+            platform_wallets=platforms_mod.get_platform_wallets(
+                _db(app), user["id"]))
 
     @app.route("/bots/preset/trenches", methods=["POST"])
     @login_required
@@ -1194,14 +1870,15 @@ def register_routes(app: Flask) -> None:
         cur = db.execute(
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
-            "api_token_hash, category, rules_json) "
-            "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?)",
+            "api_token_hash, category, rules_json, platform) "
+            "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?, "
+            "'pump.fun')",
             (user["id"], TRENCHES_PRESET_NAME, hash_token(token),
              TRENCHES_CATEGORY, json.dumps(trenches_ruleset())))
         db.commit()
         _log(app, user["id"], "bot_create",
              f"Created bot '{TRENCHES_PRESET_NAME}' (Memecoin build "
-             f"preset, paper). Silent trading is off.")
+             f"preset, paper). Silent trading is off.", "paper")
         flash(f"Created the {TRENCHES_PRESET_NAME} bot (Memecoin build, "
               f"paper). Turn silent trading on when you are ready — "
               f"it only trades within its rules and limits.")
@@ -1245,6 +1922,12 @@ def register_routes(app: Flask) -> None:
             mode = (request.form.get("mode") or bot["mode"]).lower()
             if mode not in ("paper", "real"):
                 mode = bot["mode"]
+            platform = (request.form.get("platform")
+                        or bot["platform"] or "pump.fun").strip()
+            if not platforms_mod.is_valid_platform(platform):
+                flash("That platform is not valid — pick pump.fun, "
+                      "Phantom, or pumpSwap.")
+                return redirect(url_for("bot_edit", bot_id=bot_id))
             category = _valid_category(
                 (request.form.get("category")
                  if request.form.get("category") is not None
@@ -1275,14 +1958,15 @@ def register_routes(app: Flask) -> None:
             db.execute(
                 "UPDATE bots SET name = ?, strategy = ?, coins = ?, "
                 "buy_size_pct = ?, stop_loss_pct = ?, mode = ?, "
-                "max_open_trades = ?, category = ?, updated_at = ? "
+                "max_open_trades = ?, category = ?, platform = ?, "
+                "updated_at = ? "
                 "WHERE id = ? AND user_id = ?",
                 (name, strategy, json.dumps(coins), min(max(buy_size, 1), 100),
                  min(max(stop_loss, 1), 50), mode,
-                 min(max(max_open, 1), 5), category, _now(), bot_id,
-                 user["id"]))
+                 min(max(max_open, 1), 5), category, platform, _now(),
+                 bot_id, user["id"]))
             db.commit()
-            _log(app, user["id"], "bot_edit", f"Edited bot '{name}'.")
+            _log(app, user["id"], "bot_edit", f"Edited bot '{name}'.", mode)
             # Silent is changed only through the confirm flow, never by
             # a bare form flip. If the checkbox differs from what is
             # stored, save the other edits and send the user to confirm.
@@ -1292,7 +1976,13 @@ def register_routes(app: Flask) -> None:
                                         to=want_silent))
             flash("Bot updated.")
             return redirect(url_for("bot_detail", bot_id=bot_id))
-        return render_template("bot_form.html", bot=bot)
+        return render_template(
+            "bot_form.html", bot=bot,
+            platforms=platforms_mod.PLATFORMS,
+            platform_labels=platforms_mod.PLATFORM_LABELS,
+            platform_notes=platforms_mod.PLATFORM_NOTES,
+            platform_wallets=platforms_mod.get_platform_wallets(
+                db, user["id"]))
 
     @app.route("/bots/<int:bot_id>/silent", methods=["GET", "POST"])
     @login_required
@@ -1329,7 +2019,7 @@ def register_routes(app: Flask) -> None:
                  "silent_on" if want else "silent_off",
                  f"Silent trading turned "
                  f"{'ON' if want else 'OFF'} for bot '{bot['name']}' "
-                 f"({bot['mode']}).")
+                 f"({bot['mode']}).", bot["mode"])
             flash("Silent trading turned "
                   + ("ON" if want else "OFF")
                   + f" for '{bot['name']}'.")
@@ -1366,7 +2056,7 @@ def register_routes(app: Flask) -> None:
         db.commit()
         _log(app, user["id"], "rules_clear",
              f"Cleared custom rules for bot '{bot['name']}' — back to "
-             f"standard signals.")
+             f"standard signals.", bot["mode"])
         flash("Custom rules cleared — the bot is back to standard signals.")
         return redirect(url_for("bot_detail", bot_id=bot_id))
 
@@ -1414,7 +2104,7 @@ def register_routes(app: Flask) -> None:
                    (bot_id, user["id"]))
         db.commit()
         _log(app, user["id"], "bot_delete",
-             f"Deleted bot '{bot['name']}'.")
+             f"Deleted bot '{bot['name']}'.", bot["mode"])
         flash("Bot deleted.")
         return redirect(url_for("bots"))
 
@@ -1468,6 +2158,10 @@ def register_routes(app: Flask) -> None:
         if prop["status"] != "pending":
             flash("That proposal was already handled.")
             return redirect(url_for("bot_detail", bot_id=prop["bot_id"]))
+        bot_row = db.execute(
+            "SELECT mode FROM bots WHERE id = ? AND user_id = ?",
+            (prop["bot_id"], user["id"])).fetchone()
+        bot_mode = bot_row["mode"] if bot_row else ""
         if prop["kind"] == "transfer" and prop["destination"]:
             # Approved transfer -> the normal two-step send flow.
             cur = db.execute(
@@ -1481,7 +2175,8 @@ def register_routes(app: Flask) -> None:
             db.commit()
             _log(app, user["id"], "proposal_approve",
                  f"Approved bot proposal #{proposal_id}; send intent "
-                 f"created — confirm before anything moves.")
+                 f"created — confirm before anything moves.",
+                 bot_mode)
             return redirect(url_for("wallet_send_confirm",
                                     intent_id=cur.lastrowid))
         # Signal (buy/sell) proposals: approval records the decision.
@@ -1492,7 +2187,8 @@ def register_routes(app: Flask) -> None:
         _log(app, user["id"], "proposal_approve",
              f"Approved bot proposal #{proposal_id} ({prop['side']} "
              f"{prop['coin_id']}). No on-chain swap in v1 — swaps arrive "
-             "in v2; nothing moved.")
+             "in v2; nothing moved.",
+             bot_mode)
         flash("Approved. Note: on-chain swaps are not executed in v1 — "
               "this is recorded as your decision, and nothing moved.")
         return redirect(url_for("bot_detail", bot_id=prop["bot_id"]))
@@ -1508,11 +2204,16 @@ def register_routes(app: Flask) -> None:
             (proposal_id, user["id"])).fetchone()
         if not prop:
             abort(404)
+        bot_row = db.execute(
+            "SELECT mode FROM bots WHERE id = ? AND user_id = ?",
+            (prop["bot_id"], user["id"])).fetchone()
+        bot_mode = bot_row["mode"] if bot_row else ""
         db.execute("UPDATE bot_proposals SET status = 'rejected' "
                    "WHERE id = ?", (proposal_id,))
         db.commit()
         _log(app, user["id"], "proposal_reject",
-             f"Rejected bot proposal #{proposal_id}.")
+             f"Rejected bot proposal #{proposal_id}.",
+             bot_mode)
         return redirect(url_for("bot_detail", bot_id=prop["bot_id"]))
 
     # ------------------------------------------------------------------
@@ -1552,7 +2253,7 @@ def register_routes(app: Flask) -> None:
                 db.commit()
                 _log(app, user["id"], "rules_set",
                      f"Set custom rules for bot '{bot['name']}' "
-                     f"(assistant).")
+                     f"(assistant).", bot["mode"])
                 return jsonify({"reply":
                     f"Done — bot '{bot['name']}' now follows these "
                     f"rules:\n{summarize_rules(cleaned)}\n\n"
@@ -1571,7 +2272,7 @@ def register_routes(app: Flask) -> None:
                 db.commit()
                 _log(app, user["id"], "rules_clear",
                      f"Cleared custom rules for bot '{bot['name']}' "
-                     f"(assistant).")
+                     f"(assistant).", bot["mode"])
                 return jsonify({"reply":
                     f"Done — bot '{bot['name']}' is back to the standard "
                     f"signals."})
@@ -1597,7 +2298,7 @@ def register_routes(app: Flask) -> None:
                      "silent_on" if want else "silent_off",
                      f"Silent trading turned "
                      f"{'ON' if want else 'OFF'} for bot '{bot['name']}' "
-                     f"(assistant).")
+                     f"(assistant).", bot["mode"])
                 return jsonify({"reply":
                     f"Done — silent trading is now "
                     f"{'ON' if want else 'OFF'} for bot '{bot['name']}'. "
@@ -1623,7 +2324,7 @@ def register_routes(app: Flask) -> None:
                                (pending, user["id"]))
                     db.commit()
                     _log(app, user["id"], "bot_delete",
-                         f"Deleted bot '{bot['name']}' (assistant).")
+                         f"Deleted bot '{bot['name']}' (assistant).", bot["mode"])
                     return jsonify({"reply": f"Done — bot '{bot['name']}' "
                                              "is deleted."})
                 return jsonify({"reply": "That bot is already gone."})
@@ -1687,7 +2388,7 @@ def register_routes(app: Flask) -> None:
                 (user["id"], name, strategy, hash_token(token)))
             db.commit()
             _log(app, user["id"], "bot_create",
-                 f"Created bot '{name}' ({strategy}) via assistant.")
+                 f"Created bot '{name}' ({strategy}) via assistant.", "paper")
             return jsonify({"reply":
                 f"Created bot '{name}' ({strategy}, watching SOL, "
                 f"buy size 20%, stop loss 7%). Its API token is shown once "
@@ -1726,7 +2427,7 @@ def register_routes(app: Flask) -> None:
                        " WHERE id = ? AND user_id = ?", vals)
             db.commit()
             _log(app, user["id"], "bot_edit",
-                 f"Edited bot '{bot['name']}' via assistant.")
+                 f"Edited bot '{bot['name']}' via assistant.", bot["mode"])
             return jsonify({"reply":
                 f"Done — bot '{bot['name']}' updated: " +
                 ", ".join(f"{k} = {v}" for k, v in fields.items()) + "."})
@@ -1854,14 +2555,16 @@ def register_routes(app: Flask) -> None:
             cur = db.execute(
                 "INSERT INTO bots (user_id, name, strategy, coins, "
                 "buy_size_pct, stop_loss_pct, mode, silent, "
-                "max_open_trades, api_token_hash, category, rules_json) "
-                "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?)",
+                "max_open_trades, api_token_hash, category, rules_json, "
+                "platform) "
+                "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?, "
+                "'pump.fun')",
                 (user["id"], TRENCHES_PRESET_NAME, hash_token(token),
                  TRENCHES_CATEGORY, json.dumps(trenches_ruleset())))
             db.commit()
             _log(app, user["id"], "bot_create",
                  f"Created bot '{TRENCHES_PRESET_NAME}' (Memecoin build "
-                 f"preset, paper) via assistant.")
+                 f"preset, paper) via assistant.", "paper")
             return jsonify({"reply":
                 f"Created the {TRENCHES_PRESET_NAME} bot (Memecoin "
                 f"build, paper):\n{summarize_rules(trenches_ruleset())}"
@@ -1912,7 +2615,7 @@ def register_routes(app: Flask) -> None:
                 db.commit()
                 _log(app, user["id"], "silent_off",
                      f"Silent trading turned OFF for bot '{bot['name']}' "
-                     f"(assistant).")
+                     f"(assistant).", bot["mode"])
                 return jsonify({"reply":
                     f"Done — silent trading is OFF for '{bot['name']}'. "
                     f"The loop stops for it right away."})

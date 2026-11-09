@@ -245,8 +245,12 @@ class TestBuySelectors(unittest.TestCase):
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
         resp = self._buy(mode="real")
         self.assertEqual(resp.status_code, 302)
+        # A real choice on the paper endpoint is sent to the coin
+        # popup, where real buys route through the pump.fun executor —
+        # nothing is bought here.
+        self.assertIn("/coins/SOL", resp.headers["Location"])
         html = self.client.get("/dashboard").get_data(as_text=True)
-        self.assertIn("Real token buying is not live yet", html)
+        self.assertIn("Real buys are placed from the coin popup", html)
         self.assertEqual(self.db.execute(
             "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"], 0)
         self.assertEqual(self.db.execute(

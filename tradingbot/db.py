@@ -125,6 +125,34 @@ CREATE TABLE IF NOT EXISTS send_intents (
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
+-- Per-platform wallets: one wallet per trading platform, per user
+-- (pump.fun, Phantom, pumpSwap). The secret is AES-256-GCM
+-- encrypted, like the app wallet. UNIQUE(user_id, platform) means
+-- asking again returns the wallet that already exists.
+CREATE TABLE IF NOT EXISTS platform_wallets (
+    user_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    pubkey TEXT NOT NULL,
+    encrypted_secret TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, platform),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Real holdings from manual (popup) real trades: pump.fun mints the
+-- user bought by hand on devnet. Bot-managed real positions live in
+-- bot_positions (mode='real'); these are the manual ones, so the two
+-- never double-count. avg_price is the USD cost basis at buy time.
+CREATE TABLE IF NOT EXISTS real_holdings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    coin_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    avg_price REAL NOT NULL,
+    UNIQUE (user_id, coin_id),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -262,6 +290,16 @@ _MIGRATIONS = (
     # or 'devnet' (app wallet's on-chain SOL). Flipped by the header
     # switch; the buy form defaults to it.
     ("users", "active_mode", "TEXT NOT NULL DEFAULT 'paper'"),
+    # Which platform a bot trades on: 'pump.fun', 'phantom' or
+    # 'pumpswap'. '' is a bot from before platforms existed — it is
+    # treated as pump.fun (the only venue real execution is built
+    # against) wherever the platform matters.
+    ("bots", "platform", "TEXT NOT NULL DEFAULT ''"),
+    # Which mode an activity row belongs to: 'paper', 'real', or ''
+    # for account events (signup, recovery, passkey) that belong to
+    # neither trading mode and are shown in both. Trading rows are
+    # always tagged, so paper and real activity never mix on a page.
+    ("activity", "mode", "TEXT NOT NULL DEFAULT ''"),
 )
 
 

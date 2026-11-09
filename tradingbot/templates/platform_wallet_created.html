@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Phantom wallet created — SolEntry{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Your Phantom wallet is ready</h1>
+  <p class="muted">This wallet was created for you to import into Phantom. Its address is:</p>
+  <p class="addr">{{ pubkey }}</p>
+  <h2>⚠️ Your private key — shown once, never again</h2>
+  <p class="muted">Copy this key now if you want to import the wallet into Phantom. <strong>Anyone with this key controls this wallet.</strong> It will never be shown again — not here, not in settings, not by support.</p>
+  <p class="addr">{{ key_b58 }}</p>
+  <button class="btn" onclick="navigator.clipboard.writeText('{{ key_b58 }}'); this.textContent='Copied!';">Copy private key</button>
+  <h2>Import it into Phantom</h2>
+  <ol>
+    <li>Open Phantom → tap your wallet name at the top.</li>
+    <li>Tap “Add / Connect Wallet”.</li>
+    <li>Tap “Import Private Key” and paste the key above.</li>
+  </ol>
+  <p><a class="btn big" href="{{ return_to }}">Done — back</a></p>
+</div>
+{% endblock %}

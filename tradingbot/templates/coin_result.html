@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ heading }} — SolEntry{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>{% if ok %}✅{% else %}⚠️{% endif %} {{ heading }}</h1>
+  <p class="muted">{{ mode_label }}</p>
+  {% for line in lines %}
+  <p>{{ line }}</p>
+  {% endfor %}
+  <p><a class="btn big" href="{{ url_for('dashboard') }}">← Back to coins</a></p>
+</div>
+{% endblock %}

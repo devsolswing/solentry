@@ -345,11 +345,12 @@ class TestSilentLoop(SilentBase):
         self.assertEqual(good["actions"][0]["action"], "buy")
         self.assertEqual(len(self._activity("silent_buy")), 1)
 
-    def test_dashboard_shows_silent_badge(self):
+    def test_bots_page_shows_silent_badge(self):
         self._insert_bot(silent=1)
-        resp = self.client.get("/dashboard")
-        html = resp.get_data(as_text=True)
-        self.assertIn("Silent ON", html)
+        # Bots live on the Bots page now — the dashboard is the Coins
+        # page and does not list bots.
+        self.assertNotIn("Silent ON",
+                         self.client.get("/dashboard").get_data(as_text=True))
         resp = self.client.get("/bots")
         self.assertIn("Silent ON", resp.get_data(as_text=True))
 

@@ -3,43 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}Trading Bot{% endblock %}</title>
+<title>{% block title %}SolEntry{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
+<body{% if current_user %} class="app-shell"{% endif %}>
 {% block header %}
 <header class="topbar">
-  <a class="brand" href="{% if current_user %}{{ url_for('dashboard') }}{% else %}{{ url_for('index') }}{% endif %}">🤖 Trading Bot</a>
+  <a class="brand" href="{% if current_user %}{{ url_for('dashboard') }}{% else %}{{ url_for('index') }}{% endif %}">SolEntry</a>
+  {% if current_user and header_balance %}
   <div class="top-actions">
-    {% if current_user and header_balance %}
-    <form method="post" action="{{ url_for('mode_switch') }}" class="mode-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="mode" value="{{ 'devnet' if header_mode == 'paper' else 'paper' }}">
-      <span class="balance-chip" title="{{ header_balance.label }} balance — tap the switch to change it"><strong>{{ header_balance.label }}</strong> {{ header_balance.text }}</span>
-      <button class="mode-switch" type="submit" aria-label="Switch balance view to {{ 'Devnet' if header_mode == 'paper' else 'Paper' }}">
-        <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">Devnet</span>
-      </button>
-    </form>
-    {% endif %}
-    {% if current_user %}
-    <details class="wallet-menu">
-      <summary class="wallet-btn" title="Your wallet">💰 Wallet</summary>
-      <div class="wallet-drop">
-        <a href="{{ url_for('wallet') }}">View wallet</a>
-        <a href="{{ url_for('wallet') }}#deposit">⬇ Deposit</a>
-        <a href="{{ url_for('wallet_send') }}">⬆ Send</a>
-        <a href="{{ url_for('wallet_send') }}">↩ Withdraw</a>
-      </div>
-    </details>
-    <a class="nav-link" href="{{ url_for('bots') }}">My Bots</a>
-    <a class="nav-link" href="{{ url_for('pnl') }}">P&amp;L</a>
-    <a class="nav-link" href="{{ url_for('settings') }}">Settings</a>
-    <a class="nav-link" href="{{ url_for('logout') }}">Log out ({{ current_user.username }})</a>
-    {% else %}
-    <a class="nav-link" href="{{ url_for('login') }}">Log in</a>
-    <a class="nav-link" href="{{ url_for('signup') }}">Sign up</a>
-    {% endif %}
+    <span class="balance-chip" title="{{ header_balance.label }} balance — switch it in the HUD below"><strong>{{ header_balance.label }}</strong> {{ header_balance.text }}</span>
   </div>
+  {% endif %}
 </header>
 {% endblock %}
 <main class="wrap">
@@ -50,10 +25,30 @@
   {% endwith %}
   {% block content %}{% endblock %}
 </main>
+{% if current_user %}
+{# The HUD: one bar, always on screen, to change the page — plus the
+   Paper/Devnet switch, so the mode can be flipped from anywhere. #}
+<nav class="hud" aria-label="Pages">
+  <a class="hud-item{{ ' active' if request.path in ['/dashboard'] or request.path.startswith('/coins') else '' }}" href="{{ url_for('dashboard') }}">🪙<span>Coins</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/bots') else '' }}" href="{{ url_for('bots') }}">🤖<span>Bots</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/wallet') else '' }}" href="{{ url_for('wallet') }}">💰<span>Wallet</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/pnl') else '' }}" href="{{ url_for('pnl') }}">📈<span>P&amp;L</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/settings') else '' }}" href="{{ url_for('settings') }}">⚙️<span>Settings</span></a>
+  <form method="post" action="{{ url_for('mode_switch') }}" class="hud-mode">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="mode" value="{{ 'devnet' if header_mode == 'paper' else 'paper' }}">
+    <button class="mode-switch hud-switch" type="submit" aria-label="Switch to {{ 'Real trading (devnet)' if header_mode == 'paper' else 'Demo trading (paper)' }}">
+      <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">Devnet</span>
+    </button>
+  </form>
+</nav>
+{% endif %}
 {% block footer %}
+{% if not current_user %}
 <footer class="foot">
-  <p>Network: {{ network }} · Paper trading is fake money. Manual real trades need your approval; silent bots trade on their own only when you switch them on, within your limits. No private key ever leaves this server.</p>
+  <p>Network: {{ network }} · Paper trading is fake money. Manual real trades need your approval; silent bots trade on their own only when you switch them on, within your limits. Your app wallet's private key never leaves this server.</p>
 </footer>
+{% endif %}
 {% endblock %}
 </body>
 </html>

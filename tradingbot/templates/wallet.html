@@ -1,8 +1,17 @@
 {% extends "base.html" %}
-{% block title %}Wallet — Trading Bot{% endblock %}
+{% block title %}Wallet — SolEntry{% endblock %}
 {% block content %}
 <h1>💰 Your wallet</h1>
+<p class="mode-banner"><strong>{{ mode_label }}</strong></p>
 
+{% if mode == 'paper' %}
+<div class="card">
+  <h2>📄 Paper balance</h2>
+  <p class="big-num">${{ "%.2f"|format(paper_cash + holdings_value) }}</p>
+  <p class="muted">Cash: ${{ "%.2f"|format(paper_cash) }} · Holdings: ${{ "%.2f"|format(holdings_value) }}</p>
+  <p class="muted small">Paper trading is fake money. Your real wallet, send history and platform wallets live in Real trading — switch mode in the HUD below to see them.</p>
+</div>
+{% else %}
 <div class="card" id="deposit">
   <h2>Deposit</h2>
   <p>Send SOL to this address to fund your app wallet. This is <strong>your own app wallet</strong> — separate from any personal Phantom wallet.</p>
@@ -17,6 +26,29 @@
   <p>Pump.fun has no separate accounts — trading on pump.fun uses this linked Solana wallet. This is your app wallet above, linked as your pump.fun trading wallet, so the bot can trade on pump.fun on your behalf.</p>
   <p class="addr">{{ pumpfun_wallet or wallet.pubkey }}</p>
   <button class="btn" onclick="navigator.clipboard.writeText('{{ pumpfun_wallet or wallet.pubkey }}'); this.textContent='Copied!';">Copy address</button>
+</div>
+
+<div class="card">
+  <h2>Platform wallets</h2>
+  <p class="muted small">One wallet per platform, made for you automatically. pump.fun and pumpSwap wallets live in the app; the Phantom wallet is made to import into Phantom.</p>
+  {% for p, label in [('pump.fun', 'pump.fun'), ('phantom', 'Phantom'), ('pumpswap', 'pumpSwap')] %}
+  <div class="platform-row">
+    <p><strong>{{ label }}</strong></p>
+    {% if platform_wallets.get(p) %}
+    <p class="addr">{{ platform_wallets[p] }}</p>
+    {% if p == 'phantom' %}
+    <p class="muted small">To use it in Phantom: Phantom → wallet name → Add / Connect Wallet → Import Private Key. The key was shown once when this wallet was created and is never shown again.</p>
+    {% endif %}
+    {% else %}
+    <p class="muted">No {{ label }} wallet yet.</p>
+    <form method="post" action="{{ url_for('platform_wallet_create', platform=p) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="return_to" value="{{ request.path }}">
+      <button class="btn small" type="submit">Create {{ label }} wallet</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
 </div>
 
 <div class="cards">
@@ -43,4 +75,5 @@
   </table>
   {% else %}<p class="muted">No sends yet.</p>{% endif %}
 </div>
+{% endif %}
 {% endblock %}

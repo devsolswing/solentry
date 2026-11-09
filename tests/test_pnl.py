@@ -158,6 +158,8 @@ class TestPnlPage(PnlBase):
         self.assertIn("/login", resp.headers["Location"])
 
     def test_empty_dashboard_says_no_data_yet(self):
+        # Paper mode shows the paper portfolio only — the real
+        # on-chain balance must not leak into it.
         resp = self.client.get("/pnl")
         html = resp.get_data(as_text=True)
         self.assertEqual(resp.status_code, 200)
@@ -165,7 +167,14 @@ class TestPnlPage(PnlBase):
         self.assertIn("All-time", html)
         self.assertIn("1 hour", html)
         self.assertIn("$10000.00", html)  # paper portfolio value
+        self.assertNotIn("2.0000 SOL", html)
+        # Real mode shows the on-chain balance only — no paper value.
+        self.client.post("/mode", data={
+            "csrf_token": csrf(self.client, "/pnl"), "mode": "devnet"})
+        html = self.client.get("/pnl").get_data(as_text=True)
         self.assertIn("2.0000 SOL", html)  # mocked on-chain balance
+        self.assertIn("No data yet", html)
+        self.assertNotIn("$10000.00", html)
 
     def test_unknown_range_falls_back_to_all(self):
         resp = self.client.get("/pnl?range=bogus")
@@ -242,6 +251,13 @@ class TestPumpfunWallet(PnlBase):
         self.assertTrue(user["pumpfun_wallet"])
 
     def test_wallet_page_shows_pumpfun_wallet(self):
+        # The pump.fun wallet lives in Real trading — paper mode shows
+        # the paper summary instead.
+        self.assertNotIn(
+            "Pump.fun trading wallet",
+            self.client.get("/wallet").get_data(as_text=True))
+        self.client.post("/mode", data={
+            "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
         resp = self.client.get("/wallet")
         html = resp.get_data(as_text=True)
         wallet = self.db.execute(

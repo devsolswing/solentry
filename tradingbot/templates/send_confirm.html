@@ -10,10 +10,11 @@
     <tr><th>Network</th><td>{{ network }}</td></tr>
     <tr><th>Fee</th><td>≈ 0.000005 SOL (network fee, estimated)</td></tr>
   </table>
-  <form method="post" action="{{ url_for('wallet_send_confirm', intent_id=intent.id) }}">
+  <form method="post" action="{{ url_for('wallet_send_confirm', intent_id=intent.id) }}{% if return_to %}?return_to={{ return_to }}{% endif %}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
     <button class="btn big" type="submit">Yes, send it</button>
-    <a class="btn ghost big" href="{{ url_for('wallet') }}">Cancel</a>
+    <a class="btn ghost big" href="{{ url_for('dashboard') if return_to == 'coins' else url_for('wallet') }}">{{ 'Back to coins' if return_to == 'coins' else 'Cancel' }}</a>
   </form>
   <p class="muted small">If anything looks wrong, cancel — the send stays pending and nothing moves.</p>
 </div>

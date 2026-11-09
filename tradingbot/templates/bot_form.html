@@ -13,7 +13,13 @@
         {% endfor %}
       </select>
     </label>
-    <label>Coins to watch (comma separated, e.g. SOL, BTC, ETH)<input name="coins" value="{{ bot.coins if bot else 'SOL' }}"></label>
+    <label>Platform
+      <select name="platform" id="platform-select">
+        {% for p in platforms %}
+        <option value="{{ p }}" {{ 'selected' if (bot and bot.platform == p) or (not bot and p == 'pump.fun') else '' }}>{{ platform_labels[p] }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>Category
       <select name="category">
         <option value="" {{ 'selected' if not bot or not bot.category else '' }}>None</option>
@@ -37,6 +43,25 @@
     </div>
     <button class="btn big" type="submit">{{ "Save changes" if bot else "Create bot" }}</button>
   </form>
+  <div class="card">
+    <h2>Platform wallets</h2>
+    <p class="muted small">Each platform gets its own wallet, created automatically when you tap the button. One wallet per platform — if one already exists, its address is shown instead.</p>
+    {% for p in platforms %}
+    <div class="platform-row" data-platform="{{ p }}">
+      <p><strong>{{ platform_labels[p] }}</strong><br><span class="muted small">{{ platform_notes[p] }}</span></p>
+      {% if platform_wallets.get(p) %}
+      <p class="addr">{{ platform_wallets[p] }}</p>
+      <p class="muted small">Wallet ready.</p>
+      {% else %}
+      <form method="post" action="{{ url_for('platform_wallet_create', platform=p) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="return_to" value="{{ request.path }}">
+        <button class="btn small" type="submit">Create {{ platform_labels[p] }} wallet</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
   {% if bot %}
   <p><a class="btn danger" href="{{ url_for('bot_delete_confirm', bot_id=bot.id) }}">Delete bot</a></p>
   {% endif %}

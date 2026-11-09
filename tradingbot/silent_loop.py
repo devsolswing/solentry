@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 from .config import Config
 from .db import init_db
 from .executor import execute_real_trade
+from .platforms import REAL_TRADEABLE_PLATFORMS
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
 from .pnl import portfolio_totals, record_snapshot
@@ -65,10 +66,13 @@ def _now() -> str:
 
 
 def _log(db: sqlite3.Connection, user_id: int, kind: str,
-         detail: str) -> None:
+         detail: str, mode: str = "") -> None:
+    """Activity row, tagged with the trading mode it belongs to
+    ('paper' / 'real') so the pages can show each mode's activity
+    separately. Account-level rows pass mode='' and show in both."""
     db.execute(
-        "INSERT INTO activity (user_id, kind, detail, created_at) "
-        "VALUES (?, ?, ?, ?)", (user_id, kind, detail, _now()))
+        "INSERT INTO activity (user_id, kind, detail, created_at, mode) "
+        "VALUES (?, ?, ?, ?, ?)", (user_id, kind, detail, _now(), mode))
     db.commit()
 
 
@@ -166,7 +170,7 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                 _close_position(db, bot, coin, full_amount)
                 _log(db, bot["user_id"], "silent_skip",
                      f"Silent bot '{bot['name']}': {coin} position already "
-                     f"sold — nothing to sell.")
+                     f"sold — nothing to sell.", bot["mode"])
                 actions.append({"action": "skip", "coin": coin,
                                 "reason": "position already sold"})
                 return
@@ -183,7 +187,7 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                     else "silent_sell")
             _log(db, bot["user_id"], kind,
                  f"Silent bot '{bot['name']}' sold {sell_amount:.4f} {coin} "
-                 f"for ${usd:.2f} ({reason}).")
+                 f"for ${usd:.2f} ({reason}).", bot["mode"])
             actions.append({"action": "sell", "coin": coin,
                             "amount": sell_amount, "usd": usd,
                             "reason": reason})
@@ -191,7 +195,7 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             _close_position(db, bot, coin, full_amount)
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': {coin} holding smaller than "
-                 f"the position — position cleared.")
+                 f"the position — position cleared.", bot["mode"])
             actions.append({"action": "skip", "coin": coin,
                             "reason": "holding smaller than position"})
         return
@@ -209,14 +213,14 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
              f"Silent bot '{bot['name']}' sold {amount:.4f} {coin} "
              f"({reason}). Signature: "
              f"{str(result.get('signature', ''))[:12]}... "
-             f"Signing bot: {result.get('signing_bot', '')}.")
+             f"Signing bot: {result.get('signing_bot', '')}.", bot["mode"])
         actions.append({"action": "sell", "coin": coin, "amount": amount,
                         "reason": reason})
     else:
         why = result.get("reason", "real execution failed")
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': {reason} sell of {coin} "
-             f"skipped — {why}.")
+             f"skipped — {why}.", bot["mode"])
         actions.append({"action": "skip", "coin": coin, "reason": why})
 
 
@@ -234,7 +238,7 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                    else "trade too small (under $1)")
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': buy of {coin} skipped — "
-                 f"{why}.")
+                 f"{why}.", bot["mode"])
             actions.append({"action": "skip", "coin": coin, "reason": why})
             return
         try:
@@ -243,14 +247,14 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         except InsufficientCash:
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': buy of {coin} skipped — "
-                 f"insufficient paper cash.")
+                 f"insufficient paper cash.", bot["mode"])
             actions.append({"action": "skip", "coin": coin,
                             "reason": "insufficient paper cash"})
             return
         _open_position(db, bot, coin, amount, price)
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {amount:.4f} {coin} "
-             f"for ${usd:.2f} (paper).")
+             f"for ${usd:.2f} (paper).", bot["mode"])
         actions.append({"action": "buy", "coin": coin, "amount": amount,
                         "usd": usd})
         return
@@ -261,7 +265,7 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     if not wallet:
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': buy of {coin} skipped — "
-             f"no app wallet.")
+             f"no app wallet.", bot["mode"])
         actions.append({"action": "skip", "coin": coin,
                         "reason": "no app wallet"})
         return
@@ -274,7 +278,7 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     if balance is None:
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': buy of {coin} skipped — "
-             f"real balance unavailable.")
+             f"real balance unavailable.", bot["mode"])
         actions.append({"action": "skip", "coin": coin,
                         "reason": "real balance unavailable"})
         return
@@ -282,7 +286,7 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     if amount_sol <= 0:
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': buy of {coin} skipped — "
-             f"insufficient real balance ({balance:.4f} SOL).")
+             f"insufficient real balance ({balance:.4f} SOL).", bot["mode"])
         actions.append({"action": "skip", "coin": coin,
                         "reason": "insufficient real balance"})
         return
@@ -296,13 +300,13 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
              f"Silent bot '{bot['name']}' bought {coin} for "
              f"{amount_sol:.4f} SOL. Signature: "
              f"{str(result.get('signature', ''))[:12]}... "
-             f"Signing bot: {result.get('signing_bot', '')}.")
+             f"Signing bot: {result.get('signing_bot', '')}.", bot["mode"])
         actions.append({"action": "buy", "coin": coin,
                         "amount_sol": amount_sol})
     else:
         why = result.get("reason", "real execution failed")
         _log(db, bot["user_id"], "silent_skip",
-             f"Silent bot '{bot['name']}': buy of {coin} skipped — {why}.")
+             f"Silent bot '{bot['name']}': buy of {coin} skipped — {why}.", bot["mode"])
         actions.append({"action": "skip", "coin": coin, "reason": why})
 
 
@@ -363,7 +367,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             why = (trenches_data or {}).get("error") or "feed unavailable"
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': trenches feed unavailable "
-                 f"— {why[:80]}. No trades this scan.")
+                 f"— {why[:80]}. No trades this scan.", bot["mode"])
             actions.append({"action": "skip", "coin": "",
                             "reason": "trenches feed unavailable"})
             return actions
@@ -400,7 +404,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         if price is None:
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': no price data for {coin} — "
-                 f"position left alone.")
+                 f"position left alone.", bot["mode"])
             actions.append({"action": "skip", "coin": coin,
                             "reason": "no price data"})
             continue
@@ -462,7 +466,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 _log(db, bot["user_id"], "silent_skip",
                      f"Silent bot '{bot['name']}': buy of "
                      f"{entry['mint']} skipped — max open trades reached "
-                     f"({bot['max_open_trades']}).")
+                     f"({bot['max_open_trades']}).", bot["mode"])
                 actions.append({"action": "skip", "coin": entry["mint"],
                                 "reason": "max open trades reached"})
                 break
@@ -487,7 +491,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 _log(db, bot["user_id"], "silent_skip",
                      f"Silent bot '{bot['name']}': buy of {coin} skipped "
                      f"— max open trades reached "
-                     f"({bot['max_open_trades']}).")
+                     f"({bot['max_open_trades']}).", bot["mode"])
                 actions.append({"action": "skip", "coin": coin,
                                 "reason": "max open trades reached"})
                 break
@@ -514,7 +518,7 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
     if rules_error is not None:
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': stored rules are invalid "
-             f"({rules_error}) — no trades until the rules are fixed.")
+             f"({rules_error}) — no trades until the rules are fixed.", bot["mode"])
         return [{"action": "skip", "coin": "", "reason": "invalid rules"}]
     if rules is not None:
         return _evaluate_rules_bot(db, cfg, bot, rules, prices_data,
@@ -532,7 +536,7 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
         if not entry or entry.get("price") is None:
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': no price data for {coin} — "
-                 f"position left alone.")
+                 f"position left alone.", bot["mode"])
             actions.append({"action": "skip", "coin": coin,
                             "reason": "no price data"})
             continue
@@ -563,7 +567,7 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
         if len(_positions(db, bot["id"])) >= int(bot["max_open_trades"]):
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': buy of {coin} skipped — "
-                 f"max open trades reached ({bot['max_open_trades']}).")
+                 f"max open trades reached ({bot['max_open_trades']}).", bot["mode"])
             actions.append({"action": "skip", "coin": coin,
                             "reason": "max open trades reached"})
             continue
@@ -603,6 +607,29 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
         trenches_data = trenches_fetcher(mints=held_mints)
     outcomes = []
     for bot in bots:
+        # Platform gate: real execution is built against the pump.fun
+        # bonding curve only. A real bot on another platform (pumpSwap,
+        # Phantom) is skipped with a plain reason — never faked.
+        # Paper bots are simulated and platform-agnostic, so they are
+        # never gated. A bot from before platforms existed has no
+        # platform set and is treated as pump.fun.
+        platform = (bot["platform"] if "platform" in bot.keys() else "") \
+            or "pump.fun"
+        if bot["mode"] == "real" \
+                and platform not in REAL_TRADEABLE_PLATFORMS:
+            _log(db, bot["user_id"], "silent_skip",
+                 f"Silent bot '{bot['name']}': real trading on "
+                 f"{platform} is not live yet — real trades run on "
+                 f"pump.fun (devnet) only. No trade was made.",
+                 bot["mode"])
+            outcomes.append({"bot_id": bot["id"], "bot_name": bot["name"],
+                             "user_id": bot["user_id"],
+                             "mode": bot["mode"],
+                             "actions": [{"action": "skip", "coin": "",
+                                          "reason": "real trading on "
+                                          f"{platform} is not live yet"}],
+                             "error": None})
+            continue
         try:
             actions = _evaluate_bot(db, cfg, bot, prices_data, rpc_factory,
                                     real_executor,
@@ -613,7 +640,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
         except Exception as exc:  # one bad bot never stops the loop
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': evaluation failed — "
-                 f"{str(exc)[:120]}. No trade was made.")
+                 f"{str(exc)[:120]}. No trade was made.", bot["mode"])
             outcomes.append({"bot_id": bot["id"], "bot_name": bot["name"],
                              "user_id": bot["user_id"], "mode": bot["mode"],
                              "actions": [], "error": str(exc)[:200]})

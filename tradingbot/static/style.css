@@ -121,3 +121,46 @@ th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #232a38; }
   .balance-chip { font-size: 13px; padding: 6px 10px; }
   .mode-switch .mode-opt { padding: 4px 8px; font-size: 12px; }
 }
+
+/* ------------------------------------------------------------------ */
+/* App shell: one screen, HUD at the bottom. The page itself never
+   scrolls — the content area scrolls internally, and the HUD stays
+   on screen so the user can always change the page or the mode.   */
+/* ------------------------------------------------------------------ */
+body.app-shell { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
+.mode-banner { background: #1a2030; border: 1px solid #2b3446; border-radius: 999px; padding: 8px 14px; font-size: 14px; margin: 4px 0 10px; display: inline-block; }
+.mode-banner strong { color: #4ade80; }
+
+/* HUD: bottom navigation bar + mode switch. */
+.hud { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; align-items: center; justify-content: space-around; gap: 2px; background: #11151f; border-top: 1px solid #232a38; padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
+.hud-item { display: flex; flex-direction: column; align-items: center; gap: 1px; color: #9aa7b8; text-decoration: none; font-size: 11px; padding: 4px 8px; border-radius: 8px; }
+.hud-item span { font-size: 11px; }
+.hud-item.active { color: #4ade80; font-weight: 700; }
+.hud-mode { margin: 0; }
+.hud-switch { padding: 2px; }
+.hud-switch .mode-opt { padding: 6px 9px; }
+
+/* Coins list: one tappable row per coin. */
+.coin-list { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; }
+.coin-row { display: flex; align-items: center; gap: 10px; padding: 11px 10px; background: #141926; border: 1px solid #232a38; border-radius: 10px; color: #e8ecf1; text-decoration: none; }
+.coin-row:active { background: #1c2333; }
+.coin-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coin-price { flex: 0 0 auto; font-weight: 700; }
+.coin-pnl { flex: 0 0 74px; text-align: right; font-weight: 700; }
+
+/* Overlays: mode chooser + coin popup (bottom sheet). */
+.overlay { position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .72); display: flex; align-items: flex-end; justify-content: center; }
+.chooser-card { width: 100%; max-width: 480px; max-height: 92dvh; overflow-y: auto; background: #160b08; border: 2px solid #ffb300; border-radius: 16px 16px 0 0; padding: 18px 16px 28px; text-align: center; box-shadow: 0 0 24px rgba(255, 120, 0, .3); }
+.chooser-logo { font-size: 44px; margin: 6px 0 2px; }
+.chooser-btn { width: 100%; margin-top: 10px; }
+.chooser-btn.real { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border: 2px solid #ffcf3d; }
+.coin-popup { width: 100%; max-width: 480px; max-height: 92dvh; overflow-y: auto; background: #141926; border: 1px solid #2b3446; border-bottom: none; border-radius: 16px 16px 0 0; padding: 12px 16px 28px; }
+.popup-head { text-align: right; margin: 0; }
+.popup-close { color: #9aa7b8; text-decoration: none; font-size: 20px; padding: 6px 10px; }
+.popup-actions h3 { margin: 18px 0 6px; }
+.popup-actions label { margin: 8px 0; }
+
+/* Platform wallet rows (bot form + wallet page). */
+.platform-row { border-top: 1px solid #232a38; padding: 10px 0; }
+.platform-row:first-of-type { border-top: none; }
