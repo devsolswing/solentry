@@ -214,6 +214,18 @@ _MIGRATIONS = (
     ("users", "recovery_answer_hash", "TEXT NOT NULL DEFAULT ''"),
     ("users", "recovery_answer_salt", "TEXT NOT NULL DEFAULT ''"),
     ("users", "recovery_hint", "TEXT NOT NULL DEFAULT ''"),
+    # Per-bot trading rules (rules.py): validated JSON, or '' for the
+    # standard v1 signals. category groups bots, e.g. "Memecoin build".
+    # last_scan_at is when the rules engine last scanned for this bot.
+    ("bots", "rules_json", "TEXT NOT NULL DEFAULT ''"),
+    ("bots", "category", "TEXT NOT NULL DEFAULT ''"),
+    ("bots", "last_scan_at", "TEXT NOT NULL DEFAULT ''"),
+    # Per-position rule state: the highest price since the position
+    # opened (trailing stop), the original amount (sell-ladder rungs
+    # are % of it), and how many ladder rungs already sold.
+    ("bot_positions", "peak_price", "REAL"),
+    ("bot_positions", "orig_amount", "REAL"),
+    ("bot_positions", "ladder_stage", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

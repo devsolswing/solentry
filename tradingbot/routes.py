@@ -37,6 +37,8 @@ from .config import Config
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, get_prices
+from .rules import (TRENCHES_CATEGORY, TRENCHES_PRESET_NAME, load_rules,
+                    summarize_rules, trenches_ruleset, validate_ruleset)
 from .signals import signal_for_coin
 from .security import (decrypt_secret, encrypt_secret, hash_password,
                        hash_token, new_csrf_token, new_token,
@@ -101,6 +103,20 @@ def _log(app, user_id: int, kind: str, detail: str) -> None:
         "INSERT INTO activity (user_id, kind, detail, created_at) "
         "VALUES (?, ?, ?, ?)", (user_id, kind, detail, _now()))
     _db(app).commit()
+
+
+def _find_bot_by_name(db, user_id: int, name: str):
+    """First bot whose name contains `name` (assistant-style lookup)."""
+    if not name:
+        return None
+    return db.execute(
+        "SELECT * FROM bots WHERE user_id = ? AND name LIKE ?",
+        (user_id, "%" + name + "%")).fetchone()
+
+
+def _valid_category(value: str) -> str:
+    """Bot categories are a closed list — anything else is no category."""
+    return value if value == TRENCHES_CATEGORY else ""
 
 
 def _wallet(app, user_id: int):
@@ -874,7 +890,10 @@ def register_routes(app: Flask) -> None:
         bots = _db(app).execute(
             "SELECT * FROM bots WHERE user_id = ? ORDER BY id DESC",
             (user["id"],)).fetchall()
-        return render_template("bots.html", bots=bots)
+        memecoin_bots = [b for b in bots
+                         if b["category"] == TRENCHES_CATEGORY]
+        return render_template("bots.html", bots=bots,
+                               memecoin_bots=memecoin_bots)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required
@@ -889,6 +908,8 @@ def register_routes(app: Flask) -> None:
             mode = (request.form.get("mode") or "paper").lower()
             if mode not in ("paper", "real"):
                 mode = "paper"
+            category = _valid_category(
+                (request.form.get("category") or "").strip())
             coins = [c.strip().upper() for c in
                      (request.form.get("coins") or "SOL").split(",")]
             coins = [c for c in coins if c in COINS] or ["SOL"]
@@ -911,10 +932,11 @@ def register_routes(app: Flask) -> None:
             cur = db.execute(
                 "INSERT INTO bots (user_id, name, strategy, coins, "
                 "buy_size_pct, stop_loss_pct, mode, silent, "
-                "max_open_trades, api_token_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                "max_open_trades, api_token_hash, category) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                 (user["id"], name, strategy, json.dumps(coins),
-                 buy_size, stop_loss, mode, max_open, hash_token(token)))
+                 buy_size, stop_loss, mode, max_open, hash_token(token),
+                 category))
             db.commit()
             _log(app, user["id"], "bot_create",
                  f"Created bot '{name}' ({strategy}, {mode}). "
@@ -923,6 +945,42 @@ def register_routes(app: Flask) -> None:
             return render_template("bot_created.html", bot_id=cur.lastrowid,
                                    name=name, token=token)
         return render_template("bot_form.html", bot=None)
+
+    @app.route("/bots/preset/trenches", methods=["POST"])
+    @login_required
+    def bot_preset_trenches():
+        """Create the Trenches memecoin bot (Memecoin build preset).
+
+        Paper mode, silent off. One per user — if a Trenches bot
+        already exists, go to it instead of making a duplicate.
+        """
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        existing = db.execute(
+            "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+            "AND rules_json LIKE ?",
+            (user["id"], TRENCHES_CATEGORY, '%"kind": "trenches"%')
+            ).fetchone()
+        if existing:
+            flash("You already have a Trenches bot.")
+            return redirect(url_for("bot_detail", bot_id=existing["id"]))
+        token = new_token()
+        cur = db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash, category, rules_json) "
+            "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?)",
+            (user["id"], TRENCHES_PRESET_NAME, hash_token(token),
+             TRENCHES_CATEGORY, json.dumps(trenches_ruleset())))
+        db.commit()
+        _log(app, user["id"], "bot_create",
+             f"Created bot '{TRENCHES_PRESET_NAME}' (Memecoin build "
+             f"preset, paper). Silent trading is off.")
+        flash(f"Created the {TRENCHES_PRESET_NAME} bot (Memecoin build, "
+              f"paper). Turn silent trading on when you are ready — "
+              f"it only trades within its rules and limits.")
+        return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
     @app.route("/bots/<int:bot_id>")
     @login_required
@@ -937,8 +995,11 @@ def register_routes(app: Flask) -> None:
             "SELECT * FROM bot_proposals WHERE bot_id = ? AND user_id = ? "
             "ORDER BY id DESC", (bot_id, user["id"])).fetchall()
         prices = get_prices()
+        rules, rules_error = load_rules(bot)
         return render_template("bot_detail.html", bot=bot,
-                               proposals=proposals, prices=prices)
+                               proposals=proposals, prices=prices,
+                               rules_summary=summarize_rules(rules),
+                               rules_error=rules_error)
 
     @app.route("/bots/<int:bot_id>/edit", methods=["GET", "POST"])
     @login_required
@@ -959,6 +1020,10 @@ def register_routes(app: Flask) -> None:
             mode = (request.form.get("mode") or bot["mode"]).lower()
             if mode not in ("paper", "real"):
                 mode = bot["mode"]
+            category = _valid_category(
+                (request.form.get("category")
+                 if request.form.get("category") is not None
+                 else bot["category"] or "").strip())
             coins = [c.strip().upper() for c in
                      (request.form.get("coins") or "").split(",")]
             coins = [c for c in coins if c in COINS] or json.loads(bot["coins"])
@@ -985,11 +1050,12 @@ def register_routes(app: Flask) -> None:
             db.execute(
                 "UPDATE bots SET name = ?, strategy = ?, coins = ?, "
                 "buy_size_pct = ?, stop_loss_pct = ?, mode = ?, "
-                "max_open_trades = ?, updated_at = ? "
+                "max_open_trades = ?, category = ?, updated_at = ? "
                 "WHERE id = ? AND user_id = ?",
                 (name, strategy, json.dumps(coins), min(max(buy_size, 1), 100),
                  min(max(stop_loss, 1), 50), mode,
-                 min(max(max_open, 1), 5), _now(), bot_id, user["id"]))
+                 min(max(max_open, 1), 5), category, _now(), bot_id,
+                 user["id"]))
             db.commit()
             _log(app, user["id"], "bot_edit", f"Edited bot '{name}'.")
             # Silent is changed only through the confirm flow, never by
@@ -1051,6 +1117,33 @@ def register_routes(app: Flask) -> None:
         return render_template("silent_confirm.html", bot=bot,
                                want_silent=want,
                                network=_cfg(app).network)
+
+    @app.route("/bots/<int:bot_id>/rules/clear", methods=["POST"])
+    @login_required
+    def bot_rules_clear(bot_id: int):
+        """Drop a bot's custom rules — it goes back to the standard
+        v1 signals. The confirm is the button's own prompt."""
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        bot = db.execute(
+            "SELECT * FROM bots WHERE id = ? AND user_id = ?",
+            (bot_id, user["id"])).fetchone()
+        if not bot:
+            abort(404)
+        rules, _err = load_rules(bot)
+        if rules is None:
+            flash("That bot has no custom rules to clear.")
+            return redirect(url_for("bot_detail", bot_id=bot_id))
+        db.execute("UPDATE bots SET rules_json = '', updated_at = ? "
+                   "WHERE id = ? AND user_id = ?",
+                   (_now(), bot_id, user["id"]))
+        db.commit()
+        _log(app, user["id"], "rules_clear",
+             f"Cleared custom rules for bot '{bot['name']}' — back to "
+             f"standard signals.")
+        flash("Custom rules cleared — the bot is back to standard signals.")
+        return redirect(url_for("bot_detail", bot_id=bot_id))
 
     @app.route("/bots/<int:bot_id>/delete", methods=["POST"])
     @login_required
@@ -1186,6 +1279,50 @@ def register_routes(app: Flask) -> None:
         intent = parsed["intent"]
 
         if intent == "confirm_yes":
+            pending_rules = session.pop("pending_rules", None)
+            if pending_rules:
+                db = _db(app)
+                bot = db.execute(
+                    "SELECT * FROM bots WHERE id = ? AND user_id = ?",
+                    (pending_rules["bot_id"], user["id"])).fetchone()
+                if not bot:
+                    return jsonify({"reply": "That bot is already gone."})
+                cleaned, err = validate_ruleset(pending_rules["rules"],
+                                                bot=bot)
+                if err:
+                    return jsonify({"reply":
+                        f"Those rules no longer check out ({err}) — "
+                        f"nothing was changed."})
+                db.execute("UPDATE bots SET rules_json = ?, updated_at = ? "
+                           "WHERE id = ? AND user_id = ?",
+                           (json.dumps(cleaned), _now(), bot["id"],
+                            user["id"]))
+                db.commit()
+                _log(app, user["id"], "rules_set",
+                     f"Set custom rules for bot '{bot['name']}' "
+                     f"(assistant).")
+                return jsonify({"reply":
+                    f"Done — bot '{bot['name']}' now follows these "
+                    f"rules:\n{summarize_rules(cleaned)}\n\n"
+                    f"It will never trade outside them or its limits."})
+            pending_clear = session.pop("pending_rules_clear", None)
+            if pending_clear:
+                db = _db(app)
+                bot = db.execute(
+                    "SELECT * FROM bots WHERE id = ? AND user_id = ?",
+                    (pending_clear, user["id"])).fetchone()
+                if not bot:
+                    return jsonify({"reply": "That bot is already gone."})
+                db.execute("UPDATE bots SET rules_json = '', updated_at = ? "
+                           "WHERE id = ? AND user_id = ?",
+                           (_now(), bot["id"], user["id"]))
+                db.commit()
+                _log(app, user["id"], "rules_clear",
+                     f"Cleared custom rules for bot '{bot['name']}' "
+                     f"(assistant).")
+                return jsonify({"reply":
+                    f"Done — bot '{bot['name']}' is back to the standard "
+                    f"signals."})
             pending_silent = session.pop("pending_silent", None)
             if pending_silent:
                 db = _db(app)
@@ -1237,6 +1374,8 @@ def register_routes(app: Flask) -> None:
         if intent == "cancel":
             session.pop("pending_delete_bot", None)
             session.pop("pending_silent", None)
+            session.pop("pending_rules", None)
+            session.pop("pending_rules_clear", None)
             return jsonify({"reply": "Cancelled — nothing was changed."})
 
         if intent == "balance":
@@ -1347,6 +1486,131 @@ def register_routes(app: Flask) -> None:
             return jsonify({"reply":
                 f"Are you sure you want to delete bot '{bot['name']}'? "
                 f"Reply \"yes\" to delete it, or \"no\" to keep it."})
+
+        if intent == "rules_propose":
+            db = _db(app)
+            bot_name = parsed.get("bot_name")
+            if not bot_name:
+                return jsonify({"reply":
+                    "Which bot should follow these rules? Say \"bot "
+                    "<name> scan ...\" — or \"show my bots\" to see them."})
+            bot = _find_bot_by_name(db, user["id"], bot_name)
+            if not bot:
+                return jsonify({"reply":
+                    f"I couldn't find a bot called '{bot_name}'. "
+                    f"Say \"show my bots\" to see them."})
+            partial = dict(parsed.get("rules") or {})
+            if partial.get("trailing_stop_pct") is None:
+                partial["trailing_stop_pct"] = float(bot["stop_loss_pct"])
+            cleaned, err = validate_ruleset(partial, bot=bot)
+            if err:
+                return jsonify({"reply":
+                    f"I can't use those rules: {err} Nothing was changed."})
+            summary = summarize_rules(cleaned)
+            session["pending_rules"] = {"bot_id": bot["id"],
+                                        "rules": cleaned}
+            return jsonify({"reply":
+                f"Here is what I understood for bot '{bot['name']}':\n"
+                f"{summary}\n\n"
+                f"The bot will only trade inside these rules, and never "
+                f"outside its limits (buy size {bot['buy_size_pct']}%, "
+                f"stop loss {bot['stop_loss_pct']}%, max "
+                f"{bot['max_open_trades']} open trades, never more than "
+                f"your balance). Reply \"yes\" to apply them, or \"no\" "
+                f"to leave the bot as it is."})
+
+        if intent == "rules_show":
+            db = _db(app)
+            bot_name = parsed.get("bot_name")
+            if bot_name:
+                bot = _find_bot_by_name(db, user["id"], bot_name)
+                if not bot:
+                    return jsonify({"reply":
+                        f"I couldn't find a bot called '{bot_name}'. "
+                        f"Say \"show my bots\" to see them."})
+                rules, err = load_rules(bot)
+                if err:
+                    return jsonify({"reply":
+                        f"Bot '{bot['name']}' has stored rules I can't "
+                        f"read ({err}) — it makes no trades until they "
+                        f"are fixed. Ask me to set new rules, or remove "
+                        f"them."})
+                return jsonify({"reply":
+                    f"Rules for '{bot['name']}':\n"
+                    f"{summarize_rules(rules)}"})
+            bots = db.execute(
+                "SELECT * FROM bots WHERE user_id = ?",
+                (user["id"],)).fetchall()
+            if not bots:
+                return jsonify({"reply":
+                    "You have no bots yet. Say \"create bot\" and I will "
+                    "make one for you."})
+            lines = []
+            for b in bots:
+                rules, err = load_rules(b)
+                if err:
+                    lines.append(f"- {b['name']}: stored rules are broken "
+                                 f"({err}) — no trades.")
+                elif rules:
+                    lines.append(f"- {b['name']}:\n{summarize_rules(rules)}")
+                else:
+                    lines.append(
+                        f"- {b['name']}: standard signals (buy +2% in "
+                        f"24h, sell −5% in 24h).")
+            return jsonify({"reply": "\n".join(lines)})
+
+        if intent == "rules_clear":
+            db = _db(app)
+            bot_name = parsed.get("bot_name")
+            if not bot_name:
+                return jsonify({"reply":
+                    "Which bot? Say \"remove rules for <bot name>\"."})
+            bot = _find_bot_by_name(db, user["id"], bot_name)
+            if not bot:
+                return jsonify({"reply":
+                    f"I couldn't find a bot called '{bot_name}'. "
+                    f"Say \"show my bots\" to see them."})
+            rules, _err = load_rules(bot)
+            if rules is None:
+                return jsonify({"reply":
+                    f"Bot '{bot['name']}' has no custom rules — it "
+                    f"already uses the standard signals."})
+            session["pending_rules_clear"] = bot["id"]
+            return jsonify({"reply":
+                f"Remove the custom rules from '{bot['name']}' and go "
+                f"back to the standard signals? Reply \"yes\" to remove "
+                f"them, or \"no\" to keep them."})
+
+        if intent == "preset_create":
+            db = _db(app)
+            existing = db.execute(
+                "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+                "AND rules_json LIKE ?",
+                (user["id"], TRENCHES_CATEGORY,
+                 '%"kind": "trenches"%')).fetchone()
+            if existing:
+                return jsonify({"reply":
+                    "You already have a Trenches bot (Memecoin build). "
+                    "Open it on the Bots page."})
+            token = new_token()
+            cur = db.execute(
+                "INSERT INTO bots (user_id, name, strategy, coins, "
+                "buy_size_pct, stop_loss_pct, mode, silent, "
+                "max_open_trades, api_token_hash, category, rules_json) "
+                "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?)",
+                (user["id"], TRENCHES_PRESET_NAME, hash_token(token),
+                 TRENCHES_CATEGORY, json.dumps(trenches_ruleset())))
+            db.commit()
+            _log(app, user["id"], "bot_create",
+                 f"Created bot '{TRENCHES_PRESET_NAME}' (Memecoin build "
+                 f"preset, paper) via assistant.")
+            return jsonify({"reply":
+                f"Created the {TRENCHES_PRESET_NAME} bot (Memecoin "
+                f"build, paper):\n{summarize_rules(trenches_ruleset())}"
+                f"\n\nSilent trading is off. Say \"turn on silent "
+                f"trading for {TRENCHES_PRESET_NAME}\" when you want it "
+                f"to trade on its own within these rules.",
+                "bot_id": cur.lastrowid})
 
         if intent == "silent_status":
             bots = _db(app).execute(

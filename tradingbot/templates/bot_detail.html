@@ -1,8 +1,25 @@
 {% extends "base.html" %}
 {% block title %}{{ bot.name }} — Trading Bot{% endblock %}
 {% block content %}
-<h1>{{ bot.name }} <span class="muted">({{ bot.strategy }} · {{ bot.mode }})</span> {% if bot.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</h1>
+<h1>{{ bot.name }} <span class="muted">({{ bot.strategy }} · {{ bot.mode }})</span> {% if bot.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}{% if bot.category %} <span class="badge">{{ bot.category }}</span>{% endif %}</h1>
 <p class="muted">Watching: {{ bot.coins }} · Buy size: {{ bot.buy_size_pct }}% · Stop loss: {{ bot.stop_loss_pct }}% · Max open trades: {{ bot.max_open_trades }}</p>
+
+<div class="card">
+  <h2>Trading rules</h2>
+  {% if rules_error %}
+  <p><strong>These rules are broken ({{ rules_error }}) — this bot makes no trades until they are fixed.</strong> Ask the assistant to set new rules, or clear them below.</p>
+  {% else %}
+  <pre>{{ rules_summary }}</pre>
+  {% endif %}
+  {% if rules_summary and rules_summary != "No custom rules — standard signals apply." and not rules_error %}
+  <form method="post" action="{{ url_for('bot_rules_clear', bot_id=bot.id) }}" onsubmit="return confirm('Clear the custom rules and go back to standard signals?');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn ghost small" type="submit">Clear custom rules</button>
+  </form>
+  {% else %}
+  <p class="muted small">Ask the assistant to set custom rules, for example: “bot {{ bot.name }} scan pump.fun and pumpswap, buy when a coin gains 5% in 5 minutes”. The assistant shows the rules back and asks you to confirm before applying them.</p>
+  {% endif %}
+</div>
 <p>
   <a class="btn ghost" href="{{ url_for('bot_edit', bot_id=bot.id) }}">Edit bot</a>
   <a class="btn ghost" href="{{ url_for('bot_silent', bot_id=bot.id, to=0 if bot.silent else 1) }}">{{ "Turn silent OFF" if bot.silent else "Turn silent ON" }}</a>

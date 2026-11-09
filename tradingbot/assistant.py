@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import re
 
+from .rules import WINDOW_METRICS
+
 STRATEGIES = ("careful", "balanced", "bold")
 
 CAPABILITIES = (
@@ -21,8 +23,16 @@ CAPABILITIES = (
     "- \"show my wallet\" — your app wallet address and balance\n"
     "- \"show my bots\" — list your trading bots\n"
     "- \"create bot\" — start a new bot (I can take a name and strategy)\n"
+    "- \"create the trenches bot\" — a memecoin bot that scans pump.fun "
+    "and PumpSwap (see Memecoin build)\n"
     "- \"edit bot <name> strategy to bold\" — change a bot's settings\n"
     "- \"delete bot <name>\" — remove a bot (I ask first)\n"
+    "- \"bot <name> scan pump.fun and pumpswap, buy when a coin gains "
+    "5% in 5 minutes\" — set a bot's trading rules (I show them back "
+    "and ask you to confirm first; the bot can never trade outside "
+    "them or its limits)\n"
+    "- \"show rules for <bot>\" — what rules a bot follows right now\n"
+    "- \"remove rules for <bot>\" — back to the standard signals\n"
     "- \"turn on silent trading for <bot>\" — the bot trades on its own "
     "within your limits (I ask first); \"turn it off\" stops it at once\n"
     "- \"is silent trading on\" — which bots are silent right now\n"
@@ -56,6 +66,126 @@ SILENT_HELP = (
 
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+_WINDOW_WORDS = {"min": 1, "mins": 1, "minute": 1, "minutes": 1,
+                 "hour": 60, "hours": 60, "h": 60,
+                 "day": 1440, "days": 1440}
+
+
+def _parse_rules_command(msg: str, raw: str):
+    """Parse a plain-language rules instruction into a partial rule set.
+
+    Returns (partial_rules, bot_name) or ("unsupported", reply) when
+    the instruction is a rules instruction the grammar cannot express,
+    or None when the message is not a rules instruction at all. A
+    partial rule set may leave trailing_stop_pct as None — the route
+    fills it from the bot's own stop loss before validating.
+    """
+    # Buy pattern, two shapes:
+    #   "gains 5% in 5 minutes" / "up 3.4% in 5 min"
+    #   "gaining in a 5 min window by 5%"
+    buy = re.search(
+        r"(?:gain|gains|gaining|up|rise|rises|rising|increase|increases)"
+        r"s?\s+(?:by\s+)?([\d.]+)\s*%\s*(?:in|over|within)?\s*(?:a\s+|an\s+)?"
+        r"(\d+)\s*(min|mins|minute|minutes|hour|hours|h|day|days)\b", msg)
+    if buy:
+        threshold = float(buy.group(1))
+        window_minutes = int(buy.group(2)) * _WINDOW_WORDS[buy.group(3)]
+    else:
+        buy2 = re.search(
+            r"(?:in|over|within)\s*(?:a\s+|an\s+)?(\d+)\s*"
+            r"(min|mins|minute|minutes|hour|hours|h|day|days)\s*"
+            r"(?:window\s*)?(?:by\s+)?([\d.]+)\s*%", msg)
+        if not buy2:
+            return None
+        window_minutes = int(buy2.group(1)) * _WINDOW_WORDS[buy2.group(2)]
+        threshold = float(buy2.group(3))
+    window_seconds = window_minutes * 60
+    if window_seconds not in WINDOW_METRICS:
+        return ("unsupported",
+                "I can only use 5-minute, 1-hour, 6-hour, or 24-hour "
+                "windows — those are the windows the price feed "
+                "provides. Nothing was changed; try again with one of "
+                "those windows.")
+
+    # Bot name: "bot <name>" up to the next keyword, or "for <name>".
+    bot_name = None
+    nm = re.search(
+        r"\bbot\s+(?:named\s+)?([A-Za-z0-9_\- ]+?)"
+        r"(?:\s+(?:scan|set|rules|buy|sell|,\s)|$)", raw, re.IGNORECASE)
+    if nm:
+        bot_name = nm.group(1).strip()
+    else:
+        fm = re.search(r"\bfor\s+(?:bot\s+)?([A-Za-z0-9_\- ]+?)\s*$",
+                       raw, re.IGNORECASE)
+        if fm:
+            bot_name = fm.group(1).strip()
+
+    sources = []
+    if "pump.fun" in msg or "pump fun" in msg:
+        sources.append("pump.fun")
+    if "pumpswap" in msg or "pump swap" in msg:
+        sources.append("pumpswap")
+    if "dexscreener" in msg:
+        sources.append("dexscreener")
+    if not sources and "scan" in msg:
+        sources = ["pump.fun", "pumpswap"]
+
+    interval = 60
+    im = re.search(
+        r"every\s+(\d+)\s*(second|seconds|minute|minutes|hour|hours)\b",
+        msg)
+    if im:
+        n = int(im.group(1))
+        unit = im.group(2)
+        interval = n * (1 if unit.startswith("second")
+                        else 60 if unit.startswith("minute") else 3600)
+    elif "every minute" in msg:
+        interval = 60
+    elif "every hour" in msg:
+        interval = 3600
+
+    # Sell ladder: "sell 10% at 3% profit" / "90% at 10%" / "the 90 at 10%".
+    ladder = []
+    for m in re.finditer(
+            r"(\d+(?:\.\d+)?)\s*%?\s*(?:of\s+(?:(?:the|total|position|"
+            r"coins?|holding|rest|remaining)\s+)*)?at\s*\+?\s*"
+            r"(\d+(?:\.\d+)?)\s*%\s*(?:profit)?", msg):
+        ladder.append({"pct_of_position": float(m.group(1)),
+                       "profit_pct": float(m.group(2))})
+    if not ladder:
+        ladder = [{"pct_of_position": 100.0, "profit_pct": 10.0}]
+
+    # Trailing stop: "sell all if it declines 7% of highest value" /
+    # "sell all if it falls 7% below the highest price" / "trailing
+    # stop 7%".
+    trailing = None
+    tm = re.search(
+        r"(?:sell all|sell everything)\s+if[^.]*?"
+        r"(?:drop|drops|fall|falls|decline|declines|down)\s+(?:by\s+)?"
+        r"([\d.]+)\s*%\s*(?:of\s+)?(?:below\s+|under\s+|from\s+)?"
+        r"(?:the\s+)?(?:highest|peak|high)", msg)
+    if tm:
+        trailing = float(tm.group(1))
+    else:
+        tm2 = re.search(r"trailing stop\s+(?:of\s+)?([\d.]+)\s*%", msg)
+        if tm2:
+            trailing = float(tm2.group(1))
+
+    partial = {
+        "version": 1,
+        "kind": "trenches" if sources or window_seconds == 300 else "signals",
+        "scan_sources": sources,
+        "scan_interval_seconds": interval,
+        "buy": {"metric": WINDOW_METRICS[window_seconds],
+                "window_seconds": window_seconds,
+                "threshold_pct": threshold, "pick": "strongest"},
+        "sell_ladder": ladder,
+        "trailing_stop_pct": trailing,
+        "max_new_positions_per_scan": 1,
+    }
+    return partial, bot_name
 
 
 def parse_message(text: str) -> dict:
@@ -117,6 +247,11 @@ def parse_message(text: str) -> dict:
         return {"intent": "bot_edit", "bot_name": name, "fields": fields,
                 "reply": ""}
 
+    # Trenches preset: "create the trenches bot" / "make a trenches bot".
+    if "trenches" in msg and "bot" in msg and re.search(
+            r"\b(create|make|new|add|start)\b", msg):
+        return {"intent": "preset_create", "preset": "trenches", "reply": ""}
+
     # Create bot: "create bot", "create bot named Luna", "create bot bold"
     if msg.startswith("create bot") or msg.startswith("make bot") \
             or msg.startswith("new bot"):
@@ -133,6 +268,42 @@ def parse_message(text: str) -> dict:
                 break
         return {"intent": "bot_create", "bot_name": name,
                 "strategy": strategy, "reply": ""}
+
+    # Bot rules: "bot Luna scan pump.fun and pumpswap, buy when a coin
+    # gains 5% in 5 minutes" / "set rules for bot Luna ...". The parser
+    # only proposes — the route shows the rules back and asks for a
+    # confirmation before anything is stored.
+    parsed_rules = _parse_rules_command(msg, raw)
+    if isinstance(parsed_rules, tuple) and len(parsed_rules) == 2 \
+            and parsed_rules[0] == "unsupported":
+        return {"intent": "rules_unsupported",
+                "reply": parsed_rules[1]}
+    if parsed_rules:
+        partial, bot_name = parsed_rules
+        return {"intent": "rules_propose", "bot_name": bot_name,
+                "rules": partial, "reply": ""}
+
+    # Show rules: "show rules for Luna" / "what are Luna's rules".
+    if "rules" in msg and re.search(
+            r"\b(show|what|list|see|tell)\b", msg):
+        name = None
+        fm = re.search(r"\bfor\s+(?:bot\s+)?(.+?)\s*$", raw, re.IGNORECASE)
+        if fm:
+            name = fm.group(1).strip()
+        return {"intent": "rules_show", "bot_name": name, "reply": ""}
+
+    # Clear rules: "remove rules for Luna" / "reset bot Luna rules".
+    if "rules" in msg and re.search(
+            r"\b(remove|clear|reset|delete)\b", msg):
+        name = None
+        fm = re.search(r"\bfor\s+(?:bot\s+)?(.+?)\s*$", raw, re.IGNORECASE)
+        if fm:
+            name = fm.group(1).strip()
+        if not name:
+            bm = re.search(r"\bbot\s+(.+?)\s+rules\b", raw, re.IGNORECASE)
+            if bm:
+                name = bm.group(1).strip()
+        return {"intent": "rules_clear", "bot_name": name, "reply": ""}
 
     # Silent trading: "turn on silent trading for <name>",
     # "turn off silent trading for <name>", "is silent trading on".

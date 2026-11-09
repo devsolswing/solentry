@@ -14,6 +14,13 @@
       </select>
     </label>
     <label>Coins to watch (comma separated, e.g. SOL, BTC, ETH)<input name="coins" value="{{ bot.coins if bot else 'SOL' }}"></label>
+    <label>Category
+      <select name="category">
+        <option value="" {{ 'selected' if not bot or not bot.category else '' }}>None</option>
+        <option value="Memecoin build" {{ 'selected' if bot and bot.category == 'Memecoin build' else '' }}>Memecoin build</option>
+      </select>
+    </label>
+    <p class="muted small">Memecoin build bots scan pump.fun and PumpSwap for new tokens. Their trading rules are set through the assistant, which shows them back and asks you to confirm.</p>
     <label>Buy size (% of bankroll per trade)<input type="number" name="buy_size_pct" step="any" min="1" max="100" value="{{ bot.buy_size_pct if bot else 20 }}"></label>
     <label>Stop loss (%)<input type="number" name="stop_loss_pct" step="any" min="1" max="50" value="{{ bot.stop_loss_pct if bot else 7 }}"></label>
     <label>Max open trades (1–5)<input type="number" name="max_open_trades" step="1" min="1" max="5" value="{{ bot.max_open_trades if bot else 3 }}"></label>
