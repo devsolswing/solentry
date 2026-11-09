@@ -269,6 +269,36 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
+
+-- ∆scanner∆ price marks: one price per candidate mint per scan, so
+-- the scanner can compute a 3-minute gain (the feed only provides
+-- 5-minute changes). Marks older than 10 minutes are pruned on
+-- every scan. No mark at least 3 minutes old means no 3-minute
+-- gain — the coin is not bought, never guessed.
+CREATE TABLE IF NOT EXISTS scanner_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    mint TEXT NOT NULL,
+    price_usd REAL NOT NULL,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
+CREATE INDEX IF NOT EXISTS idx_scanner_marks_bot_mint
+    ON scanner_marks (bot_id, mint, recorded_at);
+
+-- ∆scanner∆ top-10 wallets watch: the combined holdings of a held
+-- coin's 10 largest token accounts, tracked per bot per mint. The
+-- baseline is the first observation after the position opens,
+-- tracked upward to the peak; a drop of 10% from that peak is the
+-- dump signal. Rows are cleared when the position closes.
+CREATE TABLE IF NOT EXISTS scanner_top10 (
+    bot_id INTEGER NOT NULL,
+    mint TEXT NOT NULL,
+    top10_total INTEGER NOT NULL,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (bot_id, mint),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
 """
 
 

@@ -47,9 +47,10 @@ from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, get_prices
-from .rules import (RUG_SELL_DEFAULT, TRENCHES_CATEGORY,
-                    TRENCHES_PRESET_NAME, load_rules, summarize_rules,
-                    trenches_ruleset, validate_ruleset)
+from .rules import (RUG_SELL_DEFAULT, SCANNER_CATEGORY, SCANNER_DISPLAY,
+                    SCANNER_PRESET_NAME, TRENCHES_CATEGORY,
+                    TRENCHES_PRESET_NAME, load_rules, scanner_ruleset,
+                    summarize_rules, trenches_ruleset, validate_ruleset)
 from .security import (encrypt_secret, hash_password, hash_token,
                        new_csrf_token, new_token, temporary_secret,
                        verify_password, verify_turnstile, wipe_secret)
@@ -285,7 +286,7 @@ def _find_bot_by_name(db, user_id: int, name: str):
 
 def _valid_category(value: str) -> str:
     """Bot categories are a closed list — anything else is no category."""
-    return value if value == TRENCHES_CATEGORY else ""
+    return value if value in (TRENCHES_CATEGORY, SCANNER_CATEGORY) else ""
 
 
 def _wallet(app, user_id: int):
@@ -2071,8 +2072,12 @@ def register_routes(app: Flask) -> None:
             ).fetchall()
         memecoin_bots = [b for b in bots
                          if b["category"] == TRENCHES_CATEGORY]
+        scanner_bots = [b for b in bots
+                        if b["category"] == SCANNER_CATEGORY]
         return render_template("bots.html", bots=bots,
                                memecoin_bots=memecoin_bots,
+                               scanner_bots=scanner_bots,
+                               scanner_display=SCANNER_DISPLAY,
                                mode=mode, mode_label=_mode_label(mode))
 
     @app.route("/bots/create", methods=["GET", "POST"])
@@ -2183,6 +2188,44 @@ def register_routes(app: Flask) -> None:
         flash(f"Created the {TRENCHES_PRESET_NAME} bot (Memecoin build, "
               f"paper). Turn silent trading on when you are ready — "
               f"it only trades within its rules and limits.")
+        return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
+
+    @app.route("/bots/preset/scanner", methods=["POST"])
+    @login_required
+    def bot_preset_scanner():
+        """Create the Scanner sniper bot (∆scanner∆ preset).
+
+        Paper mode, silent off. One per user — if a Scanner bot
+        already exists, go to it instead of making a duplicate.
+        """
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        existing = db.execute(
+            "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+            "AND rules_json LIKE ?",
+            (user["id"], SCANNER_CATEGORY, '%"kind": "scanner"%')
+            ).fetchone()
+        if existing:
+            flash("You already have a Scanner bot.")
+            return redirect(url_for("bot_detail", bot_id=existing["id"]))
+        token = new_token()
+        cur = db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash, category, rules_json, platform) "
+            "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?, "
+            "'pump.fun')",
+            (user["id"], SCANNER_PRESET_NAME, hash_token(token),
+             SCANNER_CATEGORY, json.dumps(scanner_ruleset())))
+        db.commit()
+        _log(app, user["id"], "bot_create",
+             f"Created bot '{SCANNER_PRESET_NAME}' ({SCANNER_DISPLAY} "
+             f"preset, paper). Silent trading is off.", "paper")
+        flash(f"Created the {SCANNER_PRESET_NAME} bot "
+              f"({SCANNER_DISPLAY}, paper). Turn silent trading on when "
+              f"you are ready — it only trades within its rules and "
+              f"limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
     @app.route("/bots/<int:bot_id>")
@@ -2577,6 +2620,47 @@ def register_routes(app: Flask) -> None:
                 return jsonify({"reply":
                     f"Done — bot '{bot['name']}' is back to the standard "
                     f"signals."})
+            pending_scanner = session.pop("pending_scanner", None)
+            if pending_scanner:
+                db = _db(app)
+                existing = db.execute(
+                    "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+                    "AND rules_json LIKE ?",
+                    (user["id"], SCANNER_CATEGORY,
+                     '%"kind": "scanner"%')).fetchone()
+                if existing:
+                    return jsonify({"reply":
+                        f"You already have a {SCANNER_PRESET_NAME} bot "
+                        f"({SCANNER_DISPLAY}). Open it on the Bots page."})
+                rules = pending_scanner.get("rules") or scanner_ruleset()
+                cleaned, err = validate_ruleset(rules)
+                if err:
+                    return jsonify({"reply":
+                        f"Those scanner rules no longer check out ({err}) "
+                        f"— nothing was changed."})
+                token = new_token()
+                cur = db.execute(
+                    "INSERT INTO bots (user_id, name, strategy, coins, "
+                    "buy_size_pct, stop_loss_pct, mode, silent, "
+                    "max_open_trades, api_token_hash, category, "
+                    "rules_json, platform) "
+                    "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, "
+                    "?, ?, 'pump.fun')",
+                    (user["id"], SCANNER_PRESET_NAME, hash_token(token),
+                     SCANNER_CATEGORY, json.dumps(cleaned)))
+                db.commit()
+                _log(app, user["id"], "bot_create",
+                     f"Created bot '{SCANNER_PRESET_NAME}' "
+                     f"({SCANNER_DISPLAY} preset, paper) via assistant.",
+                     "paper")
+                return jsonify({"reply":
+                    f"Done — created the {SCANNER_PRESET_NAME} bot "
+                    f"({SCANNER_DISPLAY} sniper, paper):\n"
+                    f"{summarize_rules(cleaned)}\n\n"
+                    f"Silent trading is off. Say \"turn on silent "
+                    f"trading for {SCANNER_PRESET_NAME}\" when you want "
+                    f"it to trade on its own within these rules.",
+                    "bot_id": cur.lastrowid})
             pending_silent = session.pop("pending_silent", None)
             if pending_silent:
                 db = _db(app)
@@ -2636,6 +2720,7 @@ def register_routes(app: Flask) -> None:
             session.pop("pending_silent", None)
             session.pop("pending_rules", None)
             session.pop("pending_rules_clear", None)
+            session.pop("pending_scanner", None)
             return jsonify({"reply": "Cancelled — nothing was changed."})
 
         if intent == "balance":
@@ -2750,6 +2835,23 @@ def register_routes(app: Flask) -> None:
         if intent == "rules_propose":
             db = _db(app)
             bot_name = parsed.get("bot_name")
+            partial = dict(parsed.get("rules") or {})
+            if not bot_name and partial.get("kind") == "scanner":
+                # "snipe coins gaining 5% in 3 minutes" names no bot:
+                # the scanner IS the bot. Show the rules back and
+                # create it on "yes".
+                cleaned, err = validate_ruleset(partial)
+                if err:
+                    return jsonify({"reply":
+                        f"I can't use those rules: {err} Nothing was "
+                        f"changed."})
+                session["pending_scanner"] = {"rules": cleaned}
+                return jsonify({"reply":
+                    f"Here is the Scanner bot ({SCANNER_DISPLAY} "
+                    f"sniper) with those rules:\n"
+                    f"{summarize_rules(cleaned)}\n\n"
+                    f"Reply \"yes\" to create it, or \"no\" to leave "
+                    f"things as they are."})
             if not bot_name:
                 return jsonify({"reply":
                     "Which bot should follow these rules? Say \"bot "
@@ -2759,7 +2861,6 @@ def register_routes(app: Flask) -> None:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{bot_name}'. "
                     f"Say \"show my bots\" to see them."})
-            partial = dict(parsed.get("rules") or {})
             if partial.get("trailing_stop_pct") is None:
                 partial["trailing_stop_pct"] = float(bot["stop_loss_pct"])
             cleaned, err = validate_ruleset(partial, bot=bot)
@@ -2892,6 +2993,26 @@ def register_routes(app: Flask) -> None:
                 f"them, or \"no\" to keep them."})
 
         if intent == "preset_create":
+            preset = parsed.get("preset") or "trenches"
+            if preset == "scanner":
+                db = _db(app)
+                existing = db.execute(
+                    "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+                    "AND rules_json LIKE ?",
+                    (user["id"], SCANNER_CATEGORY,
+                     '%"kind": "scanner"%')).fetchone()
+                if existing:
+                    return jsonify({"reply":
+                        f"You already have a {SCANNER_PRESET_NAME} bot "
+                        f"({SCANNER_DISPLAY}). Open it on the Bots page."})
+                session["pending_scanner"] = {
+                    "rules": scanner_ruleset()}
+                return jsonify({"reply":
+                    f"Here is the {SCANNER_PRESET_NAME} bot "
+                    f"({SCANNER_DISPLAY} sniper, paper):\n"
+                    f"{summarize_rules(scanner_ruleset())}\n\n"
+                    f"Silent trading is off. Reply \"yes\" to create "
+                    f"it, or \"no\" to leave things as they are."})
             db = _db(app)
             existing = db.execute(
                 "SELECT id FROM bots WHERE user_id = ? AND category = ? "

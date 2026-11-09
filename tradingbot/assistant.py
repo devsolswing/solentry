@@ -25,12 +25,19 @@ CAPABILITIES = (
     "- \"create bot\" — start a new bot (I can take a name and strategy)\n"
     "- \"create the trenches bot\" — a memecoin bot that scans pump.fun "
     "and PumpSwap (see Memecoin build)\n"
+    "- \"create the scanner bot\" — a sniper (∆scanner∆) that buys any "
+    "coin gaining 5% in 3 minutes, scanning every 30 seconds, and "
+    "sells everything if the top 10 wallets dump 10% (proceeds stay "
+    "in SOL)\n"
     "- \"edit bot <name> strategy to bold\" — change a bot's settings\n"
     "- \"delete bot <name>\" — remove a bot (I ask first)\n"
     "- \"bot <name> scan pump.fun and pumpswap, buy when a coin gains "
     "5% in 5 minutes\" — set a bot's trading rules (I show them back "
     "and ask you to confirm first; the bot can never trade outside "
     "them or its limits)\n"
+    "- \"snipe coins gaining 5% in 3 minutes\" — set up a scanner "
+    "sniper the same way (I show the rules back and ask you to "
+    "confirm first)\n"
     "- \"show rules for <bot>\" — what rules a bot follows right now\n"
     "- \"remove rules for <bot>\" — back to the standard signals\n"
     "- \"sell everything if the dev starts selling\" — add a rug sell "
@@ -142,6 +149,22 @@ def _parse_rug(msg: str, raw: str):
     return (rug, _extract_bot_name(raw), None)
 
 
+def _parse_top10(msg: str):
+    """Parse a top-10 wallets dump instruction into a top10_rug rule.
+
+    "sell if the top wallets dump" / "if the top 10 wallets drop 10%"
+    — the top 10 holders' combined holdings falling means the big
+    holders are selling. Returns {"drop_pct": ...} (10% default) or
+    None when the message carries no top-wallets instruction.
+    """
+    if not re.search(r"\btop\s*(10|ten)?\s*wallets?\b", msg):
+        return None
+    dm = re.search(
+        r"\btop\s*(?:10|ten)?\s*wallets?\b[^.]{0,80}?"
+        r"(\d+(?:\.\d+)?)\s*%", msg)
+    return {"drop_pct": float(dm.group(1)) if dm else 10.0}
+
+
 def _parse_rules_command(msg: str, raw: str):
     """Parse a plain-language rules instruction into a partial rule set.
 
@@ -182,10 +205,12 @@ def _parse_rules_command(msg: str, raw: str):
     window_seconds = window_minutes * 60
     if window_seconds not in WINDOW_METRICS:
         return ("unsupported",
-                "I can only use 5-minute, 1-hour, 6-hour, or 24-hour "
-                "windows — those are the windows the price feed "
-                "provides. Nothing was changed; try again with one of "
-                "those windows.")
+                "I can only use 3-minute (scanner), 5-minute, 1-hour, "
+                "6-hour, or 24-hour windows — those are the windows the "
+                "price feed provides, plus the 3-minute window the "
+                "scanner tracks itself. Nothing was changed; try again "
+                "with one of those windows.")
+    is_scanner = window_seconds == 180
 
     # Bot name: "bot <name>" up to the next keyword, or "for <name>".
     bot_name = _extract_bot_name(raw)
@@ -199,8 +224,12 @@ def _parse_rules_command(msg: str, raw: str):
         sources.append("dexscreener")
     if not sources and "scan" in msg:
         sources = ["pump.fun", "pumpswap"]
+    if not sources and is_scanner:
+        # A 3-minute gain is only tracked on the pump.fun/PumpSwap
+        # feed, so a scanner defaults to those sources.
+        sources = ["pump.fun", "pumpswap"]
 
-    interval = 60
+    interval = 30 if is_scanner else 60
     im = re.search(
         r"every\s+(\d+)\s*(second|seconds|minute|minutes|hour|hours)\b",
         msg)
@@ -223,7 +252,10 @@ def _parse_rules_command(msg: str, raw: str):
         ladder.append({"pct_of_position": float(m.group(1)),
                        "profit_pct": float(m.group(2))})
     if not ladder:
-        ladder = [{"pct_of_position": 100.0, "profit_pct": 10.0}]
+        # A scanner has no sell ladder: it exits on the rug sense,
+        # the trailing stop and the stop loss.
+        ladder = [] if is_scanner else [
+            {"pct_of_position": 100.0, "profit_pct": 10.0}]
 
     # Trailing stop: "sell all if it declines 7% of highest value" /
     # "sell all if it falls 7% below the highest price" / "trailing
@@ -243,7 +275,8 @@ def _parse_rules_command(msg: str, raw: str):
 
     partial = {
         "version": 1,
-        "kind": "trenches" if sources or window_seconds == 300 else "signals",
+        "kind": "scanner" if is_scanner else (
+            "trenches" if sources or window_seconds == 300 else "signals"),
         "scan_sources": sources,
         "scan_interval_seconds": interval,
         "buy": {"metric": WINDOW_METRICS[window_seconds],
@@ -252,6 +285,7 @@ def _parse_rules_command(msg: str, raw: str):
         "sell_ladder": ladder,
         "trailing_stop_pct": trailing,
         "rug_sell": rug,
+        "top10_rug": _parse_top10(msg),
         "max_new_positions_per_scan": 1,
     }
     return partial, bot_name
@@ -315,6 +349,15 @@ def parse_message(text: str) -> dict:
             flags=re.IGNORECASE)[0].strip()
         return {"intent": "bot_edit", "bot_name": name, "fields": fields,
                 "reply": ""}
+
+    # Scanner preset: "create a scanner bot" / "make a scanner bot
+    # that sells if the top wallets dump" / "create a sniper bot".
+    if "scanner" in msg and "bot" in msg and re.search(
+            r"\b(create|make|new|add|start)\b", msg):
+        return {"intent": "preset_create", "preset": "scanner", "reply": ""}
+    if "snipe" in msg and re.search(
+            r"\b(create|make|new|add|start)\b", msg):
+        return {"intent": "preset_create", "preset": "scanner", "reply": ""}
 
     # Trenches preset: "create the trenches bot" / "make a trenches bot".
     if "trenches" in msg and "bot" in msg and re.search(

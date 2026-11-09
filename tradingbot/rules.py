@@ -15,8 +15,8 @@ NO trades, never a guess.
 Schema (version 1):
     {
       "version": 1,
-      "kind": "trenches" | "signals",
-      "scan_sources": ["pump.fun", "pumpswap"],   # trenches only
+      "kind": "trenches" | "signals" | "scanner",
+      "scan_sources": ["pump.fun", "pumpswap"],   # trenches/scanner only
       "scan_interval_seconds": 60,
       "buy": {"metric": "gain_5m_pct", "window_seconds": 300,
               "threshold_pct": 3.4, "pick": "strongest"},
@@ -25,6 +25,7 @@ Schema (version 1):
       "trailing_stop_pct": 7.0,
       "rug_sell": {"drop_pct": 15.0, "window_seconds": 60,
                    "drop_5m_pct": 25.0},
+      "top10_rug": {"drop_pct": 10.0},
       "max_new_positions_per_scan": 1,
     }
 
@@ -42,10 +43,21 @@ Schema (version 1):
 
   * kind "trenches": scan pump.fun / PumpSwap new tokens through the
     DexScreener feed (trenches.py). kind "signals": the bot's own coin
-    list, evaluated on CoinGecko 24h moves.
-  * buy.metric must match buy.window_seconds: 300 -> gain_5m_pct,
+    list, evaluated on CoinGecko 24h moves. kind "scanner": the
+    ∆scanner∆ sniper — scan pump.fun / PumpSwap every 30 seconds for
+    gainers, buy a coin gaining 5% in 3 minutes (strongest gainer
+    wins), tracked from price marks the loop records itself
+    (scanner.py), because the feed only provides 5-minute changes.
+    A scanner has no sell ladder by default — it exits on the rug
+    sense, the trailing stop and the stop loss. Its top10_rug watches
+    the top 10 holders of every held coin through Solana RPC
+    getTokenLargestAccounts: a 10% drop in their combined holdings
+    from the peak since holding sells everything, proceeds in SOL.
+  * buy.metric must match buy.window_seconds: 180 -> gain_3m_pct
+    (scanner only, computed from recorded marks), 300 -> gain_5m_pct,
     3600 -> gain_1h_pct, 21600 -> gain_6h_pct, 86400 -> gain_24h_pct.
-    Those are the windows the feeds actually provide.
+    Those are the windows the feeds actually provide, plus the
+    3-minute window the scanner computes itself.
   * sell_ladder rungs are % of the ORIGINAL position amount, executed
     in order as profit rises; rung profit thresholds must strictly
     increase and the rung sizes must sum to <= 100.
@@ -60,11 +72,15 @@ import copy
 import json
 
 RULE_VERSION = 1
-RULE_KINDS = ("trenches", "signals")
+RULE_KINDS = ("trenches", "signals", "scanner")
 RULE_SOURCES = ("pump.fun", "pumpswap", "dexscreener")
 
-# Windows the feeds provide, in seconds -> buy-metric name.
+# Windows the feeds provide, in seconds -> buy-metric name. The
+# 3-minute window is the scanner's own: it is computed from price
+# marks the loop records (scanner.py), not from the feed, which only
+# provides 5-minute changes.
 WINDOW_METRICS = {
+    180: "gain_3m_pct",
     300: "gain_5m_pct",
     3600: "gain_1h_pct",
     21600: "gain_6h_pct",
@@ -80,7 +96,7 @@ LIMIT_FIELDS = (
 
 _TOP_LEVEL_KEYS = (
     "version", "kind", "scan_sources", "scan_interval_seconds", "buy",
-    "sell_ladder", "trailing_stop_pct", "rug_sell",
+    "sell_ladder", "trailing_stop_pct", "rug_sell", "top10_rug",
     "max_new_positions_per_scan",
 )
 
@@ -93,6 +109,12 @@ RUG_SELL_DEFAULT = {"drop_pct": 15.0, "window_seconds": 60,
                     "drop_5m_pct": 25.0}
 RUG_SELL_KEYS = ("drop_pct", "window_seconds", "drop_5m_pct")
 RUG_WINDOWS = (60, 300)
+
+# Top-10 wallets rug sense (scanner only): sell everything when the
+# top 10 holders' combined holdings drop this far from the peak since
+# holding. The default 10% is James's number.
+TOP10_RUG_DEFAULT = {"drop_pct": 10.0}
+TOP10_RUG_KEYS = ("drop_pct",)
 
 TRENCHES_CATEGORY = "Memecoin build"
 TRENCHES_PRESET_NAME = "Trenches"
@@ -122,6 +144,52 @@ TRENCHES_RULES = {
 def trenches_ruleset() -> dict:
     """A fresh copy of the Trenches preset."""
     return copy.deepcopy(TRENCHES_RULES)
+
+
+# --- ∆scanner∆ sniper preset -------------------------------------------
+
+SCANNER_CATEGORY = "scanner"
+SCANNER_DISPLAY = "∆scanner∆"
+SCANNER_PRESET_NAME = "Scanner"
+SCANNER_SOURCES = ("pump.fun", "pumpswap")
+SCANNER_INTERVAL_SECONDS = 30
+SCANNER_BUY_GAIN_PCT = 5.0
+SCANNER_BUY_WINDOW_SECONDS = 180
+SCANNER_MAX_NEW_PER_SCAN = 1
+SCANNER_TOP10_DROP_PCT = 10.0
+# A scanner has no sell ladder: James's snipe only names the buy and
+# the rug exits. It exits on the top-10 dump sense, the fast-drop rug
+# sell, the trailing stop and the stop loss.
+SCANNER_TRAILING_STOP_PCT = 7.0
+
+# James's spec, exactly: buy any coin gaining 5% in 3 minutes; scan
+# every 30 seconds for gainers and keep track of improving coins
+# (the strongest 3-minute gainer wins); watch the top 10 wallets of
+# every held coin closely and sell everything if their combined
+# holdings drop 10% — the pump.fun sell pays out in SOL, so the
+# proceeds stay in SOL. The 3-minute gain is computed from price
+# marks the loop records itself (scanner.py) because the DexScreener
+# feed only provides 5-minute changes.
+SCANNER_RULES = {
+    "version": 1,
+    "kind": "scanner",
+    "scan_sources": list(SCANNER_SOURCES),
+    "scan_interval_seconds": SCANNER_INTERVAL_SECONDS,
+    "buy": {"metric": "gain_3m_pct",
+            "window_seconds": SCANNER_BUY_WINDOW_SECONDS,
+            "threshold_pct": SCANNER_BUY_GAIN_PCT,
+            "pick": "strongest"},
+    "sell_ladder": [],
+    "trailing_stop_pct": SCANNER_TRAILING_STOP_PCT,
+    "rug_sell": dict(RUG_SELL_DEFAULT),
+    "top10_rug": {"drop_pct": SCANNER_TOP10_DROP_PCT},
+    "max_new_positions_per_scan": SCANNER_MAX_NEW_PER_SCAN,
+}
+
+
+def scanner_ruleset() -> dict:
+    """A fresh copy of the ∆scanner∆ preset."""
+    return copy.deepcopy(SCANNER_RULES)
 
 
 def _is_number(value) -> bool:
@@ -156,16 +224,18 @@ def validate_ruleset(raw, bot=None):
     kind = raw.get("kind")
     if kind not in RULE_KINDS:
         return _fail("The rule kind must be 'trenches' (scan pump.fun "
-                     "and PumpSwap) or 'signals' (your own coin list).")
+                     "and PumpSwap), 'scanner' (snipe gainers in "
+                     "3 minutes) or 'signals' (your own coin list).")
     interval = raw.get("scan_interval_seconds")
     if not isinstance(interval, int) or isinstance(interval, bool) \
             or not 10 <= interval <= 3600:
         return _fail("Scan interval must be between 10 and 3600 seconds.")
     sources = raw.get("scan_sources", [])
-    if kind == "trenches":
+    if kind in ("trenches", "scanner"):
         if not isinstance(sources, list) or not sources:
-            return _fail("A trenches rule set needs at least one scan "
-                         "source (pump.fun or pumpswap).")
+            return _fail("A trenches or scanner rule set needs at "
+                         "least one scan source (pump.fun or "
+                         "pumpswap).")
         for s in sources:
             if s not in RULE_SOURCES:
                 return _fail(f"Unknown scan source '{s}'.")
@@ -184,9 +254,13 @@ def validate_ruleset(raw, bot=None):
             return _fail(f"Unknown buy setting '{key}'.")
     window = buy.get("window_seconds")
     if window not in WINDOW_METRICS:
-        return _fail("Buy window must be 5 minutes, 1 hour, 6 hours, or "
-                     "24 hours — those are the windows the price feed "
-                     "provides.")
+        return _fail("Buy window must be 3 minutes (scanner only), "
+                     "5 minutes, 1 hour, 6 hours, or 24 hours — those "
+                     "are the windows the price feed provides, plus "
+                     "the 3-minute window the scanner tracks itself.")
+    if kind == "scanner" and window != SCANNER_BUY_WINDOW_SECONDS:
+        return _fail("A scanner buys on a 3-minute gain — that is the "
+                     "only window the scanner tracks.")
     if buy.get("metric") != WINDOW_METRICS[window]:
         return _fail("Buy metric does not match its window.")
     threshold = buy.get("threshold_pct")
@@ -196,8 +270,11 @@ def validate_ruleset(raw, bot=None):
         return _fail("Only 'strongest gainer wins' is supported for "
                      "picking between coins.")
     ladder = raw.get("sell_ladder")
-    if not isinstance(ladder, list) or not 1 <= len(ladder) <= 3:
-        return _fail("A sell ladder needs 1 to 3 steps.")
+    min_rungs = 0 if kind == "scanner" else 1
+    if not isinstance(ladder, list) or not min_rungs <= len(ladder) <= 3:
+        return _fail("A sell ladder needs 1 to 3 steps (a scanner may "
+                     "have none — it exits on the rug sense, trailing "
+                     "stop and stop loss).")
     total_pct = 0
     prev_profit = None
     clean_ladder = []
@@ -259,6 +336,25 @@ def validate_ruleset(raw, bot=None):
                          "1% and 90%.")
         clean_rug = {"drop_pct": float(drop), "window_seconds": rug_window,
                      "drop_5m_pct": float(drop_5m)}
+    top10 = raw.get("top10_rug")
+    clean_top10 = None
+    if top10 is not None:
+        if kind != "scanner":
+            return _fail("The top-10 wallets watch is a scanner rule — "
+                         "it only applies to scanner bots.")
+        if not isinstance(top10, dict):
+            return _fail("The top-10 wallets watch must be a set of "
+                         "settings (drop %).")
+        for key in top10:
+            if key in LIMIT_FIELDS:
+                return _fail(f"'{key}' is a bot limit, not a rule.")
+            if key not in TOP10_RUG_KEYS:
+                return _fail(f"Unknown top-10 wallets setting '{key}'.")
+        top_drop = top10.get("drop_pct", TOP10_RUG_DEFAULT["drop_pct"])
+        if not _is_number(top_drop) or not 1 <= float(top_drop) <= 90:
+            return _fail("The top-10 wallets drop must be between 1% "
+                         "and 90%.")
+        clean_top10 = {"drop_pct": float(top_drop)}
     max_new = raw.get("max_new_positions_per_scan", 1)
     if not isinstance(max_new, int) or isinstance(max_new, bool) \
             or not 1 <= max_new <= 5:
@@ -266,7 +362,8 @@ def validate_ruleset(raw, bot=None):
     cleaned = {
         "version": RULE_VERSION,
         "kind": kind,
-        "scan_sources": list(sources) if kind == "trenches" else [],
+        "scan_sources": list(sources)
+        if kind in ("trenches", "scanner") else [],
         "scan_interval_seconds": interval,
         "buy": {"metric": WINDOW_METRICS[window],
                 "window_seconds": window,
@@ -277,6 +374,8 @@ def validate_ruleset(raw, bot=None):
         "rug_sell": clean_rug,
         "max_new_positions_per_scan": max_new,
     }
+    if kind == "scanner" or clean_top10 is not None:
+        cleaned["top10_rug"] = clean_top10
     return cleaned, None
 
 
@@ -302,9 +401,9 @@ def load_rules(bot):
 
 
 def _window_words(window_seconds: int) -> str:
-    return {300: "5 minutes", 3600: "1 hour", 21600: "6 hours",
-            86400: "24 hours"}.get(window_seconds,
-                                   f"{window_seconds} seconds")
+    return {180: "3 minutes", 300: "5 minutes", 3600: "1 hour",
+            21600: "6 hours", 86400: "24 hours"}.get(
+                window_seconds, f"{window_seconds} seconds")
 
 
 def summarize_rules(rules) -> str:
@@ -318,6 +417,11 @@ def summarize_rules(rules) -> str:
         lines.append(
             f"Scan {sources} every {rules['scan_interval_seconds']} "
             f"seconds for new tokens.")
+    elif rules["kind"] == "scanner":
+        sources = " and ".join(rules["scan_sources"])
+        lines.append(
+            f"Scan {sources} every {rules['scan_interval_seconds']} "
+            f"seconds for gainers, tracking improving coins.")
     else:
         lines.append(
             f"Watch your own coin list every "
@@ -325,11 +429,17 @@ def summarize_rules(rules) -> str:
     lines.append(
         f"Buy when a coin gains {buy['threshold_pct']}% in "
         f"{_window_words(buy['window_seconds'])}"
-        f"{' (strongest gainer wins)' if rules['kind'] == 'trenches' else ''}.")
-    ladder = "; ".join(
-        f"sell {r['pct_of_position']:.0f}% at +{r['profit_pct']:.0f}% profit"
-        for r in rules["sell_ladder"])
-    lines.append(f"Sell ladder: {ladder}.")
+        f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner') else ''}"
+        f"{' — the 3-minute gain is tracked from recorded prices, because the feed only gives 5-minute changes' if rules['kind'] == 'scanner' else ''}.")
+    if rules["sell_ladder"]:
+        ladder = "; ".join(
+            f"sell {r['pct_of_position']:.0f}% at +{r['profit_pct']:.0f}% profit"
+            for r in rules["sell_ladder"])
+        lines.append(f"Sell ladder: {ladder}.")
+    else:
+        lines.append(
+            "Sell ladder: none — exits on the rug sense, trailing "
+            "stop and stop loss only.")
     lines.append(
         f"Sell everything if the price falls "
         f"{rules['trailing_stop_pct']}% below the highest price since "
@@ -344,6 +454,13 @@ def summarize_rules(rules) -> str:
             f"price-based — the feed cannot see the dev's wallet, so "
             f"it triggers on the price falling, not on the dev "
             f"selling.")
+    top10 = rules.get("top10_rug")
+    if top10:
+        lines.append(
+            f"Top-10 wallets: sell everything if the top 10 holders' "
+            f"combined holdings drop {top10['drop_pct']:.0f}% from "
+            f"the peak since holding — the big holders dumping. "
+            f"The proceeds stay in SOL.")
     lines.append(
         f"At most {rules['max_new_positions_per_scan']} new position(s) "
         f"per scan.")

@@ -430,6 +430,18 @@ class SolanaRpcClient:
             raise RpcError("bad getTokenAccountBalance result")
         return int(result["value"]["amount"])
 
+    def get_token_largest_accounts(self, mint: str) -> list:
+        """Largest token accounts for a mint (public RPC, no key).
+
+        Returns the raw `value` list of {"address", "amount",
+        "decimals", "uiAmount", ...} — the caller sums the top 10.
+        Raises RpcError on any bad response.
+        """
+        result = self._call("getTokenLargestAccounts", [mint])
+        if not result or "value" not in result:
+            raise RpcError("bad getTokenLargestAccounts result")
+        return result["value"]
+
     def get_latest_blockhash(self) -> str:
         result = self._call("getLatestBlockhash", [])
         blockhash = (result or {}).get("value", {}).get("blockhash")

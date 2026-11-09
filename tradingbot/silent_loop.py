@@ -53,6 +53,8 @@ from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
 from .pnl import portfolio_totals, record_snapshot
 from .prices import get_prices
 from .rules import load_rules
+from .scanner import (check_top10_rug, clear_watches, gain_3m_pct,
+                      record_marks, top10_total)
 from .signals import signal_for_coin
 from .solana import SolanaRpcClient, lamports_to_sol
 from .trenches import fetch_trenches_scan
@@ -137,6 +139,10 @@ def _close_position(db: sqlite3.Connection, bot, coin: str,
     if remaining <= 0:
         db.execute("DELETE FROM bot_positions WHERE bot_id = ? AND coin_id = ?",
                    (bot["id"], coin))
+        try:
+            clear_watches(db, bot["id"], coin)
+        except Exception:
+            pass
     else:
         db.execute("UPDATE bot_positions SET amount = ? "
                    "WHERE bot_id = ? AND coin_id = ?",
@@ -342,8 +348,8 @@ def _rug_reason(rug: dict, kind: str, coin: str, price: float,
     so a collapse exits on the same scan that sees it.
 
     Two triggers, either one sells everything:
-      * feed 5-minute change (trenches only — CoinGecko has no 5m
-        change): the feed's change_5m_pct at or below -drop_5m_pct.
+      * feed 5-minute change (trenches/scanner only — CoinGecko has no
+        5m change): the feed's change_5m_pct at or below -drop_5m_pct.
       * fast drop since the last recorded price mark: the price fell
         drop_pct or more and the mark is at most window_seconds old
         (plus 30 seconds of scheduling jitter — scans run about a
@@ -355,7 +361,7 @@ def _rug_reason(rug: dict, kind: str, coin: str, price: float,
     triggers on that fall, never on a faked "dev sold" signal.
     """
     drop_5m = float(rug["drop_5m_pct"])
-    if kind == "trenches" and price_map:
+    if kind in ("trenches", "scanner") and price_map:
         entry = price_map.get(coin) or {}
         change_5m = entry.get("change_5m_pct")
         if change_5m is not None and float(change_5m) <= -drop_5m:
@@ -409,21 +415,23 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     db.commit()
 
     kind = rules["kind"]
-    if kind == "trenches":
+    if kind in ("trenches", "scanner"):
         if not trenches_data or trenches_data.get("error"):
             why = (trenches_data or {}).get("error") or "feed unavailable"
+            feed_name = "scanner" if kind == "scanner" else "trenches"
             _log(db, bot["user_id"], "silent_skip",
-                 f"Silent bot '{bot['name']}': trenches feed unavailable "
-                 f"— {why[:80]}. No trades this scan.", bot["mode"])
+                 f"Silent bot '{bot['name']}': {feed_name} feed "
+                 f"unavailable — {why[:80]}. No trades this scan.",
+                 bot["mode"])
             actions.append({"action": "skip", "coin": "",
-                            "reason": "trenches feed unavailable"})
+                            "reason": f"{feed_name} feed unavailable"})
             return actions
         price_map = trenches_data["prices"]
     else:
         price_map = None
 
     def _price_for(coin: str):
-        if kind == "trenches":
+        if kind in ("trenches", "scanner"):
             entry = price_map.get(coin)
             return entry["price_usd"] if entry else None
         entry = prices_data["prices"].get(coin)
@@ -444,6 +452,12 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     stop_loss_pct = float(bot["stop_loss_pct"])
     trailing_pct = float(rules["trailing_stop_pct"])
     ladder = rules["sell_ladder"]
+    # Top-10 wallets watch state (scanner only): one RPC client per
+    # evaluation, created lazily; a failed client or a failed lookup
+    # is logged once per bot per scan and the watch is skipped.
+    top10_client = None
+    top10_failed = False
+    top10_skip_logged = False
 
     # 1. Open positions: rug sell first, then hard stop loss,
     # trailing stop, sell ladder.
@@ -472,6 +486,47 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                        "last_price_at = ? WHERE bot_id = ? AND coin_id = ?",
                        (price, _now(), bot["id"], coin))
             db.commit()
+        # 0b. Top-10 wallets watch (scanner only): the top 10 holders
+        # dumping sells everything. It runs alongside the fast-drop
+        # rug sell — either one fires the exit. The baseline is the
+        # top-10 total the first time the position is watched,
+        # tracked upward to the peak since holding; a 10% drop from
+        # that peak is the dump. If the RPC cannot serve the mint,
+        # the watch is skipped for this scan — logged once per bot,
+        # never faked, and the other exits still apply.
+        top10 = rules.get("top10_rug")
+        if kind == "scanner" and top10:
+            if top10_client is None and not top10_failed:
+                try:
+                    top10_client = rpc_factory(cfg.rpc_url)
+                except Exception:
+                    top10_client = None
+                    top10_failed = True
+                    _log(db, bot["user_id"], "silent_skip",
+                         f"Silent bot '{bot['name']}': top-10 wallet "
+                         f"watch unavailable — no top-10 exit this "
+                         f"scan.", bot["mode"])
+            if top10_client is not None:
+                total = top10_total(top10_client, coin)
+                if total is None:
+                    if not top10_skip_logged:
+                        _log(db, bot["user_id"], "silent_skip",
+                             f"Silent bot '{bot['name']}': top-10 wallet "
+                             f"watch unavailable for {coin} — position "
+                             f"left alone this scan.", bot["mode"])
+                        top10_skip_logged = True
+                else:
+                    fired, reason = check_top10_rug(
+                        db, bot["id"], coin, total,
+                        float(top10["drop_pct"]), _now())
+                    if fired:
+                        sell_reason = reason
+                        if bot["mode"] == "real":
+                            sell_reason += " — proceeds in SOL"
+                        _sell_position(db, cfg, bot, coin, price,
+                                       sell_reason, rpc_factory,
+                                       real_executor, actions)
+                        continue
         avg_price = float(pos["avg_price"])
         peak = pos["peak_price"]
         peak = float(peak) if peak is not None else avg_price
@@ -510,11 +565,28 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     # 2. Buys: strongest qualifying gainer, at most max_new per scan.
     bought = 0
     max_new = int(rules["max_new_positions_per_scan"])
-    if kind == "trenches":
+    ranked = []
+    if kind == "scanner":
+        # The scanner ranks by the 3-minute gain from price marks the
+        # loop records itself (scanner.py) — the feed only provides
+        # 5-minute changes. A coin with no mark at least 3 minutes
+        # old has no 3-minute gain yet and is not bought.
+        threshold = float(rules["buy"]["threshold_pct"])
+        held = set(_positions(db, bot["id"]))
+        record_marks(db, bot["id"], list(price_map.values()), _now())
+        for entry in trenches_data["candidates"]:
+            if entry["mint"] in held:
+                continue
+            gain = gain_3m_pct(db, bot["id"], entry["mint"],
+                               entry["price_usd"], now_ts)
+            if gain is None or gain < threshold:
+                continue
+            ranked.append((gain, entry))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+    elif kind == "trenches":
         threshold = float(rules["buy"]["threshold_pct"])
         change_key = _BUY_METRIC_TO_CHANGE_KEY[rules["buy"]["metric"]]
         held = set(_positions(db, bot["id"]))
-        ranked = []
         for entry in trenches_data["candidates"]:
             change = entry.get(change_key)
             if change is None or float(change) < threshold:
@@ -523,6 +595,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 continue
             ranked.append((float(change), entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
+    if kind in ("trenches", "scanner"):
         for _change, entry in ranked:
             if bought >= max_new:
                 break
@@ -648,7 +721,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     Returns a list of per-bot outcome dicts. A failure for one bot is
     recorded and never stops the others. The trenches feed (DexScreener)
     is fetched at most once per iteration, only when at least one
-    silent bot has a valid trenches rule set.
+    silent bot has a valid trenches or scanner rule set.
     """
     price_fetcher = price_fetcher or get_prices
     rpc_factory = rpc_factory or SolanaRpcClient
@@ -661,7 +734,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     needs_trenches = False
     for bot in bots:
         rules, err = load_rules(bot)
-        if rules is not None and rules["kind"] == "trenches":
+        if rules is not None and rules["kind"] in ("trenches", "scanner"):
             needs_trenches = True
             break
     if needs_trenches:
