@@ -30,6 +30,9 @@
 
   <p class="se-create"><a href="{{ url_for('signup') }}">Create Account</a></p>
   <p class="se-create"><a href="{{ url_for('forgot_password') }}">Forgot password?</a></p>
+  <button class="se-login-btn" type="button" id="passkey-login-btn">Sign in with passkey</button>
+  <p class="se-hint" id="passkey-status"></p>
+  <script src="{{ url_for('static', filename='passkey.js') }}"></script>
 
   <div class="se-card" id="donate-card"
        data-network="{{ network }}"

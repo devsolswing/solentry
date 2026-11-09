@@ -3,8 +3,8 @@
 Schema:
   users, wallets (encrypted secret), paper_portfolio, paper_holdings,
   paper_trades, bots, bot_proposals, send_intents, activity,
-  login_attempts (rate limiting), verification_codes (phone/email
-  linking and two-code recovery; salted SHA-256 hashes only).
+  login_attempts (rate limiting), passkey_credentials (WebAuthn),
+  webauthn_challenges (single-use ceremony challenges).
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     salt TEXT NOT NULL,
-    phone TEXT NOT NULL DEFAULT '',
-    email TEXT NOT NULL DEFAULT '',
-    phone_verified INTEGER NOT NULL DEFAULT 0,
-    email_verified INTEGER NOT NULL DEFAULT 0,
+    recovery_question TEXT NOT NULL DEFAULT '',
+    recovery_answer_hash TEXT NOT NULL DEFAULT '',
+    recovery_answer_salt TEXT NOT NULL DEFAULT '',
+    recovery_hint TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -140,23 +140,33 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     locked_until TEXT
 );
 
--- Verification codes for phone/email linking and two-code account
--- recovery. Only a salted SHA-256 hash is stored — the plaintext code
--- never reaches this table. One live code per (user, purpose, contact);
--- purpose is 'link' or 'recover', contact is the phone (E.164) or the
--- email the code was sent to.
-CREATE TABLE IF NOT EXISTS verification_codes (
+-- Passkeys (WebAuthn): one row per registered credential. The
+-- public key is stored base64url-encoded; the private key never
+-- leaves the user's device. sign_count is updated on every login
+-- (a mismatch means a possible cloned credential and fails the
+-- ceremony).
+CREATE TABLE IF NOT EXISTS passkey_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    credential_id TEXT NOT NULL UNIQUE,
+    public_key TEXT NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    transports TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Single-use WebAuthn challenges (registration + login). A challenge
+-- is issued by the server, lives 5 minutes, and is marked used the
+-- moment it is presented — replaying it always fails.
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     purpose TEXT NOT NULL,
-    contact TEXT NOT NULL,
-    code_hash TEXT NOT NULL,
-    salt TEXT NOT NULL,
-    created_at TEXT NOT NULL,
+    challenge TEXT NOT NULL UNIQUE,
     expires_at TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
     used INTEGER NOT NULL DEFAULT 0,
-    UNIQUE (user_id, purpose, contact),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
@@ -200,10 +210,10 @@ _MIGRATIONS = (
     ("bots", "mode", "TEXT NOT NULL DEFAULT 'paper'"),
     ("bots", "silent", "INTEGER NOT NULL DEFAULT 0"),
     ("bots", "max_open_trades", "INTEGER NOT NULL DEFAULT 3"),
-    ("users", "phone", "TEXT NOT NULL DEFAULT ''"),
-    ("users", "email", "TEXT NOT NULL DEFAULT ''"),
-    ("users", "phone_verified", "INTEGER NOT NULL DEFAULT 0"),
-    ("users", "email_verified", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "recovery_question", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "recovery_answer_hash", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "recovery_answer_salt", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "recovery_hint", "TEXT NOT NULL DEFAULT ''"),
 )
 
 

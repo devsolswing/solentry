@@ -21,10 +21,18 @@ from datetime import datetime, timedelta, timezone
 from flask import (Flask, abort, flash, jsonify, redirect, render_template,
                    request, session, url_for)
 
+from webauthn import (generate_authentication_options,
+                      generate_registration_options,
+                      verify_authentication_response,
+                      verify_registration_response)
+from webauthn.helpers import (base64url_to_bytes, bytes_to_base64url,
+                              options_to_json_dict)
+from webauthn.helpers.structs import AuthenticatorTransport
+from webauthn.helpers.structs import PublicKeyCredentialDescriptor
+
 from . import assistant as assistant_mod
 from . import donations as donations_mod
-from . import notify as notify_mod
-from . import recovery as recovery_mod
+from . import passkey as passkey_mod
 from .config import Config
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
@@ -254,125 +262,62 @@ def register_routes(app: Flask) -> None:
         return redirect(url_for("index"))
 
     # ------------------------------------------------------------------
-    # Account settings: link phone + email (verified by code)
-    # Account recovery: forgot password, two codes (email + SMS)
+    # Account settings: recovery question + passkeys
+    # Account recovery: forgot password, recovery-question answer
     # ------------------------------------------------------------------
-    def _contacts(app, user_id: int):
-        return _db(app).execute(
-            "SELECT phone, email, phone_verified, email_verified "
-            "FROM users WHERE id = ?", (user_id,)).fetchone()
-
     @app.route("/settings")
     @login_required
     def settings():
         user = _current_user(app)
+        row = _db(app).execute(
+            "SELECT recovery_question, recovery_hint, "
+            "recovery_answer_hash FROM users WHERE id = ?",
+            (user["id"],)).fetchone()
+        passkeys = _db(app).execute(
+            "SELECT id, credential_id, transports, created_at "
+            "FROM passkey_credentials WHERE user_id = ? ORDER BY id DESC",
+            (user["id"],)).fetchall()
         return render_template(
-            "settings.html", contacts=_contacts(app, user["id"]),
-            sms_configured=notify_mod.sms_configured(_cfg(app)),
-            email_configured=notify_mod.email_configured(_cfg(app)),
-            pending_phone=session.get("pending_phone"),
-            pending_email=session.get("pending_email"))
+            "settings.html",
+            has_recovery=bool(row["recovery_answer_hash"]),
+            recovery_question=row["recovery_question"],
+            recovery_hint=row["recovery_hint"],
+            passkeys=passkeys)
 
-    @app.route("/settings/phone", methods=["POST"])
+    @app.route("/settings/recovery-question", methods=["POST"])
     @login_required
-    def settings_phone():
+    def settings_recovery_question():
+        """Set (or replace) the recovery question + answer + hint.
+
+        The answer is hashed with scrypt, like a password — never
+        stored in plaintext, never logged. The question and hint are
+        shown on the forgot-password page, so they must not give the
+        answer away."""
         _csrf_check()
         user = _current_user(app)
-        phone = recovery_mod.normalize_phone(
-            request.form.get("phone") or "")
-        if not phone:
-            flash("That phone number doesn't look right. "
-                  "Use digits, e.g. 555-010-1000.")
+        question = (request.form.get("question") or "").strip()
+        answer = (request.form.get("answer") or "").strip()
+        hint = (request.form.get("hint") or "").strip()
+        if not 3 <= len(question) <= 200:
+            flash("The question must be 3-200 characters.")
             return redirect(url_for("settings"))
-        contacts = _contacts(app, user["id"])
-        if contacts["phone"] == phone and contacts["phone_verified"]:
-            flash("That phone is already linked and verified.")
+        if not answer or len(answer) > 200:
+            flash("The answer must not be empty (max 200 characters).")
             return redirect(url_for("settings"))
-        if not notify_mod.sms_configured(_cfg(app)):
-            flash("Text messages are not set up yet. The app owner "
-                  "needs to add the SMS provider (Twilio) first.")
+        if len(hint) > 200:
+            flash("The hint must be at most 200 characters.")
             return redirect(url_for("settings"))
-        code, error = recovery_mod.request_code(
-            _db(app), user["id"], "link", phone)
-        if error == "rate_limited":
-            flash("A code was just sent. Wait a minute before asking "
-                  "for a new one.")
-            return redirect(url_for("settings"))
-        if not notify_mod.send_sms(
-                _cfg(app), phone,
-                f"Your SolEntry code is {code}. It expires in 10 minutes."):
-            recovery_mod.void_code(_db(app), user["id"], "link", phone)
-            flash("Could not send the text right now. Try again in a bit.")
-            return redirect(url_for("settings"))
-        session["pending_phone"] = phone
-        flash("Code sent by text. Enter it below to verify this phone.")
-        return redirect(url_for("settings"))
-
-    @app.route("/settings/email", methods=["POST"])
-    @login_required
-    def settings_email():
-        _csrf_check()
-        user = _current_user(app)
-        email = (request.form.get("email") or "").strip().lower()
-        if not recovery_mod.is_valid_email(email):
-            flash("That email address doesn't look right.")
-            return redirect(url_for("settings"))
-        contacts = _contacts(app, user["id"])
-        if contacts["email"] == email and contacts["email_verified"]:
-            flash("That email is already linked and verified.")
-            return redirect(url_for("settings"))
-        if not notify_mod.email_configured(_cfg(app)):
-            flash("Email is not set up yet. The app owner needs to add "
-                  "the email provider (Resend) first.")
-            return redirect(url_for("settings"))
-        code, error = recovery_mod.request_code(
-            _db(app), user["id"], "link", email)
-        if error == "rate_limited":
-            flash("A code was just sent. Wait a minute before asking "
-                  "for a new one.")
-            return redirect(url_for("settings"))
-        if not notify_mod.send_email(
-                _cfg(app), email, "Your SolEntry verification code",
-                f"Your SolEntry code is {code}. It expires in 10 minutes."):
-            recovery_mod.void_code(_db(app), user["id"], "link", email)
-            flash("Could not send the email right now. Try again in a bit.")
-            return redirect(url_for("settings"))
-        session["pending_email"] = email
-        flash("Code sent by email. Enter it below to verify this email.")
-        return redirect(url_for("settings"))
-
-    @app.route("/settings/verify", methods=["POST"])
-    @login_required
-    def settings_verify():
-        _csrf_check()
-        user = _current_user(app)
-        kind = request.form.get("kind") or ""
-        code = request.form.get("code") or ""
-        if kind == "phone":
-            contact = session.get("pending_phone")
-            column, flag = "phone", "phone_verified"
-        elif kind == "email":
-            contact = session.get("pending_email")
-            column, flag = "email", "email_verified"
-        else:
-            flash("That verification kind is not valid.")
-            return redirect(url_for("settings"))
-        if not contact:
-            flash("Ask for a code first, then enter it here.")
-            return redirect(url_for("settings"))
-        if not recovery_mod.verify_code(
-                _db(app), user["id"], "link", contact, code):
-            flash("That code is wrong or expired.")
-            return redirect(url_for("settings"))
+        salt, answer_hash = hash_password(answer)
         _db(app).execute(
-            f"UPDATE users SET {column} = ?, {flag} = 1 WHERE id = ?",
-            (contact, user["id"]))
+            "UPDATE users SET recovery_question = ?, "
+            "recovery_answer_hash = ?, recovery_answer_salt = ?, "
+            "recovery_hint = ? WHERE id = ?",
+            (question, answer_hash, salt, hint, user["id"]))
         _db(app).commit()
-        session.pop("pending_phone" if kind == "phone"
-                    else "pending_email", None)
-        _log(app, user["id"], "contact_verified",
-             f"Verified {kind} for account recovery.")
-        flash(f"Your {kind} is verified and linked to your account.")
+        _log(app, user["id"], "recovery_question",
+             "Recovery question set.")
+        flash("Recovery question saved. You can use it on the "
+              "forgot-password page if you ever get locked out.")
         return redirect(url_for("settings"))
 
     @app.route("/forgot-password", methods=["GET", "POST"])
@@ -381,107 +326,53 @@ def register_routes(app: Flask) -> None:
             _csrf_check()
             username = (request.form.get("username") or "").strip()
             # One generic message covers every not-ready case (no such
-            # user, contact missing, contact unverified) so the page
-            # never reveals which contact is missing — or whether the
-            # account exists at all.
+            # user, no question set) so the page never reveals whether
+            # the account exists or has recovery set up.
             not_ready = ("Account recovery is not set up for this "
                          "account.")
+            if _check_login_lock(app, username):
+                flash("Too many failed tries. Locked for 15 minutes.")
+                return redirect(url_for("login"))
             row = _db(app).execute(
-                "SELECT id, phone, email, phone_verified, "
-                "email_verified FROM users WHERE username = ?",
+                "SELECT id, recovery_question FROM users WHERE username = ?",
                 (username,)).fetchone()
-            if not row or not row["phone_verified"] \
-                    or not row["email_verified"]:
+            if not row or not row["recovery_question"]:
                 flash(not_ready)
                 return redirect(url_for("forgot_password"))
-            if not notify_mod.sms_configured(_cfg(app)) \
-                    or not notify_mod.email_configured(_cfg(app)):
-                flash("Account recovery is not available yet — the "
-                      "code-sending providers are not set up. Ask the "
-                      "app owner to set them up.")
-                return redirect(url_for("forgot_password"))
-            if recovery_mod.sent_recently(
-                    _db(app), row["id"], "recover", row["email"]) \
-                    or recovery_mod.sent_recently(
-                    _db(app), row["id"], "recover", row["phone"]):
-                # Codes from the earlier send are still live; do not
-                # replace either one.
-                session["recovery_user_id"] = row["id"]
-                session["recovery_email_masked"] = \
-                    recovery_mod.mask_email(row["email"])
-                session["recovery_phone_masked"] = \
-                    recovery_mod.mask_phone(row["phone"])
-                flash("Codes were just sent. Use the ones you already "
-                      "have — wait a minute before asking again.")
-                return redirect(url_for("forgot_verify"))
-            email_code, _ = recovery_mod.request_code(
-                _db(app), row["id"], "recover", row["email"])
-            sms_code, _ = recovery_mod.request_code(
-                _db(app), row["id"], "recover", row["phone"])
-            if not email_code or not sms_code:
-                # A code could not be issued (e.g. a resend raced in
-                # just now) — never send a partial set.
-                flash("Codes were just sent. Use the ones you already "
-                      "have — wait a minute before asking again.")
-                return redirect(url_for("forgot_password"))
-            email_ok = notify_mod.send_email(
-                _cfg(app), row["email"], "Your SolEntry recovery code",
-                f"Your SolEntry account recovery code is {email_code}. "
-                f"It expires in 10 minutes. If this wasn't you, ignore it.")
-            sms_ok = notify_mod.send_sms(
-                _cfg(app), row["phone"],
-                f"Your SolEntry account recovery code is {sms_code}. "
-                f"It expires in 10 minutes.")
-            if not email_ok or not sms_ok:
-                # Never leave a live code that was never delivered.
-                recovery_mod.void_code(_db(app), row["id"], "recover",
-                                       row["email"])
-                recovery_mod.void_code(_db(app), row["id"], "recover",
-                                       row["phone"])
-                flash("Could not send the codes right now. "
-                      "Try again in a bit.")
-                return redirect(url_for("forgot_password"))
             session["recovery_user_id"] = row["id"]
-            session["recovery_email_masked"] = \
-                recovery_mod.mask_email(row["email"])
-            session["recovery_phone_masked"] = \
-                recovery_mod.mask_phone(row["phone"])
-            flash("Codes sent to your email and your phone. "
-                  "Enter both below.")
-            return redirect(url_for("forgot_verify"))
+            return redirect(url_for("forgot_answer"))
         return render_template("forgot_password.html")
 
-    @app.route("/forgot-password/verify", methods=["GET", "POST"])
-    def forgot_verify():
+    @app.route("/forgot-password/answer", methods=["GET", "POST"])
+    def forgot_answer():
         user_id = session.get("recovery_user_id")
         if not user_id:
             return redirect(url_for("forgot_password"))
+        row = _db(app).execute(
+            "SELECT username, recovery_question, recovery_hint, "
+            "recovery_answer_hash, recovery_answer_salt FROM users "
+            "WHERE id = ?", (user_id,)).fetchone()
+        if not row or not row["recovery_question"]:
+            session.pop("recovery_user_id", None)
+            return redirect(url_for("forgot_password"))
         if request.method == "POST":
             _csrf_check()
-            row = _db(app).execute(
-                "SELECT phone, email FROM users WHERE id = ?",
-                (user_id,)).fetchone()
-            if not row:
-                session.pop("recovery_user_id", None)
-                return redirect(url_for("forgot_password"))
-            email_ok = recovery_mod.verify_code(
-                _db(app), user_id, "recover", row["email"],
-                request.form.get("email_code") or "")
-            sms_ok = recovery_mod.verify_code(
-                _db(app), user_id, "recover", row["phone"],
-                request.form.get("sms_code") or "")
-            if not email_ok or not sms_ok:
-                # Generic on purpose: never say which code failed.
-                flash("One or both codes are wrong or expired. "
-                      "Check both and try again.")
-                return redirect(url_for("forgot_verify"))
+            if _check_login_lock(app, row["username"]):
+                flash("Too many failed tries. Locked for 15 minutes.")
+                return redirect(url_for("login"))
+            answer = request.form.get("answer") or ""
+            if not verify_password(answer, row["recovery_answer_salt"],
+                                   row["recovery_answer_hash"]):
+                _record_login_fail(app, row["username"])
+                flash("That answer is wrong.")
+                return redirect(url_for("forgot_answer"))
+            _clear_login_fails(app, row["username"])
             session.pop("recovery_user_id", None)
             session["recovery_verified_user_id"] = user_id
             return redirect(url_for("forgot_reset"))
         return render_template(
-            "forgot_verify.html",
-            email_masked=session.get("recovery_email_masked", "***"),
-            phone_masked=session.get("recovery_phone_masked", "***"))
+            "forgot_verify.html", question=row["recovery_question"],
+            hint=row["recovery_hint"])
 
     @app.route("/forgot-password/reset", methods=["GET", "POST"])
     def forgot_reset():
@@ -505,14 +396,212 @@ def register_routes(app: Flask) -> None:
                 "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
                 (pw_hash, salt, user_id))
             _db(app).commit()
-            # Two codes proved ownership, so any login lockout is cleared.
+            # The recovery answer proved ownership, so any login
+            # lockout is cleared.
             _clear_login_fails(app, row["username"])
             _log(app, user_id, "password_reset",
-                 "Password changed through two-code account recovery.")
+                 "Password changed through recovery-question recovery.")
             session.pop("recovery_verified_user_id", None)
             flash("Password changed. Log in with your new password.")
             return redirect(url_for("login"))
         return render_template("forgot_reset.html")
+
+    # ------------------------------------------------------------------
+    # Passkeys (WebAuthn): register in Settings, sign in from Login.
+    # Password login stays — a passkey is an option, not a replacement.
+    # ------------------------------------------------------------------
+    def _passkey_descriptors(app, user_id: int):
+        rows = _db(app).execute(
+            "SELECT credential_id, transports FROM passkey_credentials "
+            "WHERE user_id = ?", (user_id,)).fetchall()
+        descriptors = []
+        for row in rows:
+            try:
+                transports = [
+                    AuthenticatorTransport(t) for t in
+                    json.loads(row["transports"] or "[]")
+                    if t in {e.value for e in AuthenticatorTransport}]
+            except (ValueError, TypeError):
+                transports = []
+            descriptors.append(PublicKeyCredentialDescriptor(
+                id=base64url_to_bytes(row["credential_id"]),
+                transports=transports or None))
+        return descriptors
+
+    @app.route("/settings/passkey/register/begin", methods=["POST"])
+    @login_required
+    def passkey_register_begin():
+        """Start a passkey registration ceremony. Returns the publicKey
+        creation options as JSON for navigator.credentials.create()."""
+        _csrf_check()
+        user = _current_user(app)
+        cfg = _cfg(app)
+        challenge = passkey_mod.issue_challenge(
+            _db(app), user["id"], "register")
+        options = generate_registration_options(
+            rp_id=cfg.webauthn_rp_id, rp_name=cfg.webauthn_rp_name,
+            user_name=user["username"],
+            user_id=str(user["id"]).encode("utf-8"),
+            challenge=base64url_to_bytes(challenge),
+            exclude_credentials=_passkey_descriptors(app, user["id"]))
+        return jsonify(options_to_json_dict(options))
+
+    @app.route("/settings/passkey/register/finish", methods=["POST"])
+    @login_required
+    def passkey_register_finish():
+        """Verify a completed registration ceremony and store the
+        credential. The private key never leaves the user's device —
+        only the public key is stored."""
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "json required"}), 400
+        _csrf_check()
+        user = _current_user(app)
+        cfg = _cfg(app)
+        body = request.get_json()
+        challenge = passkey_mod.take_challenge(
+            _db(app), user["id"], "register")
+        if challenge is None:
+            return jsonify({"ok": False, "error":
+                            "Challenge expired or already used. "
+                            "Start again."}), 400
+        try:
+            verified = verify_registration_response(
+                credential=body.get("credential") or {},
+                expected_challenge=challenge,
+                expected_rp_id=cfg.webauthn_rp_id,
+                expected_origin=cfg.webauthn_origin)
+        except Exception:
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        credential_id = bytes_to_base64url(verified.credential_id)
+        public_key = bytes_to_base64url(verified.credential_public_key)
+        transports = [t for t in (body.get("transports") or [])
+                      if isinstance(t, str)][:10]
+        try:
+            _db(app).execute(
+                "INSERT INTO passkey_credentials "
+                "(user_id, credential_id, public_key, sign_count, "
+                "transports) VALUES (?, ?, ?, ?, ?)",
+                (user["id"], credential_id, public_key,
+                 verified.sign_count, json.dumps(transports)))
+            _db(app).commit()
+        except Exception:
+            return jsonify({"ok": False, "error":
+                            "This passkey is already registered."}), 400
+        _log(app, user["id"], "passkey_register",
+             "Passkey registered.")
+        return jsonify({"ok": True, "credential_id": credential_id})
+
+    @app.route("/settings/passkey/<int:credential_row_id>/delete",
+               methods=["POST"])
+    @login_required
+    def passkey_delete(credential_row_id: int):
+        _csrf_check()
+        user = _current_user(app)
+        _db(app).execute(
+            "DELETE FROM passkey_credentials WHERE id = ? AND user_id = ?",
+            (credential_row_id, user["id"]))
+        _db(app).commit()
+        _log(app, user["id"], "passkey_delete", "Passkey removed.")
+        flash("Passkey removed.")
+        return redirect(url_for("settings"))
+
+    @app.route("/login/passkey/begin", methods=["POST"])
+    def passkey_login_begin():
+        """Start a passkey sign-in ceremony for a username. Returns
+        the publicKey request options as JSON for
+        navigator.credentials.get()."""
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "json required"}), 400
+        _csrf_check()
+        username = (request.get_json().get("username") or "").strip()
+        row = _db(app).execute(
+            "SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error":
+                            "No passkey is registered for this "
+                            "username."}), 400
+        descriptors = _passkey_descriptors(app, row["id"])
+        if not descriptors:
+            return jsonify({"ok": False, "error":
+                            "No passkey is registered for this "
+                            "username."}), 400
+        cfg = _cfg(app)
+        challenge = passkey_mod.issue_challenge(
+            _db(app), row["id"], "login")
+        options = generate_authentication_options(
+            rp_id=cfg.webauthn_rp_id,
+            challenge=base64url_to_bytes(challenge),
+            allow_credentials=descriptors)
+        return jsonify(options_to_json_dict(options))
+
+    @app.route("/login/passkey/finish", methods=["POST"])
+    def passkey_login_finish():
+        """Verify a completed passkey sign-in ceremony and log the user
+        in. The userHandle in the credential identifies the user."""
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "json required"}), 400
+        _csrf_check()
+        body = request.get_json()
+        credential = body.get("credential") or {}
+        try:
+            user_handle = base64url_to_bytes(
+                credential.get("response", {}).get("userHandle") or "")
+            user_id = int(user_handle.decode("utf-8"))
+        except Exception:
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        row = _db(app).execute(
+            "SELECT id, username FROM users WHERE id = ?",
+            (user_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        if _check_login_lock(app, row["username"]):
+            return jsonify({"ok": False, "error":
+                            "Too many failed tries. "
+                            "Locked for 15 minutes."}), 403
+        try:
+            credential_id = credential.get("id") or ""
+        except AttributeError:
+            credential_id = ""
+        stored = _db(app).execute(
+            "SELECT public_key, sign_count FROM passkey_credentials "
+            "WHERE user_id = ? AND credential_id = ?",
+            (user_id, credential_id)).fetchone()
+        if not stored:
+            _record_login_fail(app, row["username"])
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        challenge = passkey_mod.take_challenge(
+            _db(app), user_id, "login")
+        if challenge is None:
+            return jsonify({"ok": False, "error":
+                            "Challenge expired or already used. "
+                            "Start again."}), 400
+        cfg = _cfg(app)
+        try:
+            verified = verify_authentication_response(
+                credential=credential,
+                expected_challenge=challenge,
+                expected_rp_id=cfg.webauthn_rp_id,
+                expected_origin=cfg.webauthn_origin,
+                credential_public_key=base64url_to_bytes(
+                    stored["public_key"]),
+                credential_current_sign_count=stored["sign_count"])
+        except Exception:
+            _record_login_fail(app, row["username"])
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        _db(app).execute(
+            "UPDATE passkey_credentials SET sign_count = ? "
+            "WHERE user_id = ? AND credential_id = ?",
+            (verified.new_sign_count, user_id, credential_id))
+        _db(app).commit()
+        _clear_login_fails(app, row["username"])
+        _log(app, user_id, "passkey_login", "Signed in with a passkey.")
+        session["user_id"] = user_id
+        return jsonify({"ok": True, "redirect": url_for("dashboard")})
 
     # ------------------------------------------------------------------
     # Donations (public: the donate card lives on the login page)

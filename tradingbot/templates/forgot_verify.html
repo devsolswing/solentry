@@ -1,15 +1,17 @@
 {% extends "base.html" %}
-{% block title %}Enter Recovery Codes — SolEntry{% endblock %}
+{% block title %}Answer Your Recovery Question — SolEntry{% endblock %}
 {% block content %}
 <div class="card narrow">
-  <h1>Enter both codes</h1>
-  <p class="muted">Codes were sent to your email ({{ email_masked }}) and your phone ({{ phone_masked }}). Both expire in 10 minutes. Enter both to continue.</p>
-  <form method="post" action="{{ url_for('forgot_verify') }}">
+  <h1>Your recovery question</h1>
+  <p><b>{{ question }}</b></p>
+  {% if hint %}
+  <p class="muted">Hint: {{ hint }}</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('forgot_answer') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>Email code (6 digits)<input name="email_code" required inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
-    <label>Text code (6 digits)<input name="sms_code" required inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
-    <button class="btn big" type="submit">Check codes</button>
+    <label>Your answer<input name="answer" required autocomplete="off"></label>
+    <button class="btn big" type="submit">Check answer</button>
   </form>
-  <p class="muted">Each code stops working after 5 wrong tries. Need new codes? <a href="{{ url_for('forgot_password') }}">Ask again</a> (once a minute).</p>
+  <p class="muted">5 wrong answers lock the account for 15 minutes, like too many wrong passwords.</p>
 </div>
 {% endblock %}
