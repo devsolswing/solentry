@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Wallet — Trading Bot{% endblock %}
+{% block content %}
+<h1>💰 Your wallet</h1>
+
+<div class="card" id="deposit">
+  <h2>Deposit</h2>
+  <p>Send SOL to this address to fund your app wallet. This is <strong>your own app wallet</strong> — separate from any personal Phantom wallet.</p>
+  <p class="addr">{{ wallet.pubkey }}</p>
+  <button class="btn" onclick="navigator.clipboard.writeText('{{ wallet.pubkey }}'); this.textContent='Copied!';">Copy address</button>
+  <p class="big-num">{% if real_sol is not none %}{{ "%.4f"|format(real_sol) }} SOL{% else %}Balance unavailable right now{% endif %}</p>
+  <p class="muted small">Network: {{ network }}</p>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <h2>⬆ Send</h2>
+    <p>Send SOL to any address. You always confirm on the next screen before anything moves.</p>
+    <a class="btn" href="{{ url_for('wallet_send') }}">Send SOL</a>
+  </div>
+  <div class="card">
+    <h2>↩ Withdraw</h2>
+    <p>Withdraw SOL to your own address — same as sending, to an address you control.</p>
+    <a class="btn" href="{{ url_for('wallet_send') }}">Withdraw SOL</a>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Send history</h2>
+  {% if intents %}
+  <table>
+    <tr><th>When</th><th>To</th><th>Amount</th><th>Status</th><th>Signature</th></tr>
+    {% for i in intents %}
+    <tr><td>{{ i.created_at }}</td><td>{{ i.destination[:8] }}…</td><td>{{ "%.4f"|format(i.amount_lamports / 1000000000) }} {{ i.token }}</td><td>{{ i.status }}</td><td>{{ (i.signature or '')[:12] }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">No sends yet.</p>{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Trading Bot{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% block header %}
+<header class="topbar">
+  <a class="brand" href="{% if current_user %}{{ url_for('dashboard') }}{% else %}{{ url_for('index') }}{% endif %}">🤖 Trading Bot</a>
+  <div class="top-actions">
+    {% if current_user %}
+    <details class="wallet-menu">
+      <summary class="wallet-btn" title="Your wallet">💰 Wallet</summary>
+      <div class="wallet-drop">
+        <a href="{{ url_for('wallet') }}">View wallet</a>
+        <a href="{{ url_for('wallet') }}#deposit">⬇ Deposit</a>
+        <a href="{{ url_for('wallet_send') }}">⬆ Send</a>
+        <a href="{{ url_for('wallet_send') }}">↩ Withdraw</a>
+      </div>
+    </details>
+    <a class="nav-link" href="{{ url_for('bots') }}">My Bots</a>
+    <a class="nav-link" href="{{ url_for('logout') }}">Log out ({{ current_user.username }})</a>
+    {% else %}
+    <a class="nav-link" href="{{ url_for('login') }}">Log in</a>
+    <a class="nav-link" href="{{ url_for('signup') }}">Sign up</a>
+    {% endif %}
+  </div>
+</header>
+{% endblock %}
+<main class="wrap">
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+    <div class="flash">{% for m in messages %}<p>{{ m }}</p>{% endfor %}</div>
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+{% block footer %}
+<footer class="foot">
+  <p>Network: {{ network }} · Paper trading is fake money. Real trading is approval-gated: the bot only suggests — you approve each trade before anything moves. No private key ever leaves this server.</p>
+</footer>
+{% endblock %}
+</body>
+</html>

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Donations — SolEntry admin{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>❤️ Donations</h1>
+  <p class="muted">Every confirmed donation appears here — this page is how
+  James is notified. Email notification is not configured (no mail service),
+  so check this page for new donations.</p>
+  <p class="muted">Donation wallet (project wallet, not a personal wallet):
+    <span class="addr">{{ donation_address }}</span></p>
+  {% if donations %}
+  <table>
+    <tr><th>When</th><th>Donor</th><th>Amount</th><th>Signature</th></tr>
+    {% for d in donations %}
+    <tr>
+      <td>{{ d.created_at }}</td>
+      <td class="addr">{{ d.donor_address[:6] }}…{{ d.donor_address[-4:] }}</td>
+      <td>{{ "%.4f"|format(d.amount_sol) }} SOL</td>
+      <td class="addr">{{ d.signature[:8] }}…{{ d.signature[-4:] }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No donations yet.</p>
+  {% endif %}
+  <p><a class="btn" href="{{ url_for('dashboard') }}">Back to dashboard</a></p>
+</div>
+{% endblock %}

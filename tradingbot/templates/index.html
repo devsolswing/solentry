@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="hero">
+  <h1>Trade with a bot. Your call.</h1>
+  <p class="sub">A friendly trading app for a small community. Practice with fake money, or trade real SOL — the bot suggests, you approve, nothing moves without you.</p>
+  {% if not current_user %}
+  <p><a class="btn big" href="{{ url_for('signup') }}">Create an account</a>
+  <a class="btn ghost big" href="{{ url_for('login') }}">Log in</a></p>
+  {% endif %}
+</div>
+
+<div class="cards">
+  <div class="card">
+    <h2>📄 Paper Trading</h2>
+    <p>Start with <strong>$10,000 fake money</strong>. Buy and sell coins at the current price and watch your portfolio. No real money, ever.</p>
+    {% if current_user %}<a class="btn" href="{{ url_for('dashboard') }}">Open paper trading</a>{% endif %}
+  </div>
+  <div class="card">
+    <h2>◎ Real SOL Trading</h2>
+    <p>Your own app wallet, your own bots. The bot proposes trades and <strong>you approve each one</strong> before anything moves. No autonomous real-money trading.</p>
+    {% if current_user %}<a class="btn" href="{{ url_for('bots') }}">Set up a bot</a>{% endif %}
+  </div>
+  <div class="card">
+    <h2>💬 Ask the assistant</h2>
+    <p>Built into your dashboard. Try “show my balance”, “create bot”, “edit bot”, “delete bot”, or “send 0.5 SOL to …”. It always asks you to confirm before money moves.</p>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Safe for everyone</h2>
+  <ul>
+    <li>Every user has their own account and their own wallet — nobody can see anyone else's.</li>
+    <li>Your wallet's key is encrypted on the server and never shown to anyone, including you.</li>
+    <li>Sends always show a confirm screen first: destination, amount, and token.</li>
+    <li>Your personal Phantom wallet is never touched — this app makes its own separate wallet for you.</li>
+  </ul>
+</div>
+{% endblock %}

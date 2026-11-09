@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}SolEntry — Automated Trading Tool{% endblock %}
+{% block header %}{% endblock %}
+{% block footer %}{% endblock %}
+{% block content %}
+<div class="se-page">
+  <div class="se-hero">
+    <img src="{{ url_for('static', filename='hero-shiba.jpg') }}" alt="SolEntry — Shiba stepping through a golden doorway">
+  </div>
+
+  <h1 class="se-title"><span class="se-crown">👑</span>Sol<span class="se-entry">Entry</span></h1>
+  <div class="se-sub"><span class="se-rule"></span>AUTOMATED TRADING TOOL<span class="se-rule"></span></div>
+
+  <form method="post" action="{{ url_for('login') }}" class="se-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="se-field">
+      <span class="se-icon" aria-hidden="true">👤</span>
+      <input type="text" name="username" required autocomplete="username"
+             placeholder="Email Address" aria-label="Email Address">
+    </div>
+    <div class="se-field">
+      <span class="se-icon" aria-hidden="true">🔒</span>
+      <input type="password" name="password" id="se-password" required
+             autocomplete="current-password" placeholder="Password" aria-label="Password">
+      <button type="button" class="se-eye" id="se-eye" aria-label="Show password">👁</button>
+    </div>
+    <button class="se-login-btn" type="submit">Login</button>
+    <p class="se-hint">Log in with your account username.</p>
+  </form>
+
+  <p class="se-create"><a href="{{ url_for('signup') }}">Create Account</a></p>
+
+  <div class="se-card" id="donate-card"
+       data-network="{{ network }}"
+       data-rpc-url="{{ rpc_url }}"
+       data-donation-address="{{ donation_address }}">
+    <div class="se-donate-head">
+      <span class="se-heart" aria-hidden="true">❤️</span>
+      <div>
+        <div class="se-donate-title">Donate (Optional)</div>
+        <div class="se-donate-sub">Support SolEntry and keep the project going!</div>
+      </div>
+    </div>
+    <button type="button" class="se-connect-btn" id="donate-connect">◎ Connect Wallet</button>
+    <p class="se-phantom-help" id="donate-phantom-help" hidden>
+      Phantom isn't in this browser. To donate, open this page inside the
+      Phantom app: open Phantom, tap the browser icon, and paste this page's
+      address.
+    </p>
+    <label class="se-amount-label">Amount (SOL)
+      <input type="number" id="donate-amount" min="0.001" step="0.01"
+             inputmode="decimal" placeholder="0.00">
+    </label>
+    <button type="button" class="se-send-btn" id="donate-send" disabled>➤&nbsp; Send Donation</button>
+    <p class="se-donate-dest">Donations go to the SolEntry wallet:
+      <span class="se-addr">{{ donation_address[:4] }}…{{ donation_address[-4:] }}</span>
+    </p>
+    <p class="se-donate-status" id="donate-status" role="status"></p>
+  </div>
+
+  <a class="se-card se-contact" href="mailto:mintendont94@gmail.com">
+    <span class="se-mail" aria-hidden="true">✉️</span>
+    <span>
+      <span class="se-contact-title">Contact Us</span>
+      <span class="se-contact-mail">mintendont94@gmail.com</span>
+    </span>
+  </a>
+
+  <div class="se-bottom">
+    <span class="se-version">Version: <b>1.00</b></span>
+    <span class="se-sig">J. Gordon</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var pw = document.getElementById('se-password');
+  var eye = document.getElementById('se-eye');
+  eye.addEventListener('click', function () {
+    var show = pw.type === 'password';
+    pw.type = show ? 'text' : 'password';
+    eye.classList.toggle('off', show);
+    eye.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    pw.focus();
+  });
+})();
+</script>
+<script src="{{ url_for('static', filename='donate.js') }}"></script>
+{% endblock %}

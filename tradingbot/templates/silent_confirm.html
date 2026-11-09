@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Silent trading — {{ bot.name }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Silent trading for '{{ bot.name }}'</h1>
+  {% if want_silent %}
+  <p>You are about to turn <strong>silent trading ON</strong> for this bot.</p>
+  <p>What that means:</p>
+  <ul>
+    <li>The bot trades on its own, in the background, with <strong>no pop-up and no per-trade approval</strong>.</li>
+    <li>It only trades within this bot's limits: buy size {{ bot.buy_size_pct }}%, stop loss {{ bot.stop_loss_pct }}%, max {{ bot.max_open_trades }} open trades.</li>
+    <li>It never spends more than your balance — paper cash for paper bots, app-wallet SOL for real bots.</li>
+    <li>Every trade (and every skipped trade, with the reason) is written to your activity log.</li>
+    <li>Network: {{ network }}. You can turn silent off any time and it stops right away.</li>
+  </ul>
+  {% else %}
+  <p>You are about to turn <strong>silent trading OFF</strong> for this bot.</p>
+  <p>The bot will stop trading on its own right away. It will go back to suggesting trades for your approval. Nothing else changes.</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('bot_silent', bot_id=bot.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="silent" value="{{ want_silent }}">
+    <input type="hidden" name="confirmed" value="yes">
+    <button class="btn big" type="submit">{{ "Yes, turn silent ON" if want_silent else "Yes, turn silent OFF" }}</button>
+  </form>
+  <form method="get" action="{{ url_for('bot_detail', bot_id=bot.id) }}">
+    <button class="btn ghost" type="submit">Cancel — leave it as it is</button>
+  </form>
+</div>
+{% endblock %}

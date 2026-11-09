@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}My Bots — Trading Bot{% endblock %}
+{% block content %}
+<h1>My Bots</h1>
+<p><a class="btn" href="{{ url_for('bot_create') }}">+ Create a bot</a></p>
+<p class="muted">Bots suggest trades — they never move real money on their own unless you turn silent trading on for that bot, and silent is off by default. Every suggestion waits for your approval.</p>
+{% if bots %}
+<div class="cards">
+{% for b in bots %}
+  <div class="card">
+    <h2><a href="{{ url_for('bot_detail', bot_id=b.id) }}">{{ b.name }}</a> {% if b.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</h2>
+    <p>Mode: <strong>{{ b.mode }}</strong> · Strategy: <strong>{{ b.strategy }}</strong><br>
+    Watching: {{ b.coins }}<br>
+    Buy size: {{ b.buy_size_pct }}% · Stop loss: {{ b.stop_loss_pct }}% · Max open: {{ b.max_open_trades }}</p>
+    <p><a class="btn small" href="{{ url_for('bot_detail', bot_id=b.id) }}">Open</a>
+    <a class="btn ghost small" href="{{ url_for('bot_edit', bot_id=b.id) }}">Edit</a></p>
+  </div>
+{% endfor %}
+</div>
+{% else %}
+<p class="muted">No bots yet — create your first one, or ask the assistant: “create bot”.</p>
+{% endif %}
+{% endblock %}

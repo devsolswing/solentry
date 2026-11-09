@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Send SOL — Trading Bot{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Send SOL</h1>
+  <p class="muted">Step 1 of 2 — enter the details. Nothing moves yet; the next screen asks you to confirm.</p>
+  <form method="post" action="{{ url_for('wallet_send') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Destination address<input name="destination" required placeholder="Solana address"></label>
+    <label>Amount (SOL)<input type="number" name="amount" step="any" min="0" required placeholder="0.1"></label>
+    <input type="hidden" name="token" value="SOL">
+    <button class="btn big" type="submit">Review send →</button>
+  </form>
+  <p><a href="{{ url_for('wallet') }}">← Back to wallet</a></p>
+</div>
+{% endblock %}

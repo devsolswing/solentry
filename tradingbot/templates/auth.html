@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Create Account — SolEntry{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Create your account</h1>
+  <p class="muted">Your own app wallet is created for you when you sign up. Username 3–20 letters, numbers, or _. Password at least 8 characters.</p>
+  <form method="post" action="{{ url_for('signup') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username<input name="username" required autocomplete="username"></label>
+    <label>Password<input type="password" name="password" required autocomplete="new-password"></label>
+    <button class="btn big" type="submit">Sign up</button>
+  </form>
+  <p class="muted">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+</div>
+{% endblock %}

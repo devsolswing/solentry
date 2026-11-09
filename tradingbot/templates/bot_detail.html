@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ bot.name }} — Trading Bot{% endblock %}
+{% block content %}
+<h1>{{ bot.name }} <span class="muted">({{ bot.strategy }} · {{ bot.mode }})</span> {% if bot.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</h1>
+<p class="muted">Watching: {{ bot.coins }} · Buy size: {{ bot.buy_size_pct }}% · Stop loss: {{ bot.stop_loss_pct }}% · Max open trades: {{ bot.max_open_trades }}</p>
+<p>
+  <a class="btn ghost" href="{{ url_for('bot_edit', bot_id=bot.id) }}">Edit bot</a>
+  <a class="btn ghost" href="{{ url_for('bot_silent', bot_id=bot.id, to=0 if bot.silent else 1) }}">{{ "Turn silent OFF" if bot.silent else "Turn silent ON" }}</a>
+  <form method="post" action="{{ url_for('bot_suggest', bot_id=bot.id) }}" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn" type="submit">Ask bot for suggestions</button>
+  </form>
+</p>
+<p class="muted small">{% if bot.silent %}Silent trading is ON: this bot trades on its own within your limits (buy size, stop loss, max open trades, never more than your balance). Every trade is logged below and on your dashboard. Turn it off any time.{% else %}Approval-gated: suggestions wait for you. Approving a buy/sell suggestion records your decision — on-chain swaps are not executed in v1. Approved SOL transfers go through the normal two-step send confirm. Turn silent trading on if you want this bot to trade on its own within your limits.{% endif %}</p>
+
+<div class="card">
+  <h2>Proposals</h2>
+  {% if proposals %}
+  <table>
+    <tr><th>When</th><th>Kind</th><th>Side</th><th>Coin</th><th>Detail</th><th>Status</th><th></th></tr>
+    {% for p in proposals %}
+    <tr>
+      <td>{{ p.created_at }}</td><td>{{ p.kind }}</td><td>{{ p.side }}</td><td>{{ p.coin_id }}</td><td>{{ p.detail }}</td><td>{{ p.status }}</td>
+      <td>{% if p.status == 'pending' %}
+        <form method="post" action="{{ url_for('proposal_approve', proposal_id=p.id) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn small" type="submit">Approve</button>
+        </form>
+        <form method="post" action="{{ url_for('proposal_reject', proposal_id=p.id) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn ghost small" type="submit">Reject</button>
+        </form>
+      {% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">No proposals yet. Ask the bot for suggestions.</p>{% endif %}
+</div>
+<p><a href="{{ url_for('bots') }}">← Back to bots</a></p>
+{% endblock %}

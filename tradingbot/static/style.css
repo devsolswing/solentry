@@ -1,0 +1,107 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #0b0e14; color: #e8ecf1; }
+a { color: #4ade80; }
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #11151f; border-bottom: 1px solid #232a38; position: sticky; top: 0; z-index: 10; }
+.brand { font-weight: 800; font-size: 18px; color: #fff; text-decoration: none; }
+.top-actions { display: flex; gap: 10px; align-items: center; }
+.nav-link { color: #cbd5e1; text-decoration: none; font-size: 14px; }
+.wallet-menu { position: relative; }
+.wallet-btn { cursor: pointer; background: #16a34a; color: #fff; border: none; border-radius: 999px; padding: 8px 14px; font-size: 15px; list-style: none; }
+.wallet-btn::-webkit-details-marker { display: none; }
+.wallet-drop { position: absolute; right: 0; top: 40px; background: #1a2030; border: 1px solid #2b3446; border-radius: 10px; min-width: 170px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+.wallet-drop a { display: block; padding: 9px 10px; color: #e8ecf1; text-decoration: none; border-radius: 6px; }
+.wallet-drop a:hover { background: #232b3d; }
+.wrap { max-width: 480px; margin: 0 auto; padding: 16px 12px 40px; }
+@media (min-width: 900px) { .wrap { max-width: 860px; } }
+h1 { font-size: 24px; margin: 8px 0 12px; }
+h2 { font-size: 18px; margin: 0 0 8px; }
+h3 { font-size: 15px; margin: 14px 0 6px; }
+.hero { text-align: center; padding: 24px 0 8px; }
+.hero h1 { font-size: 30px; }
+.sub { color: #9aa7b8; }
+.cards { display: grid; gap: 12px; margin: 12px 0; }
+@media (min-width: 900px) { .cards { grid-template-columns: 1fr 1fr; } }
+.card { background: #141926; border: 1px solid #232a38; border-radius: 14px; padding: 16px; margin: 12px 0; }
+.card.narrow { max-width: 420px; margin: 12px auto; }
+.muted { color: #9aa7b8; }
+.small { font-size: 12px; }
+.big-num { font-size: 26px; font-weight: 800; margin: 6px 0; }
+.addr { word-break: break-all; background: #0b0e14; border: 1px solid #232a38; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 13px; }
+.btn { display: inline-block; background: #16a34a; color: #fff; border: none; border-radius: 999px; padding: 10px 16px; font-size: 15px; cursor: pointer; text-decoration: none; }
+.btn.ghost { background: transparent; border: 1px solid #4ade80; color: #4ade80; }
+.btn.danger { background: #dc2626; margin-top: 12px; }
+.btn.big { padding: 12px 22px; font-size: 16px; }
+.btn.small { padding: 6px 10px; font-size: 13px; }
+label { display: block; margin: 12px 0; font-size: 14px; }
+input[type=text], input[type=password], input[type=number], select { width: 100%; padding: 10px; margin-top: 4px; background: #0b0e14; color: #e8ecf1; border: 1px solid #2b3446; border-radius: 8px; font-size: 15px; }
+.inline { display: inline; }
+.inline input, .inline select { width: auto; }
+.flash { background: #3f1d1d; border: 1px solid #7f2d2d; border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #232a38; }
+.chat-log { max-height: 260px; overflow-y: auto; background: #0b0e14; border: 1px solid #232a38; border-radius: 8px; padding: 10px; margin: 8px 0; }
+.chat-log p { margin: 6px 0; font-size: 14px; }
+#chat-form { display: flex; gap: 8px; }
+#chat-form input { flex: 1; }
+.foot { text-align: center; color: #6b7686; font-size: 12px; padding: 16px; }
+
+/* ------------------------------------------------------------------ */
+/* SolEntry login page — red/gold neon, from James's design.         */
+/* ------------------------------------------------------------------ */
+.se-page { max-width: 480px; margin: 0 auto; padding: 10px 12px 28px; background: radial-gradient(120% 60% at 50% 0%, #2a0705 0%, #0a0505 55%, #050303 100%); border-radius: 0; }
+.se-hero img { width: 100%; display: block; border-radius: 14px; border: 2px solid rgba(255, 190, 0, .55); box-shadow: 0 0 28px rgba(255, 30, 0, .35); }
+.se-title { font-size: clamp(52px, 17vw, 76px); font-weight: 900; font-style: italic; letter-spacing: -3px; line-height: 1; text-align: center; margin: 14px 0 4px; color: #ff2d20; background: linear-gradient(100deg, #ff1e14 0%, #ff5e1f 35%, #ffb300 65%, #ffd700 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 10px rgba(255, 60, 0, .55)); position: relative; }
+.se-title .se-entry { letter-spacing: -2px; }
+.se-crown { position: absolute; left: 2px; top: -16px; font-size: 30px; -webkit-text-fill-color: initial; filter: drop-shadow(0 2px 4px rgba(0,0,0,.6)); }
+.se-sub { display: flex; align-items: center; gap: 10px; justify-content: center; color: #fff; font-weight: 700; letter-spacing: 2px; font-size: 14px; font-style: italic; margin: 6px 0 18px; text-shadow: 0 1px 6px rgba(0,0,0,.8); }
+.se-rule { flex: 1; height: 2px; background: linear-gradient(90deg, transparent, #ffb300); }
+.se-rule:last-child { background: linear-gradient(90deg, #ffb300, transparent); }
+.se-form { margin: 0; }
+.se-field { position: relative; margin: 12px 0; }
+.se-field input { width: 100%; padding: 14px 48px 14px 46px; background: #000; color: #fff; border: 2px solid #ffb300; border-radius: 12px; font-size: 16px; box-shadow: 0 0 12px rgba(255, 170, 0, .25); }
+.se-field input::placeholder { color: #9a9a9a; }
+.se-field input:focus { outline: none; border-color: #ffd700; box-shadow: 0 0 16px rgba(255, 200, 0, .5); }
+.se-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); font-size: 19px; }
+.se-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; font-size: 20px; cursor: pointer; padding: 6px; line-height: 1; }
+.se-eye.off::after { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; background: #ff2d20; transform: rotate(-45deg); }
+.se-login-btn { width: 100%; padding: 14px; font-size: 22px; font-weight: 800; color: #1a0505; background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); border: 2px solid #ffcf3d; border-radius: 14px; cursor: pointer; box-shadow: 0 0 18px rgba(255, 90, 0, .5); margin-top: 6px; }
+.se-login-btn:active { transform: scale(.98); filter: brightness(1.2); }
+.se-hint { text-align: center; color: #b9a99a; font-size: 12px; margin: 8px 0 0; }
+.se-create { text-align: center; margin: 14px 0 4px; }
+.se-create a { color: #ffd700; font-weight: 700; font-size: 17px; text-decoration: underline; text-underline-offset: 3px; }
+.se-create a:active { color: #fff; }
+.se-card { background: #160b08; border: 2px solid #ffb300; border-radius: 16px; padding: 16px; margin-top: 18px; box-shadow: 0 0 16px rgba(255, 120, 0, .25); }
+.se-donate-head { display: flex; gap: 12px; align-items: flex-start; }
+.se-heart { font-size: 34px; line-height: 1; }
+.se-donate-title { color: #ffd700; font-weight: 800; font-size: 21px; }
+.se-donate-sub { color: #fff; font-size: 14px; margin-top: 2px; }
+.se-connect-btn { width: 100%; margin-top: 14px; padding: 12px; font-size: 16px; font-weight: 700; color: #ffd700; background: #000; border: 2px solid #ffb300; border-radius: 12px; cursor: pointer; }
+.se-connect-btn:active { transform: scale(.98); background: #241503; }
+.se-connect-btn.connected { color: #4ade80; border-color: #4ade80; }
+.se-phantom-help { color: #fca5a5; font-size: 13px; margin: 10px 0 0; }
+.se-amount-label { display: block; margin-top: 14px; color: #ffd700; font-weight: 700; font-size: 14px; }
+.se-amount-label input { width: 100%; padding: 12px; margin-top: 6px; background: #000; color: #fff; border: 2px solid #ffb300; border-radius: 12px; font-size: 16px; }
+.se-amount-label input:focus { outline: none; border-color: #ffd700; }
+.se-send-btn { width: 100%; margin-top: 14px; padding: 13px; font-size: 18px; font-weight: 800; color: #1a0505; background: linear-gradient(180deg, #ffd700 0%, #ffb300 60%, #ff8c1a 100%); border: 2px solid #ffcf3d; border-radius: 12px; cursor: pointer; }
+.se-send-btn:disabled { opacity: .45; cursor: not-allowed; }
+.se-send-btn:not(:disabled):active { transform: scale(.98); filter: brightness(1.15); }
+.se-donate-dest { color: #b9a99a; font-size: 12px; margin: 12px 0 0; }
+.se-addr { font-family: monospace; color: #e8ecf1; }
+.se-donate-status { font-size: 13px; margin: 10px 0 0; color: #4ade80; min-height: 1em; }
+.se-donate-status.err { color: #f87171; }
+.se-contact { display: flex; gap: 12px; align-items: center; text-decoration: none; border-color: #e62e1b; }
+.se-contact:active { transform: scale(.99); }
+.se-mail { font-size: 30px; }
+.se-contact-title { display: block; color: #ffd700; font-weight: 800; font-size: 19px; }
+.se-contact-mail { display: block; color: #fff; font-size: 15px; }
+.se-bottom { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 22px; padding: 0 4px; }
+.se-version { color: #ffd700; font-weight: 700; font-size: 17px; }
+.se-version b { color: #ff2d20; }
+.se-sig { font-family: 'Brush Script MT', 'Segoe Script', 'Snell Roundhand', cursive; color: #ffd700; font-size: 38px; transform: rotate(-4deg); text-shadow: 0 0 10px rgba(255, 200, 0, .4); }
+
+/* Silent trading badges + explanation box */
+.badge { display: inline-block; font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 999px; vertical-align: middle; }
+.badge.silent-on { background: #14532d; color: #4ade80; border: 1px solid #4ade80; }
+.badge.silent-off { background: #1f2937; color: #9ca3af; border: 1px solid #4b5563; }
+.silent-box { border: 1px solid #f59e0b; border-radius: 10px; padding: 10px 12px; margin: 12px 0; background: #1c1917; }
+.silent-box label { font-weight: 700; }

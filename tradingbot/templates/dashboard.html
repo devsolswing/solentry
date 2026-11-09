@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Trading Bot{% endblock %}
+{% block content %}
+<h1>Hello, {{ current_user.username }}</h1>
+
+<div class="cards">
+  <div class="card">
+    <h2>📄 Paper Trading</h2>
+    <p class="big-num">${{ "%.2f"|format(paper_cash) }} <span class="muted">cash</span></p>
+    <p class="muted">Holdings value: ${{ "%.2f"|format(holdings_value) }}</p>
+    {% if holdings %}
+    <table>
+      <tr><th>Coin</th><th>Amount</th><th>Avg price</th><th></th></tr>
+      {% for h in holdings %}
+      <tr><td>{{ h.coin_id }}</td><td>{{ "%.4f"|format(h.amount) }}</td><td>${{ "%.4f"|format(h.avg_price) }}</td>
+      <td><form method="post" action="{{ url_for('paper_sell') }}" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="coin" value="{{ h.coin_id }}">
+        <input type="number" name="amount" step="any" min="0" placeholder="amount" required>
+        <button class="btn small" type="submit">Sell</button>
+      </form></td></tr>
+      {% endfor %}
+    </table>
+    {% else %}<p class="muted">No holdings yet — buy below.</p>{% endif %}
+    <h3>Buy (paper)</h3>
+    <form method="post" action="{{ url_for('paper_buy') }}" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <select name="coin">{% for c in coins %}<option value="{{ c }}">{{ coins[c].name }} ({{ c }})</option>{% endfor %}</select>
+      <input type="number" name="usd" step="any" min="0" placeholder="$ amount" required>
+      <button class="btn" type="submit">Buy</button>
+    </form>
+    <p class="muted small">Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>
+    <table>
+      <tr><th>Coin</th><th>Price</th><th>24h</th></tr>
+      {% for c in coins %}
+      <tr><td>{{ coins[c].name }}</td><td>${{ prices.prices[c].price }}</td><td>{{ ("%.1f"|format(prices.prices[c].change_24h) + "%") if prices.prices[c].change_24h is not none else "—" }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>◎ Real wallet</h2>
+    <p class="muted small">{{ wallet.pubkey }}</p>
+    <p class="big-num">{% if real_sol is not none %}{{ "%.4f"|format(real_sol) }} SOL{% else %}Balance unavailable{% endif %}</p>
+    <p class="muted small">Network: {{ network }} · Deposit to the address above.</p>
+    <p><a class="btn" href="{{ url_for('wallet') }}">Open wallet</a>
+    <a class="btn ghost" href="{{ url_for('bots') }}">My bots ({{ bots|length }})</a></p>
+    <h3>Your bots</h3>
+    {% if bots %}
+    <ul>{% for b in bots %}<li><a href="{{ url_for('bot_detail', bot_id=b.id) }}">{{ b.name }}</a> — {{ b.strategy }} · {{ b.mode }} · {% if b.silent %}<strong>Silent ON</strong>{% else %}Silent OFF{% endif %}</li>{% endfor %}</ul>
+    {% else %}<p class="muted">No bots yet. <a href="{{ url_for('bot_create') }}">Create one</a>.</p>{% endif %}
+    <p class="muted small">Bots suggest trades and you approve each one — unless you turn silent trading on for a bot, which is off by default. Silent bots trade on their own within your limits, and every trade is logged.</p>
+  </div>
+</div>
+
+<div class="card">
+  <h2>💬 Assistant</h2>
+  <p class="muted small">The app assistant answers right here. Try “show my balance”, “create bot”, “edit bot”, “delete bot”, “turn on silent trading for …”, “send 0.5 SOL to …”.</p>
+  <div id="chat-log" class="chat-log"></div>
+  <form id="chat-form" class="inline">
+    <input id="chat-input" type="text" placeholder="Ask the assistant…" autocomplete="off" required>
+    <button class="btn" type="submit">Send</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Recent activity</h2>
+  {% if activity %}
+  <ul>{% for a in activity %}<li><span class="muted small">{{ a.created_at }}</span> — <strong>{{ a.kind }}</strong>: {{ a.detail }}</li>{% endfor %}</ul>
+  {% else %}<p class="muted">Nothing yet.</p>{% endif %}
+</div>
+
+<script>
+const log = document.getElementById('chat-log');
+document.getElementById('chat-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  log.innerHTML += '<p><strong>You:</strong> ' + text.replace(/</g,'&lt;') + '</p>';
+  input.value = '';
+  const res = await fetch('{{ url_for('api_assistant') }}', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text, csrf_token: '{{ csrf_token }}'})
+  });
+  const data = await res.json();
+  let reply = (data.reply || data.error || 'No reply.').replace(/</g,'&lt;').replace(/\n/g,'<br>');
+  if (data.confirm_url) reply += '<br><a href="' + data.confirm_url + '">Review and confirm this send →</a>';
+  log.innerHTML += '<p><strong>Assistant:</strong> ' + reply + '</p>';
+  log.scrollTop = log.scrollHeight;
+});
+</script>
+{% endblock %}

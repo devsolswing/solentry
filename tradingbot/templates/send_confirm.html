@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Confirm send — Trading Bot{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Confirm this send</h1>
+  <p class="muted">Step 2 of 2 — check everything. This is the last stop before SOL moves.</p>
+  <table>
+    <tr><th>Destination</th><td class="addr">{{ intent.destination }}</td></tr>
+    <tr><th>Amount</th><td>{{ "%.4f"|format(intent.amount_lamports / 1000000000) }} {{ intent.token }}</td></tr>
+    <tr><th>Network</th><td>{{ network }}</td></tr>
+    <tr><th>Fee</th><td>≈ 0.000005 SOL (network fee, estimated)</td></tr>
+  </table>
+  <form method="post" action="{{ url_for('wallet_send_confirm', intent_id=intent.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn big" type="submit">Yes, send it</button>
+    <a class="btn ghost big" href="{{ url_for('wallet') }}">Cancel</a>
+  </form>
+  <p class="muted small">If anything looks wrong, cancel — the send stays pending and nothing moves.</p>
+</div>
+{% endblock %}
