@@ -14,7 +14,7 @@
 <h1>Coins</h1>
 <div class="coin-list">
   {% for row in coin_rows %}
-  <a class="coin-row" href="{{ url_for('coin_popup', coin_id=row.coin_id) }}">
+  <a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
     <span class="coin-name"><strong>{{ row.name }}</strong><span class="muted small"> {{ row.ticker }}</span></span>
     <span class="coin-price">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span>
     <span class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
@@ -22,26 +22,23 @@
   </a>
   {% endfor %}
 </div>
-<p class="muted small">Tap a coin for Buy, Sell, Send and Receive. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>
+<p class="muted small">Tap a coin for its chart, 24h high/low, buyers &amp; sellers, and Buy / Sell / Sell all in SOL. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>
 
-<div class="card">
-  <h2>Quick buy</h2>
-  <form method="post" action="{{ url_for('paper_buy') }}" class="inline">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <select name="coin">{% for c in coins %}<option value="{{ c }}">{{ coins[c].name }} ({{ c }})</option>{% endfor %}</select>
-    <input type="number" name="usd" step="any" min="0" placeholder="$ amount" required>
-    <select name="mode" aria-label="Buy mode">
-      <option value="paper" {{ 'selected' if header_mode == 'paper' }}>Paper — fake money</option>
-      <option value="real" {{ 'selected' if header_mode == 'devnet' }}>Real (devnet) — pump.fun bots only</option>
-    </select>
-    <select name="bot_id" aria-label="Bot to look after this coin">
-      <option value="">No bot — just buy it</option>
-      {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
-    </select>
-    <button class="btn" type="submit">Buy</button>
-  </form>
-  <p class="muted small">Mode and bot default to your current mode. Real buys are placed from the coin popup — pick the coin there and choose Buy (real). If you pick a bot, it looks after this coin — its rules govern the position when its silent trading is on.</p>
+<h2 class="section-title">🔥 Trenches</h2>
+<div class="coin-list trenches-list">
+  {% if trenches_rows %}
+  {% for t in trenches_rows %}
+  <a class="coin-row" href="{{ url_for('coin_popup', coin_id=t.mint) }}">
+    <span class="coin-name"><strong>{{ t.name }}</strong><span class="muted small"> {{ t.symbol }}</span></span>
+    <span class="coin-price">${{ "%.4f"|format(t.price_usd) }}</span>
+    <span class="coin-change">{% if t.change_1h_pct is not none %}<span class="{{ 'up' if t.change_1h_pct >= 0 else 'down' }}">{% if t.change_1h_pct >= 0 %}+{% endif %}{{ "%.1f"|format(t.change_1h_pct) }}% 1h</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+  </a>
+  {% endfor %}
+  {% else %}
+  <p class="muted small">{% if trenches_error %}Trenches unavailable right now — the feed did not answer.{% else %}No trenches tokens right now.{% endif %}</p>
+  {% endif %}
 </div>
+<p class="muted small">Fresh pump.fun / PumpSwap tokens. Tap one for the same Buy / Sell / Sell all popup as any other coin.</p>
 
 <div class="card">
   <h2>💬 Assistant</h2>
@@ -60,33 +57,10 @@
   {% else %}<p class="muted">Nothing yet in {{ mode_label }}.</p>{% endif %}
 </div>
 
-{% if show_mode_chooser %}
-{# After sign-in: pick Demo or Real trading. This is a popup, not a
-   page — the SolEntry logo is on it, and the choice sticks until
-   the HUD switch is used. #}
-<div class="overlay" role="dialog" aria-label="Choose how to trade">
-  <div class="chooser-card">
-    <p class="se-title chooser-logo">Sol<span class="se-entry">Entry</span><span class="se-crown">👑</span></p>
-    <h2>How do you want to trade?</h2>
-    <p class="muted">Paper and real are completely separate — each has its own balance, coins, bots and activity.</p>
-    <form method="post" action="{{ url_for('choose_mode') }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="mode" value="paper">
-      <button class="btn big chooser-btn" type="submit">Demo trading</button>
-    </form>
-    <p class="muted small">Practice with fake money ($10,000 paper).</p>
-    <form method="post" action="{{ url_for('choose_mode') }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="mode" value="devnet">
-      <button class="btn big chooser-btn real" type="submit">Real trading — devnet</button>
-    </form>
-    <p class="muted small">Real SOL on devnet (test money, no real value). Mainnet is not connected.</p>
-  </div>
-</div>
-{% endif %}
-
 {% if popup_coin %}
-{# Coin popup: Buy / Sell / Send / Receive for one coin. #}
+{# Coin popup: Buy / Sell / Sell all (in SOL) + Send / Receive for one
+   coin — the same ticket as the coin detail page. Trenches rows open
+   this popup. #}
 <div class="overlay" role="dialog" aria-label="{{ popup_coin.name }}">
   <div class="coin-popup">
     <p class="popup-head"><a class="popup-close" href="{{ url_for('dashboard') }}" aria-label="Close">✕</a></p>
@@ -97,68 +71,8 @@
     <p>{% if popup_coin.held > 0 %}You hold <strong>{{ "%.4f"|format(popup_coin.held) }}</strong>{% if popup_coin.avg_price is not none %} at avg ${{ "%.4f"|format(popup_coin.avg_price) }}{% endif %}{% if popup_coin.pnl is not none %} · P&amp;L <strong>{% if popup_coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(popup_coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 
     <div class="popup-actions">
-      {# Trade ticket: one Buy/Sell switch over the same buy and sell
-         forms as before (same actions, same fields, same endpoints).
-         CSS-only radio switch — no JavaScript, so it works in any
-         in-app browser. #}
-      <div class="trade-ticket">
-        <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-buy" checked>
-        <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-sell">
-        <div class="ticket-switch">
-          <label for="ticket-buy">Buy</label>
-          <label for="ticket-sell">Sell</label>
-        </div>
-        <div class="ticket-panel ticket-buy-panel">
-      {% if mode == 'paper' %}
-      <form method="post" action="{{ url_for('coin_buy', coin_id=popup_coin.coin_id) }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Amount ($)<input type="number" name="usd" step="any" min="0" placeholder="100" required></label>
-        <label>Bot to look after this coin (optional)
-          <select name="bot_id">
-            <option value="">No bot — just buy it</option>
-            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
-          </select>
-        </label>
-        <button class="btn big" type="submit">Buy (paper)</button>
-      </form>
-      {% else %}
-      <form method="post" action="{{ url_for('coin_buy', coin_id=popup_coin.coin_id) }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
-        <label>Real bot to manage this buy (required — its buy-size limit is the cap)
-          <select name="bot_id" required>
-            <option value="">Choose a real bot…</option>
-            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
-          </select>
-        </label>
-        <button class="btn big" type="submit">Buy (real, devnet)</button>
-      </form>
-      <p class="muted small">Buys on pump.fun (devnet), signed by your signing bot, within the bot's limits. If the coin is not a live pump.fun token, the buy is refused plainly and nothing is placed.</p>
-      {% endif %}
-        </div>
-        <div class="ticket-panel ticket-sell-panel">
-      {% if mode == 'paper' %}
-      <form method="post" action="{{ url_for('coin_sell', coin_id=popup_coin.coin_id) }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Amount to sell<input type="number" name="amount" step="any" min="0" placeholder="0.5" required></label>
-        <button class="btn big" type="submit">Sell (paper)</button>
-      </form>
-      {% else %}
-      <form method="post" action="{{ url_for('coin_sell', coin_id=popup_coin.coin_id) }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Amount to sell<input type="number" name="amount" step="any" min="0" placeholder="0.5" required></label>
-        <label>Real bot to manage this sell (required)
-          <select name="bot_id" required>
-            <option value="">Choose a real bot…</option>
-            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
-          </select>
-        </label>
-        <button class="btn big" type="submit">Sell (real, devnet)</button>
-      </form>
-      <p class="muted small">Sells only the part you hold by hand. Coins a bot is managing are sold by that bot's rules.</p>
-      {% endif %}
-        </div>
-      </div>
+      {% set trade_coin = popup_coin %}
+      {% include "_trade_ticket.html" %}
 
       <h3>Send</h3>
       {% if popup_coin.coin_id == 'SOL' %}

@@ -42,6 +42,8 @@ from . import platforms as platforms_mod
 from . import pnl as pnl_mod
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
+from .charts import (CHART_RANGES, fetch_market_chart, fetch_trade_flow,
+                     high_low_24h, to_pnl_points)
 from .config import Config
 from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding,
@@ -59,7 +61,7 @@ from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
                      lamports_to_sol, sol_to_lamports)
-from .trenches import fetch_prices_for_mints
+from .trenches import fetch_prices_for_mints, fetch_trenches_scan
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
@@ -585,6 +587,81 @@ def _clear_login_fails(app, username: str):
     _db(app).commit()
 
 
+# ----------------------------------------------------------------------
+# Trenches list (coins page): fresh pump.fun / PumpSwap tokens from
+# the DexScreener feed, cached two minutes so the coins page does not
+# hit the feed on every render. A feed failure returns an error and
+# the page says the trenches are unavailable right now — never fake
+# rows. The cache is module-level so tests can reset it.
+# ----------------------------------------------------------------------
+_TRENCHES_CACHE: dict = {"at": 0.0, "rows": None, "error": None}
+
+
+def _trenches_list() -> tuple[list, str | None]:
+    """Top trenches rows: [{mint, symbol, name, price_usd,
+    change_1h_pct}], best 1-hour gain first, at most 10. Returns
+    (rows, error)."""
+    now = time.time()
+    if (_TRENCHES_CACHE["rows"] is not None
+            and now - _TRENCHES_CACHE["at"] < 120):
+        return _TRENCHES_CACHE["rows"], _TRENCHES_CACHE["error"]
+    try:
+        scan = fetch_trenches_scan()
+    except Exception as exc:
+        scan = {"candidates": [], "error": str(exc)[:160]}
+    rows = []
+    for entry in scan.get("candidates") or []:
+        rows.append({
+            "mint": entry["mint"],
+            "symbol": entry["symbol"],
+            "name": entry.get("name") or entry["symbol"],
+            "price_usd": entry["price_usd"],
+            "change_1h_pct": entry.get("change_1h_pct"),
+        })
+    rows.sort(key=lambda r: (
+        r["change_1h_pct"] is None,
+        -(r["change_1h_pct"] or 0.0)))
+    rows = rows[:10]
+    error = scan.get("error")
+    _TRENCHES_CACHE["at"] = now
+    _TRENCHES_CACHE["rows"] = rows
+    _TRENCHES_CACHE["error"] = error
+    return rows, error
+
+
+def _trenches_entry(mint: str) -> dict | None:
+    """The trenches-list entry for a mint, if the feed has it — so a
+    trenches token opened from the list shows its real name instead
+    of a truncated address."""
+    try:
+        rows, _err = _trenches_list()
+    except Exception:
+        return None
+    return next((r for r in rows if r["mint"] == mint), None)
+
+
+def _unlisted_coin_row(coin_id_resolved: str, price, prices: dict) -> dict:
+    """The coin row for a known coin that is not in the user's list
+    (no holding, no price-list entry): a trenches token shows its
+    feed name/symbol, anything else a truncated address."""
+    info = COINS.get(coin_id_resolved)
+    trench = (_trenches_entry(coin_id_resolved)
+              if coin_id_resolved not in COINS else None)
+    if trench is not None:
+        name, ticker = trench["name"], trench["symbol"]
+    elif info:
+        name, ticker = info["name"], coin_id_resolved
+    else:
+        name = ("Pump.fun token " + coin_id_resolved[:4] + "…" +
+                coin_id_resolved[-4:])
+        ticker = coin_id_resolved[:4] + "…"
+    return {"coin_id": coin_id_resolved, "name": name, "ticker": ticker,
+            "price": price, "held": 0.0, "avg_price": None,
+            "change_24h": prices["prices"].get(
+                coin_id_resolved, {}).get("change_24h"),
+            "pnl": None, "is_mint": coin_id_resolved not in COINS}
+
+
 def register_routes(app: Flask) -> None:
     login_required = _login_required(app)
 
@@ -594,7 +671,6 @@ def register_routes(app: Flask) -> None:
     _BURST_ENDPOINTS = {
         "login", "signup", "wallet_send", "wallet_send_confirm",
         "bot_create", "bot_preset_trenches", "coin_buy", "coin_sell",
-        "paper_buy", "paper_sell",
     }
 
     @app.before_request
@@ -618,6 +694,12 @@ def register_routes(app: Flask) -> None:
                 "header_balance": header_balance,
                 "header_mode": header_balance["mode"]
                 if header_balance else "paper",
+                # The post-sign-in Demo / Real chooser: shown on any
+                # logged-in page until the user picks (the wallet is
+                # the landing page, so that is where it appears
+                # first). The choice sticks for the session.
+                "show_mode_chooser": user is not None
+                and not session.get("mode_chosen"),
                 # Cloudflare Turnstile site key, or '' when the
                 # challenge is not configured (then no widget renders
                 # and login/signup run without it).
@@ -700,7 +782,7 @@ def register_routes(app: Flask) -> None:
                  "Account created; app wallet generated.")
             _rotate_session(user_id)
             flash("Welcome! Your app wallet was created for you.")
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("wallet"))
         return render_template("auth.html", mode="signup")
 
     @app.route("/login", methods=["GET", "POST"])
@@ -749,7 +831,7 @@ def register_routes(app: Flask) -> None:
                 _db(app), f"login-fail:ip:{ip}")
             _record_login_event(app, username, True)
             _rotate_session(row["id"])
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("wallet"))
         # SolEntry login page: hero + donate card. The donation wallet is
         # created once, on first use, and its public address is shown as
         # the donation destination. The field is labeled "Email Address"
@@ -1109,7 +1191,7 @@ def register_routes(app: Flask) -> None:
         _record_login_event(app, row["username"], True)
         _log(app, user_id, "passkey_login", "Signed in with a passkey.")
         _rotate_session(user_id)
-        return jsonify({"ok": True, "redirect": url_for("dashboard")})
+        return jsonify({"ok": True, "redirect": url_for("wallet")})
 
     # ------------------------------------------------------------------
     # Donations (public: the donate card lives on the login page)
@@ -1174,13 +1256,25 @@ def register_routes(app: Flask) -> None:
     # ------------------------------------------------------------------
     # Dashboard
     # ------------------------------------------------------------------
-    def _dashboard_data(app, user, popup_coin=None):
+    def _sol_price_usd() -> float | None:
+        """Current SOL price in USD from the price feed, or None when
+        the feed has none — SOL-denominated manual trades refuse
+        plainly instead of converting at a guessed rate."""
+        price = get_prices()["prices"].get("SOL", {}).get("price")
+        try:
+            return float(price) if price is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _dashboard_data(app, user, popup_coin=None, include_trenches=True):
         """Everything the coins page (dashboard) renders, for the
         ACTIVE mode only: paper shows the paper portfolio, paper
         bots and paper activity; real (devnet) shows the real wallet,
         real bots and real activity. The two modes never mix on a
         page. `popup_coin` is the coin row for the open coin popup,
-        or None."""
+        or None. The wallet homepage reuses this data (with
+        include_trenches=False) for its coins list and portfolio
+        header."""
         db = _db(app)
         mode = _active_mode(db, user["id"])
         wallet = _wallet(app, user["id"])
@@ -1217,6 +1311,8 @@ def register_routes(app: Flask) -> None:
             ).fetchall()
         activity = _activity_for_mode(db, user["id"], mode)
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
+        trenches_rows, trenches_error = (
+            _trenches_list() if include_trenches else ([], None))
         return {"wallet": wallet if mode == "devnet" else None,
                 "receive_address": wallet["pubkey"] if wallet else "",
                 "real_sol": real_sol,
@@ -1229,10 +1325,11 @@ def register_routes(app: Flask) -> None:
                 "portfolio_usd": portfolio_usd,
                 "portfolio_chart_svg": portfolio_chart_svg,
                 "portfolio_has_data": portfolio_has_data,
-                "show_mode_chooser": not session.get("mode_chosen"),
                 "support_id": signing_bot["support_id"]
                 if signing_bot else "",
-                "popup_coin": popup_coin}
+                "popup_coin": popup_coin,
+                "trenches_rows": trenches_rows,
+                "trenches_error": trenches_error}
 
     @app.route("/dashboard")
     @login_required
@@ -1255,7 +1352,7 @@ def register_routes(app: Flask) -> None:
         mode = (request.form.get("mode") or "").lower()
         if mode not in ("paper", "devnet"):
             flash("Pick Demo trading or Real trading.")
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("wallet"))
         db = _db(app)
         db.execute("UPDATE users SET active_mode = ? WHERE id = ?",
                    (mode, user["id"]))
@@ -1264,7 +1361,7 @@ def register_routes(app: Flask) -> None:
         _log(app, user["id"], "mode_switch",
              f"Trading mode chosen: {_mode_label(mode)}.")
         flash(f"You are now on {_mode_label(mode)}.")
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("wallet"))
 
     @app.route("/mode", methods=["POST"])
     @login_required
@@ -1279,7 +1376,7 @@ def register_routes(app: Flask) -> None:
         mode = (request.form.get("mode") or "").lower()
         if mode not in ("paper", "devnet"):
             flash("That mode is not valid.")
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("wallet"))
         db = _db(app)
         db.execute("UPDATE users SET active_mode = ? WHERE id = ?",
                    (mode, user["id"]))
@@ -1289,7 +1386,7 @@ def register_routes(app: Flask) -> None:
         ref = request.referrer or ""
         path = urlparse(ref).path if ref else ""
         if not path.startswith("/"):
-            path = url_for("dashboard")
+            path = url_for("wallet")
         return redirect(path)
 
     # ------------------------------------------------------------------
@@ -1314,19 +1411,68 @@ def register_routes(app: Flask) -> None:
         if row is None:
             # Known coin, not in the list (no holding, no price) —
             # build its row from what we know.
-            info = COINS.get(coin_id_resolved)
-            row = {"coin_id": coin_id_resolved,
-                   "name": info["name"] if info else
-                   "Pump.fun token " + coin_id_resolved[:4] + "…" +
-                   coin_id_resolved[-4:],
-                   "ticker": coin_id_resolved if info else
-                   coin_id_resolved[:4] + "…",
-                   "price": price, "held": 0.0, "avg_price": None,
-                   "change_24h": prices["prices"].get(
-                       coin_id_resolved, {}).get("change_24h"),
-                   "pnl": None, "is_mint": coin_id_resolved not in COINS}
+            row = _unlisted_coin_row(coin_id_resolved, price, prices)
         data = _dashboard_data(app, user, popup_coin=row)
         return render_template("dashboard.html", **data)
+
+    # ------------------------------------------------------------------
+    # Coin detail page: tap a coin on the wallet homepage (or the
+    # coins page) and get its market chart, 24h high/low, buyers vs
+    # sellers %, and Buy / Sell / Sell all — all in SOL. The chart
+    # ranges are 24hr / 1day / 1w / 1m / 1y / all-time (24hr and 1day
+    # are the same 1-day window, shown under both labels). Chart data
+    # is real (CoinGecko market_chart) or the page says "No data yet"
+    # — never invented. Buyers/sellers % comes from DexScreener 24h
+    # buy/sell txn counts; "—" when the feed has none.
+    # ------------------------------------------------------------------
+    @app.route("/coins/<coin_id>/detail")
+    @login_required
+    def coin_detail(coin_id: str):
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
+        if coin_id_resolved is None:
+            abort(404)
+        prices = get_prices()
+        rows = _coin_rows(db, user["id"], mode, prices)
+        row = next((r for r in rows
+                    if r["coin_id"] == coin_id_resolved), None)
+        if row is None:
+            row = _unlisted_coin_row(coin_id_resolved, price, prices)
+        range_key = (request.args.get("range") or "24h").strip()
+        if range_key not in CHART_RANGES:
+            range_key = "24h"
+        _label, days = CHART_RANGES[range_key]
+        chart = fetch_market_chart(coin_id_resolved, days)
+        chart_svg = ""
+        if chart["points"]:
+            chart_svg = pnl_mod.chart_svg(
+                to_pnl_points(chart["points"]), unit="$")
+        # 24h high/low come from the 24-hour series itself, so they
+        # always match the chart. When the detail range IS 24h/1day,
+        # the range chart is the 24h series — no second fetch.
+        if range_key in ("24h", "1d"):
+            high_24h, low_24h = high_low_24h(chart["points"])
+        else:
+            chart_24h = fetch_market_chart(coin_id_resolved, 1)
+            high_24h, low_24h = high_low_24h(chart_24h["points"])
+        flow = fetch_trade_flow(coin_id_resolved)
+        bots = db.execute(
+            "SELECT * FROM bots WHERE user_id = ? AND mode = ? "
+            "ORDER BY id DESC",
+            (user["id"], "real" if mode == "devnet" else "paper")
+            ).fetchall()
+        wallet = _wallet(app, user["id"])
+        return render_template(
+            "coin_detail.html", coin=row, range_key=range_key,
+            ranges=CHART_RANGES, chart_svg=chart_svg,
+            chart_error=chart["error"], high_24h=high_24h,
+            low_24h=low_24h, flow=flow, bots=bots, mode=mode,
+            mode_label=_mode_label(mode),
+            receive_address=wallet["pubkey"] if wallet else "",
+            prices_source=prices["source"],
+            prices_as_of=prices["as_of"])
 
     def _coin_result(heading: str, lines: list, ok: bool,
                      coin_id: str, mode_label: str):
@@ -1379,13 +1525,39 @@ def register_routes(app: Flask) -> None:
         if coin_id_resolved is None:
             abort(404)
         if mode == "paper":
-            try:
-                usd = float(request.form.get("usd") or 0)
-            except ValueError:
-                return _coin_result(
-                    "Nothing was bought",
-                    ["Amount must be a number."], False,
-                    coin_id_resolved, label)
+            # Buys are in SOL on the detail page and the coin popup:
+            # convert at the current SOL price. The old $ form is
+            # still accepted (it is what the tests post). A SOL price
+            # the feed does not have refuses plainly — never guessed.
+            amount_sol_raw = (request.form.get("amount_sol") or "").strip()
+            if amount_sol_raw:
+                try:
+                    amount_sol = float(amount_sol_raw)
+                except ValueError:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["Amount must be a number."], False,
+                        coin_id_resolved, label)
+                if amount_sol <= 0:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["Amount must be more than 0."], False,
+                        coin_id_resolved, label)
+                sol_price = _sol_price_usd()
+                if sol_price is None:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["SOL price unavailable right now."],
+                        False, coin_id_resolved, label)
+                usd = amount_sol * sol_price
+            else:
+                try:
+                    usd = float(request.form.get("usd") or 0)
+                except ValueError:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["Amount must be a number."], False,
+                        coin_id_resolved, label)
             result = _paper_buy_for(app, user, coin_id_resolved, usd,
                                     request.form.get("bot_id") or "")
             lines = [result["message"]]
@@ -1463,16 +1635,75 @@ def register_routes(app: Flask) -> None:
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
-        try:
-            amount = float(request.form.get("amount") or 0)
-        except ValueError:
-            return _coin_result(
-                "Nothing was sold", ["Amount must be a number."],
-                False, coin_id_resolved, label)
-        if amount <= 0:
-            return _coin_result(
-                "Nothing was sold", ["Amount must be more than 0."],
-                False, coin_id_resolved, label)
+        # Sells are in SOL on the detail page and the coin popup, and
+        # Sell all sells the whole hand-held position. The old
+        # coin-amount form is still accepted.
+        if request.form.get("sell_all") == "1":
+            if mode == "paper":
+                held = db.execute(
+                    "SELECT amount FROM paper_holdings WHERE user_id = ? "
+                    "AND coin_id = ?", (user["id"], coin_id_resolved)
+                    ).fetchone()
+                amount = float(held["amount"]) if held else 0.0
+                if amount <= 0:
+                    return _coin_result(
+                        "Nothing was sold",
+                        ["You hold none of this coin in " + label + "."],
+                        False, coin_id_resolved, label)
+            else:
+                manual = db.execute(
+                    "SELECT amount FROM real_holdings WHERE user_id = ? "
+                    "AND coin_id = ?", (user["id"], coin_id_resolved)
+                    ).fetchone()
+                amount = float(manual["amount"]) if manual else 0.0
+                if amount <= 0:
+                    bot_managed = db.execute(
+                        "SELECT COALESCE(SUM(amount), 0) AS total "
+                        "FROM bot_positions WHERE user_id = ? "
+                        "AND coin_id = ? AND mode = 'real'",
+                        (user["id"], coin_id_resolved)).fetchone()["total"]
+                    if bot_managed > 0:
+                        return _coin_result(
+                            "Nothing was sold",
+                            [f"You hold {bot_managed:.4f} "
+                             f"{coin_id_resolved} in real mode, but a bot "
+                             f"is managing it — the bot sells it by its "
+                             f"rules."],
+                            False, coin_id_resolved, label)
+                    return _coin_result(
+                        "Nothing was sold",
+                        ["You hold none of this coin in " + label + "."],
+                        False, coin_id_resolved, label)
+        elif (request.form.get("amount_sol") or "").strip():
+            try:
+                amount_sol = float(request.form.get("amount_sol"))
+            except ValueError:
+                return _coin_result(
+                    "Nothing was sold", ["Amount must be a number."],
+                    False, coin_id_resolved, label)
+            if amount_sol <= 0:
+                return _coin_result(
+                    "Nothing was sold", ["Amount must be more than 0."],
+                    False, coin_id_resolved, label)
+            sol_price = _sol_price_usd()
+            if sol_price is None or price is None or price <= 0:
+                return _coin_result(
+                    "Nothing was sold",
+                    ["Price unavailable right now — the sell needs a "
+                     "current price to convert SOL."],
+                    False, coin_id_resolved, label)
+            amount = amount_sol * sol_price / price
+        else:
+            try:
+                amount = float(request.form.get("amount") or 0)
+            except ValueError:
+                return _coin_result(
+                    "Nothing was sold", ["Amount must be a number."],
+                    False, coin_id_resolved, label)
+            if amount <= 0:
+                return _coin_result(
+                    "Nothing was sold", ["Amount must be more than 0."],
+                    False, coin_id_resolved, label)
         if mode == "paper":
             result = _paper_sell_for(app, user, coin_id_resolved, amount)
             lines = [result["message"]]
@@ -1646,29 +1877,23 @@ def register_routes(app: Flask) -> None:
     @app.route("/wallet")
     @login_required
     def wallet():
+        """The homepage: the user's coins (ticker, position P&L, 24h
+        %) with the portfolio header, then the wallet itself —
+        deposit / send / withdraw / platform wallets in real mode,
+        the paper balance in paper mode. One screen: the coins list
+        lives in a fixed-height panel that scrolls internally; the
+        page itself never scrolls."""
         user = _current_user(app)
         db = _db(app)
-        mode = _active_mode(db, user["id"])
+        data = _dashboard_data(app, user, include_trenches=False)
+        mode = data["mode"]
         if mode == "paper":
             # Paper mode: the paper balance only. The real wallet,
             # send history and platform wallets live in Real trading
             # — switch mode in the HUD to see them.
-            prices = get_prices()
-            price_map = {c: e.get("price", 0.0)
-                         for c, e in prices["prices"].items()}
-            cash = _paper(app, user["id"])
-            holdings_value = sum(
-                h["amount"] * price_map.get(h["coin_id"], 0.0)
-                for h in db.execute(
-                    "SELECT coin_id, amount FROM paper_holdings "
-                    "WHERE user_id = ?", (user["id"],)).fetchall())
             return render_template(
-                "wallet.html", wallet=None, real_sol=None, intents=[],
-                pumpfun_wallet="", platform_wallets={},
-                mode=mode, mode_label=_mode_label(mode),
-                paper_cash=cash, holdings_value=holdings_value)
-        wallet = _wallet(app, user["id"])
-        real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
+                "wallet.html", **data, intents=[],
+                pumpfun_wallet="", platform_wallets={})
         pumpfun_wallet = db.execute(
             "SELECT pumpfun_wallet FROM users WHERE id = ?",
             (user["id"],)).fetchone()["pumpfun_wallet"]
@@ -1677,13 +1902,10 @@ def register_routes(app: Flask) -> None:
             "signature, created_at FROM send_intents WHERE user_id = ? "
             "ORDER BY id DESC LIMIT 20", (user["id"],)).fetchall()
         return render_template(
-            "wallet.html", wallet=wallet,
-            real_sol=real_sol, intents=intents,
+            "wallet.html", **data, intents=intents,
             pumpfun_wallet=pumpfun_wallet,
             platform_wallets=platforms_mod.get_platform_wallets(
-                db, user["id"]),
-            mode=mode, mode_label=_mode_label(mode),
-            paper_cash=0.0, holdings_value=0.0)
+                db, user["id"]))
 
     @app.route("/wallet/send", methods=["GET", "POST"])
     @login_required
@@ -1874,13 +2096,15 @@ def register_routes(app: Flask) -> None:
                   + pubkey)
         return redirect(return_to)
     # ------------------------------------------------------------------
-    # Paper trading (shared by the old buy/sell endpoints and the
-    # coin popup). Helpers return result dicts; the callers decide
-    # how to present them (flash + redirect, or the confirmation
-    # page). A coin is either a price-list symbol (SOL, BTC, ...) or
-    # a pump.fun mint address (a trenches token the user holds).
-    # Symbols are uppercased; mints are NEVER uppercased — base58
-    # addresses are case-sensitive.
+    # Paper trading (shared by the coin popup and the coin detail
+    # page). Helpers return result dicts; the callers decide how to
+    # present them (the confirmation page). A coin is either a
+    # price-list symbol (SOL, BTC, ...) or a pump.fun mint address
+    # (a trenches token the user holds). Symbols are uppercased;
+    # mints are NEVER uppercased — base58 addresses are case-sensitive.
+    # The old /paper/buy and /paper/sell endpoints (the dashboard's
+    # removed Quick buy card) are gone — buys and sells now live
+    # only in the coin popup and the coin detail page.
     # ------------------------------------------------------------------
     def _resolve_coin_price(coin: str):
         """(coin_id, price, source) for a symbol or a mint, or
@@ -1998,61 +2222,6 @@ def register_routes(app: Flask) -> None:
                 "amount": amount, "usd": usd, "cash": cash,
                 "coin": coin_id}
 
-    @app.route("/paper/buy", methods=["POST"])
-    @login_required
-    def paper_buy():
-        _csrf_check()
-        user = _current_user(app)
-        db = _db(app)
-        # Mode comes from the buy form and defaults to the user's
-        # header mode. Real (devnet) buys are placed from the coin
-        # popup, which routes them through the pump.fun executor —
-        # this endpoint is the paper one, so a real choice is sent
-        # there instead of being refused into nothing.
-        mode = (request.form.get("mode")
-                or _active_mode(db, user["id"])).lower()
-        if mode not in ("paper", "real"):
-            mode = _active_mode(db, user["id"])
-        coin = (request.form.get("coin") or "").upper()
-        if mode == "real":
-            if coin not in COINS:
-                flash("Unknown coin.")
-                return redirect(url_for("dashboard"))
-            flash("Real buys are placed from the coin popup — tap the "
-                  "coin and choose Buy (real). Nothing was bought here.")
-            return redirect(url_for("coin_popup", coin_id=coin))
-        if coin not in COINS:
-            flash("Unknown coin.")
-            return redirect(url_for("dashboard"))
-        try:
-            usd = float(request.form.get("usd") or 0)
-        except ValueError:
-            flash("Amount must be a number.")
-            return redirect(url_for("dashboard"))
-        result = _paper_buy_for(app, user, coin, usd,
-                                request.form.get("bot_id") or "")
-        flash(result["message"]
-              + (f" Bot '{result['bot']['name']}' is looking after it."
-                 if result["ok"] and result.get("bot") else ""))
-        return redirect(url_for("dashboard"))
-
-    @app.route("/paper/sell", methods=["POST"])
-    @login_required
-    def paper_sell():
-        _csrf_check()
-        user = _current_user(app)
-        coin = (request.form.get("coin") or "").upper()
-        if coin not in COINS:
-            flash("Unknown coin.")
-            return redirect(url_for("dashboard"))
-        try:
-            amount = float(request.form.get("amount") or 0)
-        except ValueError:
-            flash("Amount must be a number.")
-            return redirect(url_for("dashboard"))
-        result = _paper_sell_for(app, user, coin, amount)
-        flash(result["message"])
-        return redirect(url_for("dashboard"))
     # ------------------------------------------------------------------
     # Bots
     # ------------------------------------------------------------------

@@ -9,7 +9,7 @@
 <body{% if current_user %} class="app-shell"{% endif %}>
 {% block header %}
 <header class="topbar">
-  <a class="brand" href="{% if current_user %}{{ url_for('dashboard') }}{% else %}{{ url_for('index') }}{% endif %}">SolEntry</a>
+  <a class="brand" href="{% if current_user %}{{ url_for('wallet') }}{% else %}{{ url_for('index') }}{% endif %}">SolEntry</a>
   {% if current_user and header_balance %}
   <div class="top-actions">
     <span class="balance-chip" title="{{ header_balance.label }} balance — switch it in the HUD below"><strong>{{ header_balance.label }}</strong> {{ header_balance.text }}</span>
@@ -42,6 +42,31 @@
     </button>
   </form>
 </nav>
+{% endif %}
+{% if show_mode_chooser %}
+{# After sign-in: pick Demo or Real trading. This is a popup, not a
+   page — the SolEntry logo is on it, and the choice sticks until
+   the HUD switch is used. It lives in the base template so it
+   appears on the landing page (the wallet) right after sign-in. #}
+<div class="overlay" role="dialog" aria-label="Choose how to trade">
+  <div class="chooser-card">
+    <p class="se-title chooser-logo">Sol<span class="se-entry">Entry</span><span class="se-crown">👑</span></p>
+    <h2>How do you want to trade?</h2>
+    <p class="muted">Paper and real are completely separate — each has its own balance, coins, bots and activity.</p>
+    <form method="post" action="{{ url_for('choose_mode') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="mode" value="paper">
+      <button class="btn big chooser-btn" type="submit">Demo trading</button>
+    </form>
+    <p class="muted small">Practice with fake money ($10,000 paper).</p>
+    <form method="post" action="{{ url_for('choose_mode') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="mode" value="devnet">
+      <button class="btn big chooser-btn real" type="submit">Real trading — devnet</button>
+    </form>
+    <p class="muted small">Real SOL on devnet (test money, no real value). Mainnet is not connected.</p>
+  </div>
+</div>
 {% endif %}
 {% block footer %}
 {% if not current_user %}

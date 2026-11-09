@@ -122,7 +122,7 @@ class TestForgotPasswordFlow(RecoveryTestCase):
         # New password works, old one does not.
         resp = login(self.client, "alice", "newpassword1")
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("/dashboard", resp.headers["Location"])
+        self.assertIn("/wallet", resp.headers["Location"])
         self.client.get("/logout", follow_redirects=False)
         resp = login(self.client, "alice", "password123")
         self.assertNotIn("/dashboard", resp.headers.get("Location", ""))
@@ -173,7 +173,7 @@ class TestForgotPasswordFlow(RecoveryTestCase):
         self.assertIn("/forgot-password/reset", resp.headers["Location"])
         self.reset_password("newpassword1")
         resp = login(self.client, "alice", "newpassword1")
-        self.assertIn("/dashboard", resp.headers["Location"])
+        self.assertIn("/wallet", resp.headers["Location"])
 
     def test_no_question_set_is_one_generic_message(self):
         signup(self.client, "alice")
@@ -216,7 +216,7 @@ class TestForgotPasswordFlow(RecoveryTestCase):
         signup(self.client, "alice")
         resp = login(self.client, "alice", "password123")
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("/dashboard", resp.headers["Location"])
+        self.assertIn("/wallet", resp.headers["Location"])
 
 
 class TestRecoverySchemaMigration(RecoveryTestCase):

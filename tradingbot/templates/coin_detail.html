@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ coin.name }} — SolEntry{% endblock %}
+{% block content %}
+<div class="one-screen">
+  <p><a class="btn ghost small" href="{{ url_for('wallet') }}">← Wallet</a> <a class="btn ghost small" href="{{ url_for('dashboard') }}">Coins</a></p>
+  <h1>{{ coin.name }} <span class="muted">({{ coin.ticker }})</span></h1>
+  <p class="muted small">{{ mode_label }}</p>
+  <p class="big-num">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>
+  <p class="muted small">{% if coin.change_24h is not none %}24h <span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}24h change unavailable{% endif %} · Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
+
+  <div class="chart-ranges" role="group" aria-label="Chart range">
+    {% for key, (label, days) in ranges.items() %}
+    <a class="range-btn{{ ' active' if key == range_key else '' }}" href="{{ url_for('coin_detail', coin_id=coin.coin_id, range=key) }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+  <div class="detail-chart">
+    {% if chart_svg %}{{ chart_svg|safe }}{% else %}<p class="muted">No data yet — no chart history for this range.</p>{% endif %}
+  </div>
+  {% if chart_error and not chart_svg %}<p class="muted small">Chart: {{ chart_error }}</p>{% endif %}
+
+  <div class="detail-stats">
+    <p>24h high: <strong>{% if high_24h is not none %}${{ "%.4f"|format(high_24h) }}{% else %}<span class="muted">—</span>{% endif %}</strong></p>
+    <p>24h low: <strong>{% if low_24h is not none %}${{ "%.4f"|format(low_24h) }}{% else %}<span class="muted">—</span>{% endif %}</strong></p>
+    <p>Buyers / sellers (24h): <strong>{% if flow %}Buyers {{ "%.0f"|format(flow.buys_pct) }}% / Sellers {{ "%.0f"|format(flow.sells_pct) }}% <span class="muted small">({{ flow.buys }} buys, {{ flow.sells }} sells)</span>{% else %}<span class="muted">—</span>{% endif %}</strong></p>
+  </div>
+
+  <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ "%.4f"|format(coin.avg_price) }}{% endif %}{% if coin.pnl is not none %} · P&amp;L <strong>{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
+
+  {% set trade_coin = coin %}
+  {% include "_trade_ticket.html" %}
+
+  <p class="muted small">All amounts are in SOL. Every trade ends on a confirmation stating the result, then back to coins.</p>
+</div>
+{% endblock %}

@@ -365,4 +365,4 @@ class TestPasskeyLogin(PasskeyTestCase):
         self.client.get("/logout", follow_redirects=False)
         resp = login(self.client, "alice", "password123")
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("/dashboard", resp.headers["Location"])
+        self.assertIn("/wallet", resp.headers["Location"])

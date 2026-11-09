@@ -184,10 +184,11 @@ class TestPnlPage(PnlBase):
 
     def test_paper_buy_records_snapshot_and_page_shows_it(self):
         token = csrf(self.client, "/dashboard")
-        resp = self.client.post("/paper/buy", data={
-            "csrf_token": token, "coin": "SOL", "usd": "100"},
+        resp = self.client.post("/coins/SOL/buy", data={
+            "csrf_token": token, "usd": "100", "bot_id": ""},
             follow_redirects=False)
-        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Bought", resp.get_data(as_text=True))
         rows = self.db.execute(
             "SELECT * FROM portfolio_snapshots WHERE user_id = ?",
             (self.user_id,)).fetchall()

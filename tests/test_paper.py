@@ -1,4 +1,12 @@
-"""Paper trading: buy/sell math, cash limits, holdings."""
+"""Paper trading: buy/sell math, cash limits, holdings.
+
+Buys and sells live in the coin popup and the coin detail page
+(/coins/<coin>/buy and /coins/<coin>/sell) — the old /paper/buy and
+/paper/sell endpoints (the dashboard's removed Quick buy card) are
+gone. Both endpoints answer with the confirmation page (200), never
+a redirect, and a refusal is a confirmation that says nothing was
+bought or sold — never a fill.
+"""
 
 import tempfile
 import unittest
@@ -34,11 +42,20 @@ class TestPaper(unittest.TestCase):
         self.rpc_patch.stop()
         self.tmp.cleanup()
 
+    def _buy(self, coin="SOL", usd="1000"):
+        return self.client.post(f"/coins/{coin}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{coin}"),
+            "usd": usd, "bot_id": ""})
+
+    def _sell(self, coin="SOL", amount="4"):
+        return self.client.post(f"/coins/{coin}/sell", data={
+            "csrf_token": csrf(self.client, f"/coins/{coin}"),
+            "amount": amount})
+
     def test_buy_deducts_cash_and_adds_holding(self):
-        resp = self.client.post("/paper/buy", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": "SOL", "usd": "1000"})
-        self.assertEqual(resp.status_code, 302)
+        resp = self._buy()
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Bought", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         cash = db.execute("SELECT cash_usd FROM paper_portfolio"
                           ).fetchone()["cash_usd"]
@@ -52,10 +69,9 @@ class TestPaper(unittest.TestCase):
         self.assertEqual(trade["total_usd"], 1000.0)
 
     def test_buy_more_than_cash_rejected(self):
-        resp = self.client.post("/paper/buy", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": "SOL", "usd": "999999"})
-        self.assertEqual(resp.status_code, 302)
+        resp = self._buy(usd="999999")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Nothing was bought", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT cash_usd FROM paper_portfolio"
                                     ).fetchone()["cash_usd"], 10000.0)
@@ -63,13 +79,10 @@ class TestPaper(unittest.TestCase):
                                     ).fetchone()["c"], 0)
 
     def test_sell_returns_cash(self):
-        self.client.post("/paper/buy", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": "SOL", "usd": "1000"})
-        resp = self.client.post("/paper/sell", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": "SOL", "amount": "4"})
-        self.assertEqual(resp.status_code, 302)
+        self._buy()
+        resp = self._sell()
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Sold", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT cash_usd FROM paper_portfolio"
                                     ).fetchone()["cash_usd"], 9400.0)
@@ -78,23 +91,20 @@ class TestPaper(unittest.TestCase):
                          6.0)
 
     def test_sell_more_than_held_rejected(self):
-        self.client.post("/paper/buy", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": "SOL", "usd": "100"})
-        resp = self.client.post("/paper/sell", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": "SOL", "amount": "99"})
-        self.assertEqual(resp.status_code, 302)
+        self._buy(usd="100")
+        resp = self._sell(amount="99")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Nothing was sold", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT amount FROM paper_holdings "
                                     "WHERE coin_id='SOL'").fetchone()["amount"],
                          1.0)
 
     def test_unknown_coin_rejected(self):
-        resp = self.client.post("/paper/buy", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": "FAKE", "usd": "10"})
-        self.assertEqual(resp.status_code, 302)
+        resp = self.client.post("/coins/FAKE/buy", data={
+            "csrf_token": csrf(self.client, "/coins/SOL"),
+            "usd": "10", "bot_id": ""})
+        self.assertEqual(resp.status_code, 404)
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT COUNT(*) c FROM paper_trades"
                                     ).fetchone()["c"], 0)

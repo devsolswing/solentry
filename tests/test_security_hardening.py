@@ -379,7 +379,7 @@ class TestAnomalyLockout(unittest.TestCase):
         # No anomaly lock: the right password still works.
         resp = login(self.client, "alice")
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("/dashboard", resp.headers["Location"])
+        self.assertIn("/wallet", resp.headers["Location"])
 
 
 class TestDailySendLimit(unittest.TestCase):

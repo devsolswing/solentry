@@ -144,6 +144,34 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .platform-row:first-of-type { border-top: none; }
 
 /* ------------------------------------------------------------------ */
+/* Wallet homepage + coin detail page (red + yellow, one screen).    */
+/* The wallet is the homepage: Dogewifhat hero, coins with P&L and   */
+/* 24h %, and the wallet itself. Every page fits one screen — the    */
+/* page itself never scrolls; long lists scroll only inside a        */
+/* fixed-height panel. Original SolEntry logo (.brand) untouched.    */
+/* ------------------------------------------------------------------ */
+.one-screen { display: flex; flex-direction: column; min-height: 0; }
+.wallet-hero { margin: 4px 0 8px; }
+.wallet-hero img { width: 100%; max-height: 132px; object-fit: cover; object-position: center 30%; display: block; border-radius: 14px; border: 2px solid #ffd700; box-shadow: 0 0 22px rgba(255, 190, 0, .45); }
+.wallet-flag { font-size: 26px; vertical-align: middle; }
+.section-title { color: #ffd700; border-bottom: 2px solid #e62e1b; padding-bottom: 4px; margin: 14px 0 8px; }
+.wallet-total { margin-top: 4px; }
+.coin-list-panel { max-height: 300px; overflow-y: auto; background: #000; border: 2px solid #ffb300; border-radius: 12px; padding: 4px; }
+.coin-list-panel .coin-list { margin: 0; }
+.trenches-list .coin-row { border-color: rgba(255, 45, 32, .55); }
+.chart-ranges { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+.range-btn { flex: 1 1 auto; text-align: center; padding: 8px 4px; background: #1a0805; border: 1px solid #ffb300; border-radius: 999px; color: #ffd700; text-decoration: none; font-size: 13px; font-weight: 700; }
+.range-btn.active { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border-color: #ffcf3d; }
+.detail-chart { margin: 8px 0; }
+.detail-chart svg { width: 100%; height: auto; display: block; }
+.detail-stats { background: #160b08; border: 2px solid #ffb300; border-radius: 12px; padding: 10px 14px; margin: 8px 0; }
+.detail-stats p { margin: 6px 0; font-size: 14px; }
+
+/* Trade ticket, third tab: Sell all. */
+#ticket-sellall:checked ~ .ticket-switch label[for="ticket-sellall"] { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; }
+#ticket-sellall:checked ~ .ticket-sellall-panel { display: block; }
+
+/* ------------------------------------------------------------------ */
 /* SolEntry login page — red/gold neon, from James's design.         */
 /* ------------------------------------------------------------------ */
 .se-page { max-width: 480px; margin: 0 auto; padding: 10px 12px 28px; background: radial-gradient(120% 60% at 50% 0%, #2a0705 0%, #0a0505 55%, #050303 100%); border-radius: 0; }

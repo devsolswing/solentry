@@ -16,7 +16,8 @@ class TestAuth(unittest.TestCase):
 
     def test_signup_creates_user_wallet_and_paper_cash(self):
         resp = signup(self.client, "alice")
-        self.assertEqual(resp.status_code, 302)  # redirect to dashboard
+        self.assertEqual(resp.status_code, 302)  # redirect to wallet
+        self.assertIn("/wallet", resp.headers["Location"])
         db = self.app.config["DB"]
         user = db.execute("SELECT id FROM users WHERE username = 'alice'"
                           ).fetchone()

@@ -1,0 +1,94 @@
+{# Trade ticket: Buy / Sell / Sell all over the same endpoints.
+   Used by the coin popup (dashboard) and the coin detail page.
+   Expects: trade_coin (row dict), bots (this mode's bots), mode
+   ('paper' or 'devnet'), mode_label. All amounts are in SOL: paper
+   buys/sells convert at the current SOL price on the server, real
+   buys/sells are native SOL. CSS-only radio switch — no JavaScript,
+   so it works in any in-app browser. #}
+<div class="trade-ticket">
+  <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-buy" checked>
+  <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-sell">
+  <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-sellall">
+  <div class="ticket-switch">
+    <label for="ticket-buy">Buy</label>
+    <label for="ticket-sell">Sell</label>
+    <label for="ticket-sellall">Sell all</label>
+  </div>
+  <div class="ticket-panel ticket-buy-panel">
+    {% if mode == 'paper' %}
+    <form method="post" action="{{ url_for('coin_buy', coin_id=trade_coin.coin_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Bot to look after this coin (optional)
+        <select name="bot_id">
+          <option value="">No bot — just buy it</option>
+          {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
+        </select>
+      </label>
+      <button class="btn big" type="submit">Buy (paper)</button>
+    </form>
+    {% else %}
+    <form method="post" action="{{ url_for('coin_buy', coin_id=trade_coin.coin_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Real bot to manage this buy (required — its buy-size limit is the cap)
+        <select name="bot_id" required>
+          <option value="">Choose a real bot…</option>
+          {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+        </select>
+      </label>
+      <button class="btn big" type="submit">Buy (real, devnet)</button>
+    </form>
+    <p class="muted small">Buys on pump.fun (devnet), signed by your signing bot, within the bot's limits. If the coin is not a live pump.fun token, the buy is refused plainly and nothing is placed.</p>
+    {% endif %}
+  </div>
+  <div class="ticket-panel ticket-sell-panel">
+    {% if mode == 'paper' %}
+    <form method="post" action="{{ url_for('coin_sell', coin_id=trade_coin.coin_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <button class="btn big" type="submit">Sell (paper)</button>
+    </form>
+    {% else %}
+    <form method="post" action="{{ url_for('coin_sell', coin_id=trade_coin.coin_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Real bot to manage this sell (required)
+        <select name="bot_id" required>
+          <option value="">Choose a real bot…</option>
+          {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+        </select>
+      </label>
+      <button class="btn big" type="submit">Sell (real, devnet)</button>
+    </form>
+    <p class="muted small">Sells only the part you hold by hand. Coins a bot is managing are sold by that bot's rules.</p>
+    {% endif %}
+  </div>
+  <div class="ticket-panel ticket-sellall-panel">
+    {% if trade_coin.held > 0 %}
+    <p>You hold <strong>{{ "%.4f"|format(trade_coin.held) }}</strong> {{ trade_coin.ticker }} in {{ mode_label }} — sell it all now.</p>
+    {% if mode == 'paper' %}
+    <form method="post" action="{{ url_for('coin_sell', coin_id=trade_coin.coin_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="sell_all" value="1">
+      <button class="btn big" type="submit">Sell all (paper)</button>
+    </form>
+    {% else %}
+    <form method="post" action="{{ url_for('coin_sell', coin_id=trade_coin.coin_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="sell_all" value="1">
+      <label>Real bot to manage this sell (required)
+        <select name="bot_id" required>
+          <option value="">Choose a real bot…</option>
+          {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+        </select>
+      </label>
+      <button class="btn big" type="submit">Sell all (real, devnet)</button>
+    </form>
+    <p class="muted small">Sells only the part you hold by hand. Coins a bot is managing are sold by that bot's rules.</p>
+    {% endif %}
+    {% else %}
+    <p class="muted">You hold none of this coin in {{ mode_label }} — nothing to sell.</p>
+    {% endif %}
+  </div>
+</div>

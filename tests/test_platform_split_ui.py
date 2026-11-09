@@ -118,9 +118,9 @@ class SplitBase(unittest.TestCase):
         return bot["id"]
 
     def _paper_buy(self, coin="SOL", usd="100"):
-        return self.client.post("/paper/buy", data={
-            "csrf_token": csrf(self.client, "/dashboard"),
-            "coin": coin, "usd": usd, "mode": "paper", "bot_id": ""})
+        return self.client.post(f"/coins/{coin}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{coin}"),
+            "usd": usd, "bot_id": ""})
 
     def _platform_create(self, platform, return_to="/bots/create"):
         return self.client.post(f"/platforms/{platform}/create", data={
