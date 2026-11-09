@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Set a New Password — SolEntry{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Set a new password</h1>
+  <p class="muted">Both codes checked out. Choose a new password — at least 8 characters.</p>
+  <form method="post" action="{{ url_for('forgot_reset') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>New password<input type="password" name="password" required autocomplete="new-password"></label>
+    <button class="btn big" type="submit">Change password</button>
+  </form>
+</div>
+{% endblock %}

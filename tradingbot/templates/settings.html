@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Account Settings — SolEntry{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Account settings</h1>
+  <p class="muted">Link your phone number and email so you can get back into your account if you forget your password. Recovery needs a code from <b>both</b> — one by email, one by text. Each code expires in 10 minutes.</p>
+
+  <h2>Phone number</h2>
+  {% if contacts.phone_verified %}
+  <p>✅ <b>{{ contacts.phone }}</b> — verified.</p>
+  {% elif contacts.phone %}
+  <p>📱 <b>{{ contacts.phone }}</b> — not verified yet.</p>
+  {% else %}
+  <p class="muted">No phone linked yet.</p>
+  {% endif %}
+  {% if not sms_configured %}
+  <p class="muted">Text messages are not set up yet — the app owner needs to add the SMS provider (Twilio) first.</p>
+  {% else %}
+  <form method="post" action="{{ url_for('settings_phone') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Phone number<input name="phone" required autocomplete="tel" placeholder="555-010-1000" value="{{ pending_phone or contacts.phone }}"></label>
+    <button class="btn" type="submit">Send text code</button>
+  </form>
+  {% endif %}
+  {% if pending_phone %}
+  <form method="post" action="{{ url_for('settings_verify') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="kind" value="phone">
+    <label>Text code (6 digits)<input name="code" required inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
+    <button class="btn big" type="submit">Verify phone</button>
+  </form>
+  {% endif %}
+
+  <h2>Email</h2>
+  {% if contacts.email_verified %}
+  <p>✅ <b>{{ contacts.email }}</b> — verified.</p>
+  {% elif contacts.email %}
+  <p>✉️ <b>{{ contacts.email }}</b> — not verified yet.</p>
+  {% else %}
+  <p class="muted">No email linked yet.</p>
+  {% endif %}
+  {% if not email_configured %}
+  <p class="muted">Email is not set up yet — the app owner needs to add the email provider (Resend) first.</p>
+  {% else %}
+  <form method="post" action="{{ url_for('settings_email') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Email address<input name="email" type="email" required autocomplete="email" placeholder="you@example.com" value="{{ pending_email or contacts.email }}"></label>
+    <button class="btn" type="submit">Send email code</button>
+  </form>
+  {% endif %}
+  {% if pending_email %}
+  <form method="post" action="{{ url_for('settings_verify') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="kind" value="email">
+    <label>Email code (6 digits)<input name="code" required inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
+    <button class="btn big" type="submit">Verify email</button>
+  </form>
+  {% endif %}
+
+  <p class="muted">Codes are 6 digits, expire in 10 minutes, and stop working after 5 wrong tries. You can ask for a new code once a minute.</p>
+  <p><a href="{{ url_for('dashboard') }}">← Back to dashboard</a></p>
+</div>
+{% endblock %}

@@ -62,6 +62,17 @@ class Config:
             "SILENT_LOOP_ENABLED", "0") == "1"
         self.silent_loop_interval_seconds: int = max(
             10, int(env.get("SILENT_LOOP_INTERVAL_SECONDS", "60")))
+        # Verification codes (phone + email linking, two-code account
+        # recovery). Providers are env vars only — nothing secret here.
+        # Twilio sends the SMS codes; Resend sends the email codes.
+        # Either provider missing means its codes cannot be sent, and
+        # the app says so plainly instead of faking a send.
+        self.twilio_account_sid: str = env.get("TWILIO_ACCOUNT_SID", "")
+        self.twilio_auth_token: str = env.get("TWILIO_AUTH_TOKEN", "")
+        self.twilio_from_number: str = env.get("TWILIO_FROM_NUMBER", "")
+        self.resend_api_key: str = env.get("RESEND_API_KEY", "")
+        self.resend_from_email: str = env.get(
+            "RESEND_FROM_EMAIL", "SolEntry <onboarding@resend.dev>")
         # Admin for /admin/donations. Empty = the first registered user.
         self.admin_username: str = env.get("ADMIN_USERNAME", "").strip()
 

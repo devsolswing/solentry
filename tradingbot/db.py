@@ -3,7 +3,8 @@
 Schema:
   users, wallets (encrypted secret), paper_portfolio, paper_holdings,
   paper_trades, bots, bot_proposals, send_intents, activity,
-  login_attempts (rate limiting).
+  login_attempts (rate limiting), verification_codes (phone/email
+  linking and two-code recovery; salted SHA-256 hashes only).
 """
 
 from __future__ import annotations
@@ -16,6 +17,10 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     salt TEXT NOT NULL,
+    phone TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    phone_verified INTEGER NOT NULL DEFAULT 0,
+    email_verified INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -135,6 +140,26 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     locked_until TEXT
 );
 
+-- Verification codes for phone/email linking and two-code account
+-- recovery. Only a salted SHA-256 hash is stored — the plaintext code
+-- never reaches this table. One live code per (user, purpose, contact);
+-- purpose is 'link' or 'recover', contact is the phone (E.164) or the
+-- email the code was sent to.
+CREATE TABLE IF NOT EXISTS verification_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    purpose TEXT NOT NULL,
+    contact TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    used INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (user_id, purpose, contact),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
 -- Project donation wallet: ONE wallet for the whole project, generated
 -- once at first use, encrypted like user wallets. It belongs to the
 -- project — never to any user's personal wallet, and never to James's
@@ -175,6 +200,10 @@ _MIGRATIONS = (
     ("bots", "mode", "TEXT NOT NULL DEFAULT 'paper'"),
     ("bots", "silent", "INTEGER NOT NULL DEFAULT 0"),
     ("bots", "max_open_trades", "INTEGER NOT NULL DEFAULT 3"),
+    ("users", "phone", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "email", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "phone_verified", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "email_verified", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

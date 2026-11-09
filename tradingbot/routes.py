@@ -23,6 +23,8 @@ from flask import (Flask, abort, flash, jsonify, redirect, render_template,
 
 from . import assistant as assistant_mod
 from . import donations as donations_mod
+from . import notify as notify_mod
+from . import recovery as recovery_mod
 from .config import Config
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
@@ -250,6 +252,267 @@ def register_routes(app: Flask) -> None:
     def logout():
         session.clear()
         return redirect(url_for("index"))
+
+    # ------------------------------------------------------------------
+    # Account settings: link phone + email (verified by code)
+    # Account recovery: forgot password, two codes (email + SMS)
+    # ------------------------------------------------------------------
+    def _contacts(app, user_id: int):
+        return _db(app).execute(
+            "SELECT phone, email, phone_verified, email_verified "
+            "FROM users WHERE id = ?", (user_id,)).fetchone()
+
+    @app.route("/settings")
+    @login_required
+    def settings():
+        user = _current_user(app)
+        return render_template(
+            "settings.html", contacts=_contacts(app, user["id"]),
+            sms_configured=notify_mod.sms_configured(_cfg(app)),
+            email_configured=notify_mod.email_configured(_cfg(app)),
+            pending_phone=session.get("pending_phone"),
+            pending_email=session.get("pending_email"))
+
+    @app.route("/settings/phone", methods=["POST"])
+    @login_required
+    def settings_phone():
+        _csrf_check()
+        user = _current_user(app)
+        phone = recovery_mod.normalize_phone(
+            request.form.get("phone") or "")
+        if not phone:
+            flash("That phone number doesn't look right. "
+                  "Use digits, e.g. 555-010-1000.")
+            return redirect(url_for("settings"))
+        contacts = _contacts(app, user["id"])
+        if contacts["phone"] == phone and contacts["phone_verified"]:
+            flash("That phone is already linked and verified.")
+            return redirect(url_for("settings"))
+        if not notify_mod.sms_configured(_cfg(app)):
+            flash("Text messages are not set up yet. The app owner "
+                  "needs to add the SMS provider (Twilio) first.")
+            return redirect(url_for("settings"))
+        code, error = recovery_mod.request_code(
+            _db(app), user["id"], "link", phone)
+        if error == "rate_limited":
+            flash("A code was just sent. Wait a minute before asking "
+                  "for a new one.")
+            return redirect(url_for("settings"))
+        if not notify_mod.send_sms(
+                _cfg(app), phone,
+                f"Your SolEntry code is {code}. It expires in 10 minutes."):
+            recovery_mod.void_code(_db(app), user["id"], "link", phone)
+            flash("Could not send the text right now. Try again in a bit.")
+            return redirect(url_for("settings"))
+        session["pending_phone"] = phone
+        flash("Code sent by text. Enter it below to verify this phone.")
+        return redirect(url_for("settings"))
+
+    @app.route("/settings/email", methods=["POST"])
+    @login_required
+    def settings_email():
+        _csrf_check()
+        user = _current_user(app)
+        email = (request.form.get("email") or "").strip().lower()
+        if not recovery_mod.is_valid_email(email):
+            flash("That email address doesn't look right.")
+            return redirect(url_for("settings"))
+        contacts = _contacts(app, user["id"])
+        if contacts["email"] == email and contacts["email_verified"]:
+            flash("That email is already linked and verified.")
+            return redirect(url_for("settings"))
+        if not notify_mod.email_configured(_cfg(app)):
+            flash("Email is not set up yet. The app owner needs to add "
+                  "the email provider (Resend) first.")
+            return redirect(url_for("settings"))
+        code, error = recovery_mod.request_code(
+            _db(app), user["id"], "link", email)
+        if error == "rate_limited":
+            flash("A code was just sent. Wait a minute before asking "
+                  "for a new one.")
+            return redirect(url_for("settings"))
+        if not notify_mod.send_email(
+                _cfg(app), email, "Your SolEntry verification code",
+                f"Your SolEntry code is {code}. It expires in 10 minutes."):
+            recovery_mod.void_code(_db(app), user["id"], "link", email)
+            flash("Could not send the email right now. Try again in a bit.")
+            return redirect(url_for("settings"))
+        session["pending_email"] = email
+        flash("Code sent by email. Enter it below to verify this email.")
+        return redirect(url_for("settings"))
+
+    @app.route("/settings/verify", methods=["POST"])
+    @login_required
+    def settings_verify():
+        _csrf_check()
+        user = _current_user(app)
+        kind = request.form.get("kind") or ""
+        code = request.form.get("code") or ""
+        if kind == "phone":
+            contact = session.get("pending_phone")
+            column, flag = "phone", "phone_verified"
+        elif kind == "email":
+            contact = session.get("pending_email")
+            column, flag = "email", "email_verified"
+        else:
+            flash("That verification kind is not valid.")
+            return redirect(url_for("settings"))
+        if not contact:
+            flash("Ask for a code first, then enter it here.")
+            return redirect(url_for("settings"))
+        if not recovery_mod.verify_code(
+                _db(app), user["id"], "link", contact, code):
+            flash("That code is wrong or expired.")
+            return redirect(url_for("settings"))
+        _db(app).execute(
+            f"UPDATE users SET {column} = ?, {flag} = 1 WHERE id = ?",
+            (contact, user["id"]))
+        _db(app).commit()
+        session.pop("pending_phone" if kind == "phone"
+                    else "pending_email", None)
+        _log(app, user["id"], "contact_verified",
+             f"Verified {kind} for account recovery.")
+        flash(f"Your {kind} is verified and linked to your account.")
+        return redirect(url_for("settings"))
+
+    @app.route("/forgot-password", methods=["GET", "POST"])
+    def forgot_password():
+        if request.method == "POST":
+            _csrf_check()
+            username = (request.form.get("username") or "").strip()
+            # One generic message covers every not-ready case (no such
+            # user, contact missing, contact unverified) so the page
+            # never reveals which contact is missing — or whether the
+            # account exists at all.
+            not_ready = ("Account recovery is not set up for this "
+                         "account.")
+            row = _db(app).execute(
+                "SELECT id, phone, email, phone_verified, "
+                "email_verified FROM users WHERE username = ?",
+                (username,)).fetchone()
+            if not row or not row["phone_verified"] \
+                    or not row["email_verified"]:
+                flash(not_ready)
+                return redirect(url_for("forgot_password"))
+            if not notify_mod.sms_configured(_cfg(app)) \
+                    or not notify_mod.email_configured(_cfg(app)):
+                flash("Account recovery is not available yet — the "
+                      "code-sending providers are not set up. Ask the "
+                      "app owner to set them up.")
+                return redirect(url_for("forgot_password"))
+            if recovery_mod.sent_recently(
+                    _db(app), row["id"], "recover", row["email"]) \
+                    or recovery_mod.sent_recently(
+                    _db(app), row["id"], "recover", row["phone"]):
+                # Codes from the earlier send are still live; do not
+                # replace either one.
+                session["recovery_user_id"] = row["id"]
+                session["recovery_email_masked"] = \
+                    recovery_mod.mask_email(row["email"])
+                session["recovery_phone_masked"] = \
+                    recovery_mod.mask_phone(row["phone"])
+                flash("Codes were just sent. Use the ones you already "
+                      "have — wait a minute before asking again.")
+                return redirect(url_for("forgot_verify"))
+            email_code, _ = recovery_mod.request_code(
+                _db(app), row["id"], "recover", row["email"])
+            sms_code, _ = recovery_mod.request_code(
+                _db(app), row["id"], "recover", row["phone"])
+            if not email_code or not sms_code:
+                # A code could not be issued (e.g. a resend raced in
+                # just now) — never send a partial set.
+                flash("Codes were just sent. Use the ones you already "
+                      "have — wait a minute before asking again.")
+                return redirect(url_for("forgot_password"))
+            email_ok = notify_mod.send_email(
+                _cfg(app), row["email"], "Your SolEntry recovery code",
+                f"Your SolEntry account recovery code is {email_code}. "
+                f"It expires in 10 minutes. If this wasn't you, ignore it.")
+            sms_ok = notify_mod.send_sms(
+                _cfg(app), row["phone"],
+                f"Your SolEntry account recovery code is {sms_code}. "
+                f"It expires in 10 minutes.")
+            if not email_ok or not sms_ok:
+                # Never leave a live code that was never delivered.
+                recovery_mod.void_code(_db(app), row["id"], "recover",
+                                       row["email"])
+                recovery_mod.void_code(_db(app), row["id"], "recover",
+                                       row["phone"])
+                flash("Could not send the codes right now. "
+                      "Try again in a bit.")
+                return redirect(url_for("forgot_password"))
+            session["recovery_user_id"] = row["id"]
+            session["recovery_email_masked"] = \
+                recovery_mod.mask_email(row["email"])
+            session["recovery_phone_masked"] = \
+                recovery_mod.mask_phone(row["phone"])
+            flash("Codes sent to your email and your phone. "
+                  "Enter both below.")
+            return redirect(url_for("forgot_verify"))
+        return render_template("forgot_password.html")
+
+    @app.route("/forgot-password/verify", methods=["GET", "POST"])
+    def forgot_verify():
+        user_id = session.get("recovery_user_id")
+        if not user_id:
+            return redirect(url_for("forgot_password"))
+        if request.method == "POST":
+            _csrf_check()
+            row = _db(app).execute(
+                "SELECT phone, email FROM users WHERE id = ?",
+                (user_id,)).fetchone()
+            if not row:
+                session.pop("recovery_user_id", None)
+                return redirect(url_for("forgot_password"))
+            email_ok = recovery_mod.verify_code(
+                _db(app), user_id, "recover", row["email"],
+                request.form.get("email_code") or "")
+            sms_ok = recovery_mod.verify_code(
+                _db(app), user_id, "recover", row["phone"],
+                request.form.get("sms_code") or "")
+            if not email_ok or not sms_ok:
+                # Generic on purpose: never say which code failed.
+                flash("One or both codes are wrong or expired. "
+                      "Check both and try again.")
+                return redirect(url_for("forgot_verify"))
+            session.pop("recovery_user_id", None)
+            session["recovery_verified_user_id"] = user_id
+            return redirect(url_for("forgot_reset"))
+        return render_template(
+            "forgot_verify.html",
+            email_masked=session.get("recovery_email_masked", "***"),
+            phone_masked=session.get("recovery_phone_masked", "***"))
+
+    @app.route("/forgot-password/reset", methods=["GET", "POST"])
+    def forgot_reset():
+        user_id = session.get("recovery_verified_user_id")
+        if not user_id:
+            return redirect(url_for("forgot_password"))
+        if request.method == "POST":
+            _csrf_check()
+            password = request.form.get("password") or ""
+            if len(password) < 8:
+                flash("Password must be at least 8 characters.")
+                return redirect(url_for("forgot_reset"))
+            row = _db(app).execute(
+                "SELECT username FROM users WHERE id = ?",
+                (user_id,)).fetchone()
+            if not row:
+                session.pop("recovery_verified_user_id", None)
+                return redirect(url_for("forgot_password"))
+            salt, pw_hash = hash_password(password)
+            _db(app).execute(
+                "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
+                (pw_hash, salt, user_id))
+            _db(app).commit()
+            # Two codes proved ownership, so any login lockout is cleared.
+            _clear_login_fails(app, row["username"])
+            _log(app, user_id, "password_reset",
+                 "Password changed through two-code account recovery.")
+            session.pop("recovery_verified_user_id", None)
+            flash("Password changed. Log in with your new password.")
+            return redirect(url_for("login"))
+        return render_template("forgot_reset.html")
 
     # ------------------------------------------------------------------
     # Donations (public: the donate card lives on the login page)
