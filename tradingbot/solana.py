@@ -160,16 +160,18 @@ def ed25519_sign(seed: bytes, message: bytes) -> bytes:
     return r_point + s.to_bytes(32, "little")
 
 
-def generate_keypair() -> tuple[bytes, str, bytes]:
+def generate_keypair() -> tuple[bytearray, str, bytearray]:
     """Fresh random Solana keypair.
 
     Returns (seed_32, pubkey_base58, secret_64) where secret_64 is
-    seed + pubkey, the form Phantom exports. The caller must encrypt
-    secret_64 immediately and drop the reference.
+    seed + pubkey, the form Phantom exports. Seed and secret are
+    MUTABLE bytearrays so the caller can wipe them in place with
+    wipe_secret the moment they are encrypted — never hold them as
+    plain bytes past the encrypt call.
     """
     seed = os.urandom(32)
     pubkey = ed25519_publickey_from_seed(seed)
-    return seed, base58_encode(pubkey), seed + pubkey
+    return bytearray(seed), base58_encode(pubkey), bytearray(seed + pubkey)
 
 
 def publickey_from_secret(secret: bytes) -> bytes:

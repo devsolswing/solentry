@@ -5,7 +5,7 @@
   <h1>Bot “{{ name }}” created</h1>
   <p>Your bot's API token is shown <strong>once</strong>, right here. Copy it now — it will never be shown again.</p>
   <p class="addr">{{ token }}</p>
-  <button class="btn" onclick="navigator.clipboard.writeText('{{ token }}'); this.textContent='Copied!';">Copy token</button>
+  <button class="btn" data-copy="{{ token }}">Copy token</button>
   <p class="muted small">Keep it secret. Anyone with this token can act as your bot.</p>
   <p><a class="btn big" href="{{ url_for('bot_detail', bot_id=bot_id) }}">Open your bot →</a></p>
 </div>

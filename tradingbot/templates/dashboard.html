@@ -178,14 +178,14 @@
       <h3>Receive</h3>
       <p class="muted small">Send {{ popup_coin.ticker }} to your app wallet (real, devnet) at this address:</p>
       <p class="addr">{{ receive_address }}</p>
-      <button class="btn" onclick="navigator.clipboard.writeText('{{ receive_address }}'); this.textContent='Copied!';">Copy address</button>
+      <button class="btn" data-copy="{{ receive_address }}">Copy address</button>
     </div>
     <p><a class="btn ghost big" href="{{ url_for('dashboard') }}">← Back to coins</a></p>
   </div>
 </div>
 {% endif %}
 
-<script>
+<script nonce="{{ csp_nonce }}">
 const log = document.getElementById('chat-log');
 document.getElementById('chat-form').addEventListener('submit', async (e) => {
   e.preventDefault();

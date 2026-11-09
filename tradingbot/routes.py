@@ -23,8 +23,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
-from flask import (Flask, abort, flash, jsonify, redirect, render_template,
-                   request, session, url_for)
+from flask import (Flask, abort, flash, has_request_context, jsonify,
+                   redirect, render_template, request, session, url_for)
 
 from webauthn import (generate_authentication_options,
                       generate_registration_options,
@@ -40,6 +40,7 @@ from . import donations as donations_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
 from . import pnl as pnl_mod
+from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
 from .config import Config
 from .executor import execute_real_trade
@@ -48,11 +49,11 @@ from .paper import (InsufficientCash, InsufficientHolding,
 from .prices import COINS, get_prices
 from .rules import (TRENCHES_CATEGORY, TRENCHES_PRESET_NAME, load_rules,
                     summarize_rules, trenches_ruleset, validate_ruleset)
+from .security import (encrypt_secret, hash_password, hash_token,
+                       new_csrf_token, new_token, temporary_secret,
+                       verify_password, verify_turnstile, wipe_secret)
 from .signals import signal_for_coin
 from .silent_loop import _open_position
-from .security import (decrypt_secret, encrypt_secret, hash_password,
-                       hash_token, new_csrf_token, new_token,
-                       verify_password)
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
                      lamports_to_sol, sol_to_lamports)
@@ -60,6 +61,28 @@ from .trenches import fetch_prices_for_mints
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
+# Anti-bot / rate limits (see rate_limit.py — counters live in the
+# DB, so a restart does not clear them). Generous enough that a real
+# user never trips them; tight enough to stop a script hammering.
+MAX_LOGIN_FAILS_PER_IP = 20          # failed logins, 15 min, per IP
+LOGIN_FAIL_IP_WINDOW_SECONDS = 15 * 60
+MAX_SIGNUPS_PER_IP = 10              # signups, 1 hour, per IP
+SIGNUP_IP_WINDOW_SECONDS = 60 * 60
+MAX_SENDS_PER_USER = 10              # send intents, 1 hour, per user
+SEND_USER_WINDOW_SECONDS = 60 * 60
+MAX_BOT_CREATES_PER_USER = 20        # bot creates, 1 hour, per user
+BOT_CREATE_USER_WINDOW_SECONDS = 60 * 60
+MAX_POST_BURST_PER_IP = 120          # POSTs to guarded endpoints, 1 min
+POST_BURST_WINDOW_SECONDS = 60
+# Anomaly detection: this many failed logins in 15 minutes from IPs
+# the account has never successfully logged in from locks the
+# account for 15 minutes and writes a suspicious-activity audit row.
+ANOMALY_FAIL_THRESHOLD = 3
+ANOMALY_WINDOW_SECONDS = 15 * 60
+# Honeypot field name on login/signup forms. Real users never see
+# it (hidden with CSS); bots that fill every field give themselves
+# away. The name looks like an ordinary field on purpose.
+HONEYPOT_FIELD = "website"
 
 
 def _cfg(app: Flask) -> Config:
@@ -109,15 +132,145 @@ def _new_csrf():
     return session["csrf_token"]
 
 
+def _client_ip() -> str:
+    """Client IP, honouring the X-Forwarded-For header Railway's
+    proxy sets (first entry = the real client). 'unknown' when there
+    is no request (silent loop) or no address at all."""
+    if not has_request_context():
+        return ""
+    forwarded = (request.headers.get("X-Forwarded-For") or "").strip()
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    return (request.remote_addr or "unknown")[:64]
+
+
+def _client_ua() -> str:
+    """User-Agent string, truncated — the 'device' half of the audit
+    trail. Empty outside a request."""
+    if not has_request_context():
+        return ""
+    return (request.user_agent.string or "")[:200]
+
+
 def _log(app, user_id: int, kind: str, detail: str,
          mode: str = "") -> None:
     """Activity row, tagged with the trading mode it belongs to
     ('paper' / 'real') so pages show each mode's activity separately.
-    Account-level rows pass mode='' and show in both modes."""
+    Account-level rows pass mode='' and show in both modes.
+
+    Every row also carries the client IP and device string behind
+    the action, where a request exists — this is the audit trail:
+    sends, trades, key operations, and mode changes are all
+    attributable. Rows the silent loop writes (no request) record
+    empty ip/device."""
     _db(app).execute(
-        "INSERT INTO activity (user_id, kind, detail, created_at, mode) "
-        "VALUES (?, ?, ?, ?, ?)", (user_id, kind, detail, _now(), mode))
+        "INSERT INTO activity (user_id, kind, detail, created_at, mode, "
+        "ip, device) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, kind, detail, _now(), mode, _client_ip(),
+         _client_ua()))
     _db(app).commit()
+
+
+def _honeypot_filled() -> bool:
+    """True when the hidden honeypot field on a login/signup form
+    was filled in — only a bot filling every field does that."""
+    return bool((request.form.get(HONEYPOT_FIELD) or "").strip())
+
+
+def _turnstile_ok(app) -> bool:
+    """Cloudflare Turnstile check for login/signup.
+
+    Enforced ONLY when both Turnstile keys are configured. When
+    they are absent the app continues without the challenge (and
+    logs a warning at startup) — never lock James out for missing
+    keys. A failed verification is a plain refusal, same as a
+    wrong password, so a bot learns nothing.
+    """
+    cfg = _cfg(app)
+    if not cfg.turnstile_site_key or not cfg.turnstile_secret_key:
+        return True
+    token = request.form.get("cf-turnstile-response") or ""
+    return verify_turnstile(token, cfg.turnstile_secret_key,
+                            _client_ip() or None)
+
+
+def _rotate_session(user_id: int) -> None:
+    """Session rotation on login/signup: drop the old session id
+    entirely (so a stolen pre-login session is useless) and start a
+    fresh one, marked permanent so the 12-hour lifetime applies."""
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user_id
+
+
+def _record_login_event(app, username: str, success: bool) -> None:
+    """One row per login attempt, for anomaly detection."""
+    _db(app).execute(
+        "INSERT INTO login_events (username, ip, user_agent, success, "
+        "created_at) VALUES (?, ?, ?, ?, ?)",
+        (username, _client_ip(), _client_ua(), 1 if success else 0,
+         _now()))
+    _db(app).commit()
+
+
+def _anomaly_lock(app, username: str) -> bool:
+    """Anomaly check, run after a failed login: when this username
+    has ANOMALY_FAIL_THRESHOLD or more failed logins in the last 15
+    minutes from IPs it has NEVER successfully logged in from, the
+    account is locked for 15 minutes and a suspicious-activity audit
+    row is written. Returns True when the lock was applied."""
+    db = _db(app)
+    window_start = (datetime.now(timezone.utc)
+                    - timedelta(seconds=ANOMALY_WINDOW_SECONDS)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    known_ips = {r["ip"] for r in db.execute(
+        "SELECT DISTINCT ip FROM login_events WHERE username = ? "
+        "AND success = 1", (username,)).fetchall()}
+    fails = db.execute(
+        "SELECT ip FROM login_events WHERE username = ? AND success = 0 "
+        "AND created_at >= ?", (username, window_start)).fetchall()
+    new_ip_fails = sum(1 for r in fails if r["ip"] not in known_ips)
+    if new_ip_fails < ANOMALY_FAIL_THRESHOLD:
+        return False
+    locked_until = (datetime.now(timezone.utc)
+                    + timedelta(minutes=LOCKOUT_MINUTES)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.execute(
+        "INSERT INTO login_attempts (username, fail_count, locked_until) "
+        "VALUES (?, 0, ?) ON CONFLICT(username) DO UPDATE SET "
+        "locked_until = excluded.locked_until",
+        (username, locked_until))
+    db.commit()
+    row = db.execute("SELECT id FROM users WHERE username = ?",
+                     (username,)).fetchone()
+    if row:
+        _log(app, row["id"], "suspicious_activity",
+             f"Account locked for {LOCKOUT_MINUTES} minutes: "
+             f"{new_ip_fails} failed logins in 15 minutes from "
+             f"unrecognised addresses.")
+    return True
+
+
+def _sent_sol_today(db, user_id: int, exclude_intent_id: int = None) -> float:
+    """SOL sent (or queued to send) today, UTC, across all of the
+    user's send intents that have not failed. The daily send cap is
+    checked against this. `exclude_intent_id` leaves one intent out
+    (the confirm step re-checks the intent it is about to sign)."""
+    if exclude_intent_id is None:
+        row = db.execute(
+            "SELECT COALESCE(SUM(amount_lamports), 0) AS total "
+            "FROM send_intents WHERE user_id = ? AND status IN "
+            "('pending', 'sent', 'sent_unconfirmed') AND "
+            "date(created_at) = date('now')",
+            (user_id,)).fetchone()
+    else:
+        row = db.execute(
+            "SELECT COALESCE(SUM(amount_lamports), 0) AS total "
+            "FROM send_intents WHERE user_id = ? AND id != ? AND "
+            "status IN ('pending', 'sent', 'sent_unconfirmed') AND "
+            "date(created_at) = date('now')",
+            (user_id, exclude_intent_id)).fetchone()
+    return lamports_to_sol(int(row["total"]))
 
 
 def _find_bot_by_name(db, user_id: int, name: str):
@@ -433,6 +586,27 @@ def _clear_login_fails(app, username: str):
 def register_routes(app: Flask) -> None:
     login_required = _login_required(app)
 
+    # POST-burst guard: no single address may hammer the sensitive
+    # endpoints (login, signup, sends, bot creation, trades). A
+    # burst past the limit is a plain 429 — the action never runs.
+    _BURST_ENDPOINTS = {
+        "login", "signup", "wallet_send", "wallet_send_confirm",
+        "bot_create", "bot_preset_trenches", "coin_buy", "coin_sell",
+        "paper_buy", "paper_sell",
+    }
+
+    @app.before_request
+    def _post_burst_guard():
+        if request.method != "POST" or not request.endpoint:
+            return None
+        if request.endpoint not in _BURST_ENDPOINTS:
+            return None
+        if not rate_limit_mod.record_hit(
+                _db(app), f"burst:ip:{_client_ip()}",
+                MAX_POST_BURST_PER_IP, POST_BURST_WINDOW_SECONDS):
+            abort(429)
+        return None
+
     @app.context_processor
     def inject_globals():
         user = _current_user(app)
@@ -441,7 +615,11 @@ def register_routes(app: Flask) -> None:
                 "network": _cfg(app).network, "coins": COINS,
                 "header_balance": header_balance,
                 "header_mode": header_balance["mode"]
-                if header_balance else "paper"}
+                if header_balance else "paper",
+                # Cloudflare Turnstile site key, or '' when the
+                # challenge is not configured (then no widget renders
+                # and login/signup run without it).
+                "turnstile_site_key": _cfg(app).turnstile_site_key}
 
     @app.route("/health")
     def health():
@@ -458,6 +636,19 @@ def register_routes(app: Flask) -> None:
     def signup():
         if request.method == "POST":
             _csrf_check()
+            # Anti-bot: a filled honeypot field or a failed
+            # Turnstile challenge is a plain refusal, same as any
+            # other invalid signup — a bot learns nothing.
+            if _honeypot_filled() or not _turnstile_ok(app):
+                flash("Something looks wrong with this signup. "
+                      "Please try again.")
+                return redirect(url_for("signup"))
+            if not rate_limit_mod.record_hit(
+                    _db(app), f"signup:ip:{_client_ip()}",
+                    MAX_SIGNUPS_PER_IP, SIGNUP_IP_WINDOW_SECONDS):
+                flash("Too many signups from this address. "
+                      "Please try again later.")
+                return redirect(url_for("signup"))
             username = (request.form.get("username") or "").strip()
             password = request.form.get("password") or ""
             if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username):
@@ -477,13 +668,19 @@ def register_routes(app: Flask) -> None:
                 "VALUES (?, ?, ?)", (username, pw_hash, salt))
             user_id = cur.lastrowid
             # Fresh app wallet for this user — generated here, encrypted
-            # immediately, never shown in full and never logged.
-            _seed, pubkey, secret64 = generate_keypair()
-            blob = encrypt_secret(secret64, _cfg(app).encryption_key)
-            secret64 = b"\x00" * len(secret64)  # drop the reference
-            db.execute(
-                "INSERT INTO wallets (user_id, pubkey, encrypted_secret) "
-                "VALUES (?, ?, ?)", (user_id, pubkey, blob))
+            # immediately, never shown in full and never logged. The
+            # seed and secret are wiped IN PLACE the moment the
+            # encrypted blob exists, even if the insert fails.
+            seed, pubkey, secret64 = generate_keypair()
+            try:
+                blob = encrypt_secret(secret64, _cfg(app).encryption_key)
+                db.execute(
+                    "INSERT INTO wallets (user_id, pubkey, "
+                    "encrypted_secret) VALUES (?, ?, ?)",
+                    (user_id, pubkey, blob))
+            finally:
+                wipe_secret(seed)
+                wipe_secret(secret64)
             # The app wallet IS the user's pump.fun trading wallet:
             # pump.fun has no separate accounts, so trading on pump.fun
             # uses this linked Solana wallet.
@@ -499,7 +696,7 @@ def register_routes(app: Flask) -> None:
             db.commit()
             _log(app, user_id, "signup",
                  "Account created; app wallet generated.")
-            session["user_id"] = user_id
+            _rotate_session(user_id)
             flash("Welcome! Your app wallet was created for you.")
             return redirect(url_for("dashboard"))
         return render_template("auth.html", mode="signup")
@@ -508,10 +705,26 @@ def register_routes(app: Flask) -> None:
     def login():
         if request.method == "POST":
             _csrf_check()
+            # Anti-bot: honeypot / Turnstile first, same plain refusal
+            # as a wrong password.
+            if _honeypot_filled() or not _turnstile_ok(app):
+                flash("Something looks wrong with this login. "
+                      "Please try again.")
+                return redirect(url_for("login"))
             username = (request.form.get("username") or "").strip()
             password = request.form.get("password") or ""
+            ip = _client_ip()
             if _check_login_lock(app, username):
                 flash("Too many failed tries. Locked for 15 minutes.")
+                return redirect(url_for("login"))
+            # Per-IP failed-login limit (failures only — successful
+            # logins never count against it).
+            if rate_limit_mod.hits_in_window(
+                    _db(app), f"login-fail:ip:{ip}",
+                    LOGIN_FAIL_IP_WINDOW_SECONDS) >= \
+                    MAX_LOGIN_FAILS_PER_IP:
+                flash("Too many failed tries from this address. "
+                      "Please try again later.")
                 return redirect(url_for("login"))
             row = _db(app).execute(
                 "SELECT id, password_hash, salt FROM users WHERE username = ?",
@@ -519,10 +732,21 @@ def register_routes(app: Flask) -> None:
             if not row or not verify_password(password, row["salt"],
                                               row["password_hash"]):
                 _record_login_fail(app, username)
+                rate_limit_mod.record_hit(
+                    _db(app), f"login-fail:ip:{ip}",
+                    MAX_LOGIN_FAILS_PER_IP, LOGIN_FAIL_IP_WINDOW_SECONDS)
+                _record_login_event(app, username, False)
+                # Anomaly: repeated failures from addresses this
+                # account has never logged in from locks the account
+                # and writes a suspicious-activity audit row.
+                _anomaly_lock(app, username)
                 flash("Wrong username or password.")
                 return redirect(url_for("login"))
             _clear_login_fails(app, username)
-            session["user_id"] = row["id"]
+            rate_limit_mod.reset_key(
+                _db(app), f"login-fail:ip:{ip}")
+            _record_login_event(app, username, True)
+            _rotate_session(row["id"])
             return redirect(url_for("dashboard"))
         # SolEntry login page: hero + donate card. The donation wallet is
         # created once, on first use, and its public address is shown as
@@ -880,8 +1104,9 @@ def register_routes(app: Flask) -> None:
             (verified.new_sign_count, user_id, credential_id))
         _db(app).commit()
         _clear_login_fails(app, row["username"])
+        _record_login_event(app, row["username"], True)
         _log(app, user_id, "passkey_login", "Signed in with a passkey.")
-        session["user_id"] = user_id
+        _rotate_session(user_id)
         return jsonify({"ok": True, "redirect": url_for("dashboard")})
 
     # ------------------------------------------------------------------
@@ -1482,6 +1707,21 @@ def register_routes(app: Flask) -> None:
                 return redirect(url_for("wallet_send"))
             lamports = sol_to_lamports(amount)
             db = _db(app)
+            # Anti-bot / wallet protection: at most 10 sends an hour,
+            # and a daily cap (default 5 SOL) — a compromised session
+            # cannot drain a wallet in one day.
+            if not rate_limit_mod.record_hit(
+                    db, f"send:user:{user['id']}",
+                    MAX_SENDS_PER_USER, SEND_USER_WINDOW_SECONDS):
+                flash("Too many sends this hour. Please try again "
+                      "later.")
+                return redirect(url_for("wallet_send"))
+            if _sent_sol_today(db, user["id"]) + amount > \
+                    _cfg(app).daily_send_limit_sol:
+                flash(f"Daily send limit is "
+                      f"{_cfg(app).daily_send_limit_sol:g} SOL — this "
+                      f"send would go over it.")
+                return redirect(url_for("wallet_send"))
             cur = db.execute(
                 "INSERT INTO send_intents (user_id, destination, "
                 "amount_lamports, token, status, created_at) "
@@ -1521,19 +1761,43 @@ def register_routes(app: Flask) -> None:
                 flash("This send was already handled.")
                 return redirect(url_for("dashboard" if return_to else
                                         "wallet"))
+            # Daily cap, re-checked at confirm time: the intent may
+            # have been created yesterday or before other sends.
+            if _sent_sol_today(db, user["id"],
+                               exclude_intent_id=intent["id"]) + \
+                    lamports_to_sol(intent["amount_lamports"]) > \
+                    _cfg(app).daily_send_limit_sol:
+                db.execute(
+                    "UPDATE send_intents SET status = 'failed', "
+                    "error = ? WHERE id = ?",
+                    ("daily send limit", intent["id"]))
+                db.commit()
+                _log(app, user["id"], "send_failed",
+                     "Send refused: daily send limit.", "real")
+                flash(f"Daily send limit is "
+                      f"{_cfg(app).daily_send_limit_sol:g} SOL — this "
+                      f"send would go over it.")
+                return redirect(url_for("wallet"))
             wallet = _wallet(app, user["id"])
             try:
-                secret = decrypt_secret(wallet["encrypted_secret"],
-                                        _cfg(app).encryption_key)
-                seed = secret[:32]
-                pubkey = wallet["pubkey"]
-                client = SolanaRpcClient(_cfg(app).rpc_url)
-                blockhash = client.get_recent_blockhash()
-                signed_b64, signature = build_signed_transfer(
-                    seed, pubkey, intent["destination"],
-                    intent["amount_lamports"], blockhash)
-                seed = b"\x00" * 32
-                secret = b"\x00" * len(secret)
+                # The key is decrypted into a mutable buffer, used
+                # for one signature, and wiped IN PLACE the moment
+                # signing is done — before the transaction is even
+                # sent. The finally blocks guarantee the wipe on
+                # every path, including a signing failure.
+                with temporary_secret(
+                        wallet["encrypted_secret"],
+                        _cfg(app).encryption_key) as secret:
+                    seed = bytearray(secret[:32])
+                    try:
+                        pubkey = wallet["pubkey"]
+                        client = SolanaRpcClient(_cfg(app).rpc_url)
+                        blockhash = client.get_recent_blockhash()
+                        signed_b64, signature = build_signed_transfer(
+                            seed, pubkey, intent["destination"],
+                            intent["amount_lamports"], blockhash)
+                    finally:
+                        wipe_secret(seed)
                 tx_sig = client.send_transaction(signed_b64)
                 confirmed = client.confirm_transaction(tx_sig, attempts=3,
                                                        delay_seconds=1.0)
@@ -1816,6 +2080,13 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         if request.method == "POST":
             _csrf_check()
+            if not rate_limit_mod.record_hit(
+                    _db(app), f"bot-create:user:{user['id']}",
+                    MAX_BOT_CREATES_PER_USER,
+                    BOT_CREATE_USER_WINDOW_SECONDS):
+                flash("Too many bots created this hour. Please try "
+                      "again later.")
+                return redirect(url_for("bots"))
             name = (request.form.get("name") or "").strip() or "My Bot"
             strategy = (request.form.get("strategy") or "balanced").lower()
             if strategy not in assistant_mod.STRATEGIES:

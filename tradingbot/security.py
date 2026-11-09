@@ -4,6 +4,12 @@
 - Wallet secret keys: AES-256-GCM (cryptography), random 12-byte nonce.
   Stored form is base64(nonce || ciphertext || tag).
 - Bot API tokens: shown once at creation, only the SHA-256 hash is stored.
+- Key wiping: key material is held in a mutable bytearray and wiped
+  IN PLACE (overwritten with zeros) the moment the signature is done,
+  in a finally block on every path. Reassigning a bytes variable only
+  drops the reference — the old bytes can linger in memory until the
+  garbage collector frees them — so bytes are never used to hold key
+  material past the sign call. See wipe_secret / temporary_secret.
 """
 
 from __future__ import annotations
@@ -11,10 +17,26 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
+import urllib.request
+from contextlib import contextmanager
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+
+def wipe_secret(buf) -> None:
+    """Overwrite key material IN PLACE with zeros.
+
+    Only a mutable bytearray can be truly scrubbed — a bytes object
+    is immutable, so for bytes there is nothing to overwrite and the
+    caller must drop the reference instead (and should have used a
+    bytearray in the first place). Returns None; the buffer reads all
+    zeros afterwards.
+    """
+    if isinstance(buf, bytearray):
+        buf[:] = b"\x00" * len(buf)
 
 # scrypt cost parameters (OWASP-recommended interactive values).
 _SCRYPT_N = 16384
@@ -79,6 +101,57 @@ def decrypt_secret(blob: str, key: bytes) -> bytes:
         return AESGCM(key).decrypt(nonce, ciphertext, None)
     except Exception as exc:
         raise ValueError("decryption failed") from exc
+
+
+def decrypt_secret_mutable(blob: str, key: bytes) -> bytearray:
+    """Same as decrypt_secret, but the plaintext comes back as a
+    MUTABLE bytearray so the caller can wipe it in place with
+    wipe_secret the moment it is done with it. All new code that
+    decrypts a wallet key must use this, never decrypt_secret."""
+    return bytearray(decrypt_secret(blob, key))
+
+
+@contextmanager
+def temporary_secret(blob: str, key: bytes):
+    """Yield the decrypted key as a bytearray, wiped in place when
+    the block exits — on success AND on exception. The only safe way
+    to hold key material: `with temporary_secret(...) as secret:`.
+    """
+    secret = decrypt_secret_mutable(blob, key)
+    try:
+        yield secret
+    finally:
+        wipe_secret(secret)
+
+
+def verify_turnstile(token: str, secret_key: str,
+                     remote_ip: str | None = None) -> bool:
+    """Verify a Cloudflare Turnstile token server-side.
+
+    POSTs to Cloudflare's siteverify endpoint (5s timeout). Returns
+    True only when Cloudflare says the token is valid. Any network
+    error, bad response, or missing token is False — a failed check
+    never silently passes. No dependency beyond urllib.
+    """
+    if not token or not secret_key:
+        return False
+    payload = json.dumps({
+        "secret": secret_key,
+        "response": token,
+        **({"remoteip": remote_ip} if remote_ip else {}),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return False
+    return bool(result.get("success"))
 
 
 def hash_token(token: str) -> str:

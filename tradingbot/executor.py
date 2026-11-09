@@ -21,10 +21,14 @@ within the rules that already govern it:
     pump.fun program and the Token / Associated Token programs.
 
 The user's app wallet key is decrypted transiently with
-ENCRYPTION_KEY, used for one signature, and the reference is
-dropped immediately. Key material is never logged, stored, or
-returned anywhere. Every signed transaction is logged (signature,
-bot, coin, amount, rule) by the caller.
+ENCRYPTION_KEY into a mutable bytearray, used for one signature,
+and wiped IN PLACE (overwritten with zeros) in a finally block the
+moment the trade is done — success, refusal, or failure. The full
+64-byte secret is scrubbed inside _load_wallet before it returns;
+only the 32-byte seed leaves it, and the caller scrubs that too.
+Key material is never logged, stored, or returned anywhere. Every
+signed transaction is logged (signature, bot, coin, amount, rule)
+by the caller.
 
 Anything unverified refuses plainly with {"status": "skipped",
 "reason": ...} and no fill: no bonding curve for the mint on
@@ -34,11 +38,9 @@ send, or an unconfirmed transaction all skip — never a fake fill.
 
 from __future__ import annotations
 
-import sqlite3
-
 from . import pumpfun
 from .config import Config
-from .security import decrypt_secret
+from .security import decrypt_secret_mutable, wipe_secret
 from .signing_bot import ensure_signing_bot
 from .solana import (SolanaRpcClient, base58_encode,
                      ed25519_publickey_from_seed, is_valid_address,
@@ -65,25 +67,39 @@ def _skip(reason: str) -> dict:
 
 
 def _load_wallet(db, user_id: int, cfg: Config):
-    """Return (pubkey, seed_bytes) for the user's app wallet, or
+    """Return (pubkey, seed_bytearray) for the user's app wallet, or
     (None, None) when there is no wallet. The seed is returned only
-    so the caller can sign one transaction and then drop it."""
+    so the caller can sign one transaction and then wipe it.
+
+    Key handling: the full 64-byte decrypted secret is held in a
+    mutable bytearray and wiped IN PLACE (overwritten with zeros) in
+    a finally block before this function returns — it never leaves
+    this function alive, on success or on failure. Only the 32-byte
+    seed leaves, as its own bytearray, and the caller must wipe it
+    in its own finally block."""
     row = db.execute(
         "SELECT pubkey, encrypted_secret FROM wallets WHERE user_id = ?",
         (user_id,)).fetchone()
     if not row:
         return None, None
+    secret = None
     try:
-        secret = decrypt_secret(row["encrypted_secret"],
-                                cfg.encryption_key)
+        secret = decrypt_secret_mutable(row["encrypted_secret"],
+                                        cfg.encryption_key)
+        if len(secret) != 64:
+            return None, None
+        seed = bytearray(secret[:32])
+        if base58_encode(ed25519_publickey_from_seed(seed)) != row["pubkey"]:
+            wipe_secret(seed)
+            return None, None
+        return row["pubkey"], seed
     except ValueError:
         return None, None
-    if len(secret) != 64:
-        return None, None
-    seed = secret[:32]
-    if base58_encode(ed25519_publickey_from_seed(seed)) != row["pubkey"]:
-        return None, None
-    return row["pubkey"], seed
+    finally:
+        # The full secret is scrubbed here, on every path — the
+        # caller only ever holds the 32-byte seed.
+        if secret is not None:
+            wipe_secret(secret)
 
 
 def _check_instructions_only_allowed(instructions: list) -> None:
@@ -201,8 +217,12 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                 "coin_amount": coin_amount,
                 "signing_bot": signing_bot["support_id"]}
     finally:
-        # Drop the key reference the moment signing is done.
-        seed = b"\x00" * 32
+        # Wipe the seed IN PLACE the moment the trade is done —
+        # success, refusal, or failure. Overwriting the buffer is
+        # what actually scrubs memory; reassigning the variable
+        # would only drop the reference and leave the bytes sitting.
+        if seed is not None:
+            wipe_secret(seed)
 
 
 def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
@@ -268,7 +288,10 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
         return {"status": "executed", "signature": confirmed,
                 "signing_bot": signing_bot["support_id"]}
     finally:
-        seed = b"\x00" * 32
+        # Wipe the seed IN PLACE the moment the trade is done —
+        # success, refusal, or failure.
+        if seed is not None:
+            wipe_secret(seed)
 
 
 def execute_real_trade(bot, user_id: int, coin: str, side: str,

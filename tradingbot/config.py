@@ -71,6 +71,27 @@ class Config:
             "WEBAUTHN_ORIGIN", "http://localhost:5000")
         # Admin for /admin/donations. Empty = the first registered user.
         self.admin_username: str = env.get("ADMIN_USERNAME", "").strip()
+        # Cloudflare Turnstile (bot challenge on login/signup). Both
+        # keys must be set for the challenge to be enforced; with
+        # either missing the app logs a warning at startup and
+        # continues without it (never lock James out for missing
+        # keys). Free setup is documented in the README security
+        # page. Never commit real keys — env vars only.
+        self.turnstile_site_key: str = env.get(
+            "TURNSTILE_SITE_KEY", "").strip()
+        self.turnstile_secret_key: str = env.get(
+            "TURNSTILE_SECRET_KEY", "").strip()
+        # Per-wallet daily send cap (SOL). A send that would take
+        # today's total over this is refused plainly. Default 5 SOL
+        # is far above James's $20 CAD-scale testing and stops a
+        # compromised session draining a wallet in one day.
+        self.daily_send_limit_sol: float = float(
+            env.get("DAILY_SEND_LIMIT_SOL", "5"))
+        # Secure session cookies (only sent over HTTPS). Railway
+        # serves HTTPS, so this is on by default; set
+        # SESSION_COOKIE_SECURE=0 only for plain-HTTP local dev.
+        self.session_cookie_secure: bool = env.get(
+            "SESSION_COOKIE_SECURE", "1") == "1"
 
     def require_secrets(self) -> None:
         """Fail fast at startup when required secrets are missing."""

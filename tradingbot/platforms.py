@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import sqlite3
 
-from .security import decrypt_secret, encrypt_secret
+from .security import (decrypt_secret_mutable, encrypt_secret,
+                       wipe_secret)
 from .solana import base58_encode, generate_keypair
 
 PLATFORMS = ("pump.fun", "phantom", "pumpswap")
@@ -81,8 +82,12 @@ def create_platform_wallet(db, user_id: int, platform: str,
     if existing:
         return existing["pubkey"], False
     _seed, pubkey, secret64 = generate_keypair()
-    blob = encrypt_secret(secret64, encryption_key)
-    secret64 = b"\x00" * len(secret64)
+    try:
+        blob = encrypt_secret(secret64, encryption_key)
+    finally:
+        # Wiped in place the moment the encrypted blob exists.
+        wipe_secret(_seed)
+        wipe_secret(secret64)
     try:
         db.execute(
             "INSERT INTO platform_wallets (user_id, platform, pubkey, "
@@ -117,9 +122,17 @@ def create_phantom_wallet_with_key(db, user_id: int,
     if existing:
         return existing["pubkey"], ""
     _seed, pubkey, secret64 = generate_keypair()
-    blob = encrypt_secret(secret64, encryption_key)
-    key_b58 = base58_encode(secret64)
-    secret64 = b"\x00" * len(secret64)
+    try:
+        blob = encrypt_secret(secret64, encryption_key)
+        # The base58 key is what the user needs to import into
+        # Phantom — it is shown once, at creation, and never again.
+        # It is a plain string (the page needs to render it), so
+        # unlike the bytearray it cannot be scrubbed in place; it is
+        # dropped after the response and never logged or stored.
+        key_b58 = base58_encode(secret64)
+    finally:
+        wipe_secret(_seed)
+        wipe_secret(secret64)
     try:
         db.execute(
             "INSERT INTO platform_wallets (user_id, platform, pubkey, "
@@ -138,8 +151,9 @@ def create_phantom_wallet_with_key(db, user_id: int,
 
 
 def decrypt_platform_secret(db, user_id: int, platform: str,
-                            encryption_key: bytes) -> bytes | None:
-    """Decrypt a platform wallet's secret. Used ONLY to show the
+                            encryption_key: bytes) -> bytearray | None:
+    """Decrypt a platform wallet's secret as a mutable bytearray, so
+    the caller can wipe it in place when done. Used ONLY to show the
     Phantom key once at creation (via create_phantom_wallet_with_key
     instead) — kept for completeness; no route calls this to display
     a key after creation."""
@@ -149,6 +163,7 @@ def decrypt_platform_secret(db, user_id: int, platform: str,
     if not row:
         return None
     try:
-        return decrypt_secret(row["encrypted_secret"], encryption_key)
+        return decrypt_secret_mutable(row["encrypted_secret"],
+                                      encryption_key)
     except ValueError:
         return None

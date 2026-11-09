@@ -15,7 +15,8 @@ no mail service is configured.
 
 from __future__ import annotations
 
-from .security import decrypt_secret, encrypt_secret
+from .security import (decrypt_secret_mutable, encrypt_secret,
+                       wipe_secret)
 from .solana import (base58_decode, generate_keypair, is_valid_address,
                      lamports_to_sol, sol_to_lamports)
 
@@ -29,8 +30,11 @@ def get_or_create_donation_wallet(app) -> str:
     if row:
         return row["pubkey"]
     _seed, pubkey, secret64 = generate_keypair()
-    blob = encrypt_secret(secret64, cfg.encryption_key)
-    secret64 = b"\x00" * len(secret64)  # drop the reference
+    try:
+        blob = encrypt_secret(secret64, cfg.encryption_key)
+    finally:
+        wipe_secret(_seed)
+        wipe_secret(secret64)
     db.execute(
         "INSERT INTO donation_wallet (id, pubkey, encrypted_secret) "
         "VALUES (1, ?, ?)", (pubkey, blob))
@@ -48,10 +52,13 @@ def donation_wallet_decrypts(app) -> bool:
     ).fetchone()
     if not row:
         return False
-    secret = decrypt_secret(row["encrypted_secret"], cfg.encryption_key)
+    secret = decrypt_secret_mutable(row["encrypted_secret"],
+                                    cfg.encryption_key)
     from .solana import publickey_from_secret, base58_encode
-    ok = base58_encode(publickey_from_secret(secret)) == row["pubkey"]
-    secret = b"\x00" * len(secret)
+    try:
+        ok = base58_encode(publickey_from_secret(secret)) == row["pubkey"]
+    finally:
+        wipe_secret(secret)
     return ok
 
 

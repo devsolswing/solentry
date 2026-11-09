@@ -8,6 +8,14 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Username<input name="username" required autocomplete="username"></label>
     <label>Password<input type="password" name="password" required autocomplete="new-password"></label>
+    {# Honeypot: hidden from humans, filled only by bots that fill every field. #}
+    <div style="display:none" aria-hidden="true">
+      <label>Website<input name="website" type="text" autocomplete="off" tabindex="-1"></label>
+    </div>
+    {% if turnstile_site_key %}
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}"></div>
+    {% endif %}
     <button class="btn big" type="submit">Sign up</button>
   </form>
   <p class="muted">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>

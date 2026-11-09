@@ -292,4 +292,71 @@ redeploys unless a volume is attached — attach a Railway volume at the
 - Never move real SOL on an ambiguous instruction. Sends always need
   the confirm step.
 
+## Security — how the app protects wallets (plain words)
+
+No app is unhackable, and this one does not claim to be. What it does:
+
+- **Passwords are irreversibly hashed** (scrypt, per-user salt). A
+  stolen database gives an attacker hashes, not passwords.
+- **Wallet keys are encrypted at rest** (AES-256-GCM, key from the
+  `ENCRYPTION_KEY` env var only — never in code or the repo).
+- **Keys are wiped from memory the moment a transaction is done.**
+  The key is decrypted into a mutable buffer, used for one signature,
+  and overwritten with zeros in a `finally` block — on success,
+  refusal, or failure. It is never kept between trades, never
+  logged, never returned, never stored in plain text. (One honest
+  exception: the Phantom platform wallet's private key is shown to
+  its owner exactly once, at creation, so it can be imported into
+  Phantom — after that it is gone, by design.)
+- **Transactions are confirmed on-chain before they count.** A trade
+  or send is only recorded as done after the chain confirms it, and
+  every transaction is verifiable by its signature on the explorer.
+  Nothing is ever faked.
+- **The signing bot can only sign trades it builds itself** (pump.fun
+  buy/sell, plus creating the user's own token account). An
+  allowed-program check before signing excludes the System program
+  entirely, so a plain transfer or withdrawal can never be signed by
+  the bot. Silent bots only trade within their rules and limits.
+- **Anti-bot at the door:** rate limits on login (5 wrong tries lock
+  an account 15 minutes; 20 failed tries from one address are
+  blocked), signups, sends, and bot creation; a burst guard on
+  sensitive endpoints (429 past 120 POSTs/minute from one address);
+  a hidden honeypot field on login/signup that only bots fill; and
+  Cloudflare Turnstile (see below) when its keys are set.
+- **Sessions:** HttpOnly + SameSite=Lax cookies (Secure over HTTPS),
+  12-hour lifetime, and the session is rotated on every login, so a
+  stolen pre-login session is useless.
+- **Security headers on every response:** Content Security Policy
+  (only our own files, a per-request nonce for the two inline
+  scripts, and Cloudflare's challenge scripts), HSTS, no framing,
+  no MIME sniffing.
+- **Daily send cap:** at most 5 SOL per wallet per day by default
+  (`DAILY_SEND_LIMIT_SOL` — change it in Railway variables). A
+  compromised session cannot drain a wallet in one day.
+- **Anomaly detection:** repeated failed logins from addresses an
+  account has never logged in from lock the account for 15 minutes
+  and write a suspicious-activity audit row.
+- **Audit log:** every wallet action (sends, trades, key operations,
+  mode changes) is written to the activity table with the client IP
+  and device behind it.
+
+Honest limits, already told to James: encryption that must be USED
+cannot be literally irreversible — the server has to unlock the key
+for a split second to sign. What is irreversible is the password
+hash. And "Bitcoin safety" means the Solana equivalent: signed with
+the wallet's own key, confirmed on-chain, immutable afterwards.
+
+### Cloudflare Turnstile (free bot challenge) — optional setup
+
+1. Sign up free at https://dash.cloudflare.com and go to
+   Turnstile (Security → Turnstile) → Add site. Pick the "Managed"
+   widget, add your domain (e.g. `solentry-production.up.railway.app`).
+2. Copy the **Site Key** and **Secret Key**.
+3. In Railway, set service variables `TURNSTILE_SITE_KEY` and
+   `TURNSTILE_SECRET_KEY`. Redeploy.
+4. The login and signup pages now show the challenge widget, and a
+   login/signup without a valid challenge is refused. If either key
+   is missing, the app logs a warning at startup and continues
+   without the challenge — never locking James out for missing keys.
+
 Note: the login hero image is embedded as a base64 data URI in `tradingbot/templates/login.html` (GitHub snapshot pushes accept text only). The master file is `tradingbot/static/hero-shiba.jpg` — if you replace it, re-embed it the same way.

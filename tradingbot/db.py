@@ -198,6 +198,28 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
+-- Rate limiting counters (rate_limit.py). One row per key: hits in
+-- the current window and when the window started. Stored in the DB
+-- so a restart does not clear the limits.
+CREATE TABLE IF NOT EXISTS rate_limits (
+    key TEXT PRIMARY KEY,
+    hits INTEGER NOT NULL,
+    window_start INTEGER NOT NULL
+);
+
+-- Login events for anomaly detection: every login attempt, success
+-- or failure, with the client IP and device string. A burst of
+-- failures from IPs the account has never logged in from is the
+-- signal that locks the account.
+CREATE TABLE IF NOT EXISTS login_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    ip TEXT NOT NULL DEFAULT '',
+    user_agent TEXT NOT NULL DEFAULT '',
+    success INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Per-account dedicated signing bot: the bot that signs the
 -- account's real trades. support_id is exactly 8 digits, unique
 -- across accounts, and IMMUTABLE — the only writes to this table
@@ -300,6 +322,12 @@ _MIGRATIONS = (
     # neither trading mode and are shown in both. Trading rows are
     # always tagged, so paper and real activity never mix on a page.
     ("activity", "mode", "TEXT NOT NULL DEFAULT ''"),
+    # Audit trail: the client IP and device string behind each
+    # activity row, where available. Empty for rows the silent loop
+    # writes (no HTTP request) and for rows written before this
+    # column existed.
+    ("activity", "ip", "TEXT NOT NULL DEFAULT ''"),
+    ("activity", "device", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
