@@ -38,10 +38,7 @@
     <button class="btn big" type="submit">{{ "Save changes" if bot else "Create bot" }}</button>
   </form>
   {% if bot %}
-  <form method="post" action="{{ url_for('bot_delete', bot_id=bot.id) }}" onsubmit="return confirm('Delete this bot?');">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button class="btn danger" type="submit">Delete bot</button>
-  </form>
+  <p><a class="btn danger" href="{{ url_for('bot_delete_confirm', bot_id=bot.id) }}">Delete bot</a></p>
   {% endif %}
   <p><a href="{{ url_for('bots') }}">← Back to bots</a></p>
 </div>

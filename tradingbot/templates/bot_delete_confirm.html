@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Delete bot {{ bot.name }} — Trading Bot{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Delete bot '{{ bot.name }}'?</h1>
+  <p>This permanently deletes the bot and its pending suggestions. Any open positions it looks after stay in your paper holdings — the bot just stops managing them.</p>
+  <p class="muted small">Mode: {{ bot.mode }} · Strategy: {{ bot.strategy }} · Silent: {{ "ON" if bot.silent else "OFF" }}</p>
+  <form method="post" action="{{ url_for('bot_delete', bot_id=bot.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn danger big" type="submit">Yes, delete this bot</button>
+  </form>
+  <p><a class="btn ghost" href="{{ url_for('bot_edit', bot_id=bot.id) }}">Cancel — keep the bot</a></p>
+</div>
+{% endblock %}

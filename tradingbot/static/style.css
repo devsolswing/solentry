@@ -1,9 +1,9 @@
 * { box-sizing: border-box; }
 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #0b0e14; color: #e8ecf1; }
 a { color: #4ade80; }
-.topbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #11151f; border-bottom: 1px solid #232a38; position: sticky; top: 0; z-index: 10; }
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #11151f; border-bottom: 1px solid #232a38; position: sticky; top: 0; z-index: 10; flex-wrap: wrap; row-gap: 8px; }
 .brand { font-weight: 800; font-size: 18px; color: #fff; text-decoration: none; }
-.top-actions { display: flex; gap: 10px; align-items: center; }
+.top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .nav-link { color: #cbd5e1; text-decoration: none; font-size: 14px; }
 .wallet-menu { position: relative; }
 .wallet-btn { cursor: pointer; background: #16a34a; color: #fff; border: none; border-radius: 999px; padding: 8px 14px; font-size: 15px; list-style: none; }
@@ -105,3 +105,19 @@ th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #232a38; }
 .badge.silent-off { background: #1f2937; color: #9ca3af; border: 1px solid #4b5563; }
 .silent-box { border: 1px solid #f59e0b; border-radius: 10px; padding: 10px 12px; margin: 12px 0; background: #1c1917; }
 .silent-box label { font-weight: 700; }
+
+/* Header balance chip + Paper/Devnet switch (top corner). Plain
+   form + button, no JavaScript, so it works in any browser. */
+.mode-form { display: flex; align-items: center; gap: 8px; margin: 0; }
+.balance-chip { font-size: 14px; background: #1a2030; border: 1px solid #2b3446; border-radius: 999px; padding: 7px 12px; white-space: nowrap; }
+.balance-chip strong { color: #4ade80; }
+.mode-switch { display: inline-flex; background: #0b0e14; border: 1px solid #2b3446; border-radius: 999px; padding: 2px; cursor: pointer; }
+.mode-switch .mode-opt { padding: 5px 10px; border-radius: 999px; font-size: 13px; color: #9aa7b8; }
+.mode-switch .mode-opt.on { background: #16a34a; color: #fff; font-weight: 700; }
+@media (max-width: 560px) {
+  .topbar { padding: 8px 10px; }
+  .brand { font-size: 16px; }
+  .nav-link { font-size: 13px; }
+  .balance-chip { font-size: 13px; padding: 6px 10px; }
+  .mode-switch .mode-opt { padding: 4px 8px; font-size: 12px; }
+}

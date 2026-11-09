@@ -11,6 +11,16 @@
 <header class="topbar">
   <a class="brand" href="{% if current_user %}{{ url_for('dashboard') }}{% else %}{{ url_for('index') }}{% endif %}">🤖 Trading Bot</a>
   <div class="top-actions">
+    {% if current_user and header_balance %}
+    <form method="post" action="{{ url_for('mode_switch') }}" class="mode-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="mode" value="{{ 'devnet' if header_mode == 'paper' else 'paper' }}">
+      <span class="balance-chip" title="{{ header_balance.label }} balance — tap the switch to change it"><strong>{{ header_balance.label }}</strong> {{ header_balance.text }}</span>
+      <button class="mode-switch" type="submit" aria-label="Switch balance view to {{ 'Devnet' if header_mode == 'paper' else 'Paper' }}">
+        <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">Devnet</span>
+      </button>
+    </form>
+    {% endif %}
     {% if current_user %}
     <details class="wallet-menu">
       <summary class="wallet-btn" title="Your wallet">💰 Wallet</summary>

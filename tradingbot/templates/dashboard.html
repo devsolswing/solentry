@@ -22,13 +22,22 @@
       {% endfor %}
     </table>
     {% else %}<p class="muted">No holdings yet — buy below.</p>{% endif %}
-    <h3>Buy (paper)</h3>
+    <h3>Buy</h3>
     <form method="post" action="{{ url_for('paper_buy') }}" class="inline">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <select name="coin">{% for c in coins %}<option value="{{ c }}">{{ coins[c].name }} ({{ c }})</option>{% endfor %}</select>
       <input type="number" name="usd" step="any" min="0" placeholder="$ amount" required>
+      <select name="mode" aria-label="Buy mode">
+        <option value="paper" {{ 'selected' if header_mode == 'paper' }}>Paper — fake money</option>
+        <option value="real" {{ 'selected' if header_mode == 'devnet' }}>Real (devnet) — not live yet</option>
+      </select>
+      <select name="bot_id" aria-label="Bot to look after this coin">
+        <option value="">No bot — just buy it</option>
+        {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
+      </select>
       <button class="btn" type="submit">Buy</button>
     </form>
+    <p class="muted small">Mode and bot default to your header setting. If you pick a bot, it looks after this coin — its rules govern the position when its silent trading is on. Real (devnet) token buying is not live yet: choosing it places no buy.</p>
     <p class="muted small">Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>
     <table>
       <tr><th>Coin</th><th>Price</th><th>24h</th></tr>

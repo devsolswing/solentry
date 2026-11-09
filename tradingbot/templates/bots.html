@@ -21,7 +21,8 @@
       <p>Mode: <strong>{{ b.mode }}</strong> · Strategy: <strong>{{ b.strategy }}</strong><br>
       Buy size: {{ b.buy_size_pct }}% · Stop loss: {{ b.stop_loss_pct }}% · Max open: {{ b.max_open_trades }}</p>
       <p><a class="btn small" href="{{ url_for('bot_detail', bot_id=b.id) }}">Open</a>
-      <a class="btn ghost small" href="{{ url_for('bot_edit', bot_id=b.id) }}">Edit</a></p>
+      <a class="btn ghost small" href="{{ url_for('bot_edit', bot_id=b.id) }}">Edit</a>
+      <a class="btn danger small" href="{{ url_for('bot_delete_confirm', bot_id=b.id) }}">Delete</a></p>
     </div>
   {% endfor %}
   </div>
@@ -37,7 +38,8 @@
     Watching: {{ b.coins }}<br>
     Buy size: {{ b.buy_size_pct }}% · Stop loss: {{ b.stop_loss_pct }}% · Max open: {{ b.max_open_trades }}</p>
     <p><a class="btn small" href="{{ url_for('bot_detail', bot_id=b.id) }}">Open</a>
-    <a class="btn ghost small" href="{{ url_for('bot_edit', bot_id=b.id) }}">Edit</a></p>
+    <a class="btn ghost small" href="{{ url_for('bot_edit', bot_id=b.id) }}">Edit</a>
+    <a class="btn danger small" href="{{ url_for('bot_delete_confirm', bot_id=b.id) }}">Delete</a></p>
   </div>
 {% endfor %}
 </div>

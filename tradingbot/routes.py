@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from flask import (Flask, abort, flash, jsonify, redirect, render_template,
                    request, session, url_for)
@@ -41,6 +43,7 @@ from .prices import COINS, get_prices
 from .rules import (TRENCHES_CATEGORY, TRENCHES_PRESET_NAME, load_rules,
                     summarize_rules, trenches_ruleset, validate_ruleset)
 from .signals import signal_for_coin
+from .silent_loop import _open_position
 from .security import (decrypt_secret, encrypt_secret, hash_password,
                        hash_token, new_csrf_token, new_token,
                        verify_password)
@@ -143,6 +146,61 @@ def _paper(app, user_id: int):
     return row["cash_usd"] if row else 0.0
 
 
+def _active_mode(db, user_id: int) -> str:
+    """The user's header/buy mode: 'paper' or 'devnet'. Anything else
+    (or a missing row) is paper — fail closed to the safe side."""
+    row = db.execute(
+        "SELECT active_mode FROM users WHERE id = ?", (user_id,)).fetchone()
+    mode = (row["active_mode"] if row else None) or "paper"
+    return mode if mode in ("paper", "devnet") else "paper"
+
+
+# On-chain SOL balances are cached 60 seconds per wallet so the
+# header balance (shown on every page) does not hit the RPC on every
+# render. A stale balance is only ever shown for a minute, and a
+# failed lookup is cached as None ("unavailable"), never guessed.
+_REAL_BALANCE_CACHE: dict = {"at": {}, "value": {}}
+
+
+def _cached_real_balance(app, pubkey: str):
+    now = time.time()
+    if (pubkey in _REAL_BALANCE_CACHE["value"]
+            and now - _REAL_BALANCE_CACHE["at"].get(pubkey, 0) < 60):
+        return _REAL_BALANCE_CACHE["value"][pubkey]
+    value = _real_balance(app, pubkey)
+    _REAL_BALANCE_CACHE["at"][pubkey] = now
+    _REAL_BALANCE_CACHE["value"][pubkey] = value
+    return value
+
+
+def _header_balance(app, user):
+    """What the top corner shows: {'mode', 'label', 'text'}.
+
+    Paper mode: paper portfolio value (cash + holdings at current
+    prices). Devnet mode: the app wallet's on-chain SOL balance.
+    Never faked — an unreachable price feed or RPC shows
+    'unavailable' instead of a made-up number.
+    """
+    db = _db(app)
+    mode = _active_mode(db, user["id"])
+    if mode == "devnet":
+        wallet = _wallet(app, user["id"])
+        sol = (_cached_real_balance(app, wallet["pubkey"])
+               if wallet else None)
+        text = f"{sol:.4f} SOL" if sol is not None else "unavailable"
+        return {"mode": "devnet", "label": "Devnet", "text": text}
+    prices = get_prices()
+    price_map = {c: e.get("price", 0.0)
+                 for c, e in prices["prices"].items()}
+    cash = _paper(app, user["id"])
+    holdings = db.execute(
+        "SELECT coin_id, amount FROM paper_holdings WHERE user_id = ?",
+        (user["id"],)).fetchall()
+    value = cash + sum(h["amount"] * price_map.get(h["coin_id"], 0.0)
+                       for h in holdings)
+    return {"mode": "paper", "label": "Paper", "text": f"${value:,.2f}"}
+
+
 def _record_pnl_snapshot(app, user_id: int, price_map: dict) -> None:
     """One P&L snapshot after a trade. Never breaks the trade itself."""
     try:
@@ -201,8 +259,12 @@ def register_routes(app: Flask) -> None:
     @app.context_processor
     def inject_globals():
         user = _current_user(app)
+        header_balance = _header_balance(app, user) if user else None
         return {"current_user": user, "csrf_token": _new_csrf(),
-                "network": _cfg(app).network, "coins": COINS}
+                "network": _cfg(app).network, "coins": COINS,
+                "header_balance": header_balance,
+                "header_mode": header_balance["mode"]
+                if header_balance else "paper"}
 
     @app.route("/health")
     def health():
@@ -728,6 +790,32 @@ def register_routes(app: Flask) -> None:
             holdings_value=holdings_value, prices=prices, bots=bots,
             activity=activity)
 
+    @app.route("/mode", methods=["POST"])
+    @login_required
+    def mode_switch():
+        """Flip the header balance / buy default between Paper and
+        Devnet. A plain POST form (no JavaScript) so the switch works
+        in any browser, including in-app webviews. Sends the user back
+        to the page they came from when it is a safe same-site path.
+        """
+        _csrf_check()
+        user = _current_user(app)
+        mode = (request.form.get("mode") or "").lower()
+        if mode not in ("paper", "devnet"):
+            flash("That mode is not valid.")
+            return redirect(url_for("dashboard"))
+        db = _db(app)
+        db.execute("UPDATE users SET active_mode = ? WHERE id = ?",
+                   (mode, user["id"]))
+        db.commit()
+        _log(app, user["id"], "mode_switch",
+             f"Balance view switched to {mode}.")
+        ref = request.referrer or ""
+        path = urlparse(ref).path if ref else ""
+        if not path.startswith("/"):
+            path = url_for("dashboard")
+        return redirect(path)
+
     # ------------------------------------------------------------------
     # P&L dashboard: balance, current coins with per-coin P&L, and a
     # P&L chart built ONLY from recorded snapshots (never invented
@@ -891,6 +979,20 @@ def register_routes(app: Flask) -> None:
     def paper_buy():
         _csrf_check()
         user = _current_user(app)
+        db = _db(app)
+        # Mode comes from the buy form and defaults to the user's
+        # header mode. Real (devnet) token buying is NOT live in v1
+        # (no on-chain swap path) — choosing it refuses plainly and
+        # places no buy, records no fill, and touches no ledger.
+        mode = (request.form.get("mode")
+                or _active_mode(db, user["id"])).lower()
+        if mode not in ("paper", "real"):
+            mode = _active_mode(db, user["id"])
+        if mode == "real":
+            flash("Real token buying is not live yet — no buy was "
+                  "placed and nothing was charged. Paper mode buys "
+                  "work today.")
+            return redirect(url_for("dashboard"))
         coin = (request.form.get("coin") or "").upper()
         if coin not in COINS:
             flash("Unknown coin.")
@@ -903,24 +1005,54 @@ def register_routes(app: Flask) -> None:
         if usd <= 0:
             flash("Amount must be more than 0.")
             return redirect(url_for("dashboard"))
+        # Optional managing bot: the bot looks after this coin — the
+        # silent loop governs the position by that bot's rules once
+        # its silent trading is on. The bot must be the user's own
+        # and in paper mode, or the buy does not happen at all.
+        bot = None
+        bot_id_raw = (request.form.get("bot_id") or "").strip()
+        if bot_id_raw:
+            try:
+                bot_id = int(bot_id_raw)
+            except ValueError:
+                flash("That bot choice is not valid — nothing was bought.")
+                return redirect(url_for("dashboard"))
+            bot = db.execute(
+                "SELECT * FROM bots WHERE id = ? AND user_id = ?",
+                (bot_id, user["id"])).fetchone()
+            if not bot:
+                flash("That bot isn't yours — nothing was bought.")
+                return redirect(url_for("dashboard"))
+            if bot["mode"] != "paper":
+                flash(f"Bot '{bot['name']}' is a real-mode bot — pick a "
+                      f"paper bot to look after a paper buy. Nothing "
+                      f"was bought.")
+                return redirect(url_for("dashboard"))
         price, source, as_of = _paper_price(coin)
         if price is None:
             flash("Price unavailable right now.")
             return redirect(url_for("dashboard"))
         try:
-            amount, usd = ledger_buy(_db(app), user["id"], coin, usd, price,
+            amount, usd = ledger_buy(db, user["id"], coin, usd, price,
                                      _now())
         except InsufficientCash:
             flash("Not enough paper cash.")
             return redirect(url_for("dashboard"))
+        if bot is not None:
+            # Record the position under the managing bot so the silent
+            # loop's rule evaluation (stop loss, sell ladder, trailing
+            # stop) governs it per that bot's rules and limits.
+            _open_position(db, bot, coin, amount, price)
         _log(app, user["id"], "paper_buy",
              f"Bought {amount:.4f} {coin} for ${usd:.2f} (paper, "
-             f"price source: {source}).")
+             f"price source: {source})"
+             + (f" — looked after by bot '{bot['name']}'." if bot else "."))
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
              for c, e in get_prices()["prices"].items()})
-        flash(f"Bought {amount:.4f} {coin} (paper).")
+        flash(f"Bought {amount:.4f} {coin} (paper)."
+              + (f" Bot '{bot['name']}' is looking after it." if bot else ""))
         return redirect(url_for("dashboard"))
 
     @app.route("/paper/sell", methods=["POST"])
@@ -1225,6 +1357,26 @@ def register_routes(app: Flask) -> None:
         flash("Custom rules cleared — the bot is back to standard signals.")
         return redirect(url_for("bot_detail", bot_id=bot_id))
 
+    @app.route("/bots/<int:bot_id>/delete/confirm", methods=["GET"])
+    @login_required
+    def bot_delete_confirm(bot_id: int):
+        """Server-rendered delete confirmation page.
+
+        The old edit-page delete relied on the browser's native
+        confirm() dialog. In-app browsers that do not show JavaScript
+        dialogs cancel the submit silently, so the button looked dead
+        and nothing happened. This page asks the same question with a
+        plain form instead — no JavaScript needed. The delete itself
+        still only happens on POST to bot_delete, with a CSRF token.
+        """
+        user = _current_user(app)
+        bot = _db(app).execute(
+            "SELECT * FROM bots WHERE id = ? AND user_id = ?",
+            (bot_id, user["id"])).fetchone()
+        if not bot:
+            abort(404)
+        return render_template("bot_delete_confirm.html", bot=bot)
+
     @app.route("/bots/<int:bot_id>/delete", methods=["POST"])
     @login_required
     def bot_delete(bot_id: int):
@@ -1237,6 +1389,13 @@ def register_routes(app: Flask) -> None:
         if not bot:
             abort(404)
         db.execute("DELETE FROM bot_proposals WHERE bot_id = ? AND user_id = ?",
+                   (bot_id, user["id"]))
+        # Positions the bot looks after are un-managed, not sold: the
+        # coins stay in the user's paper holdings (sellable by hand),
+        # only the bot's management record goes. This must happen
+        # before deleting the bot row — bot_positions references
+        # bots(id) and the delete would fail while rows exist.
+        db.execute("DELETE FROM bot_positions WHERE bot_id = ? AND user_id = ?",
                    (bot_id, user["id"]))
         db.execute("DELETE FROM bots WHERE id = ? AND user_id = ?",
                    (bot_id, user["id"]))
@@ -1439,6 +1598,12 @@ def register_routes(app: Flask) -> None:
                     (pending, user["id"])).fetchone()
                 if bot:
                     db.execute("DELETE FROM bot_proposals "
+                               "WHERE bot_id = ? AND user_id = ?",
+                               (pending, user["id"]))
+                    # Same as the page delete: un-manage positions
+                    # first (coins stay in paper holdings), or the
+                    # bot row delete fails on the foreign key.
+                    db.execute("DELETE FROM bot_positions "
                                "WHERE bot_id = ? AND user_id = ?",
                                (pending, user["id"]))
                     db.execute("DELETE FROM bots WHERE id = ? AND user_id = ?",

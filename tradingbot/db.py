@@ -246,6 +246,10 @@ _MIGRATIONS = (
     # accounts, so trading on pump.fun uses the linked Solana wallet —
     # the per-user app wallet, recorded here at signup.
     ("users", "pumpfun_wallet", "TEXT NOT NULL DEFAULT ''"),
+    # Which balance the header shows: 'paper' (paper portfolio value)
+    # or 'devnet' (app wallet's on-chain SOL). Flipped by the header
+    # switch; the buy form defaults to it.
+    ("users", "active_mode", "TEXT NOT NULL DEFAULT 'paper'"),
 )
 
 
