@@ -7,10 +7,10 @@
 {% if mode == 'paper' %}
 <div class="card">
   <h2>Balance — paper portfolio</h2>
-  <p class="big-num">${{ "%.2f"|format(totals.total_value_usd) }}</p>
-  <p class="muted">Cash: ${{ "%.2f"|format(totals.cash_usd) }} · Holdings: ${{ "%.2f"|format(totals.holdings_value_usd) }}</p>
-  <p>P&amp;L vs ${{ "%.2f"|format(start_cash) }} starting paper cash:
-    <strong>{% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}</strong></p>
+  <p class="big-num">${{ "%.2f"|format(totals.total_value_usd) }} CAD</p>
+  <p class="muted">Cash: ${{ "%.2f"|format(totals.cash_usd) }} CAD · Holdings: ${{ "%.2f"|format(totals.holdings_value_usd) }} CAD</p>
+  <p>P&amp;L vs ${{ "%.2f"|format(start_cash) }} CAD starting paper cash:
+    <strong>{% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }} CAD</strong></p>
   <p class="muted small">Paper trading is fake money. Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
 </div>
 {% else %}

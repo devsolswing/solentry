@@ -1648,7 +1648,7 @@ def register_routes(app: Flask) -> None:
             lines = [result["message"]]
             if result["ok"]:
                 lines.append(
-                    f"New paper cash: ${result['cash']:,.2f}.")
+                    f"New paper cash: ${result['cash']:,.2f} CAD.")
                 if result.get("bot"):
                     lines.append(
                         f"Bot '{result['bot']['name']}' is looking "
@@ -1842,7 +1842,7 @@ def register_routes(app: Flask) -> None:
             result = _paper_sell_for(app, user, coin_id_resolved, amount)
             lines = [result["message"]]
             if result["ok"]:
-                lines.append(f"New paper cash: ${result['cash']:,.2f}.")
+                lines.append(f"New paper cash: ${result['cash']:,.2f} CAD.")
             return _coin_result(
                 "Sold" if result["ok"] else "Nothing was sold",
                 lines, result["ok"], coin_id_resolved, label)
@@ -2740,6 +2740,30 @@ def register_routes(app: Flask) -> None:
         flash("Custom rules cleared — the bot is back to standard signals.")
         return redirect(url_for("bot_detail", bot_id=bot_id))
 
+    def _delete_bot(db, user_id: int, bot_id: int) -> None:
+        """Hard-delete a bot and every row it owns, in dependency
+        order. bot_positions, bot_proposals, scanner_marks and
+        scanner_top10 all reference bots(id) with foreign keys
+        enforced, so the child rows must go first — deleting only
+        positions/proposals left scanner rows behind and the bot row
+        delete then failed with a foreign-key error, which made the
+        Delete button look dead (any scanner bot that had ever
+        scanned could not be deleted at all). The bot's API token
+        hash and rules live on the bots row itself, so they go with
+        it. Paper holdings the bot managed are NOT sold — the coins
+        stay in the user's paper holdings, only the bot's management
+        record goes."""
+        db.execute("DELETE FROM scanner_marks WHERE bot_id = ?",
+                   (bot_id,))
+        db.execute("DELETE FROM scanner_top10 WHERE bot_id = ?",
+                   (bot_id,))
+        db.execute("DELETE FROM bot_proposals WHERE bot_id = ? AND user_id = ?",
+                   (bot_id, user_id))
+        db.execute("DELETE FROM bot_positions WHERE bot_id = ? AND user_id = ?",
+                   (bot_id, user_id))
+        db.execute("DELETE FROM bots WHERE id = ? AND user_id = ?",
+                   (bot_id, user_id))
+
     @app.route("/bots/<int:bot_id>/delete/confirm", methods=["GET"])
     @login_required
     def bot_delete_confirm(bot_id: int):
@@ -2771,21 +2795,11 @@ def register_routes(app: Flask) -> None:
             (bot_id, user["id"])).fetchone()
         if not bot:
             abort(404)
-        db.execute("DELETE FROM bot_proposals WHERE bot_id = ? AND user_id = ?",
-                   (bot_id, user["id"]))
-        # Positions the bot looks after are un-managed, not sold: the
-        # coins stay in the user's paper holdings (sellable by hand),
-        # only the bot's management record goes. This must happen
-        # before deleting the bot row — bot_positions references
-        # bots(id) and the delete would fail while rows exist.
-        db.execute("DELETE FROM bot_positions WHERE bot_id = ? AND user_id = ?",
-                   (bot_id, user["id"]))
-        db.execute("DELETE FROM bots WHERE id = ? AND user_id = ?",
-                   (bot_id, user["id"]))
+        _delete_bot(db, user["id"], bot_id)
         db.commit()
         _log(app, user["id"], "bot_delete",
              f"Deleted bot '{bot['name']}'.", bot["mode"])
-        flash("Bot deleted.")
+        flash(f"Bot '{bot['name']}' deleted permanently.")
         return redirect(url_for("bots"))
 
     @app.route("/bots/<int:bot_id>/suggest", methods=["POST"])
@@ -3032,17 +3046,7 @@ def register_routes(app: Flask) -> None:
                     "SELECT * FROM bots WHERE id = ? AND user_id = ?",
                     (pending, user["id"])).fetchone()
                 if bot:
-                    db.execute("DELETE FROM bot_proposals "
-                               "WHERE bot_id = ? AND user_id = ?",
-                               (pending, user["id"]))
-                    # Same as the page delete: un-manage positions
-                    # first (coins stay in paper holdings), or the
-                    # bot row delete fails on the foreign key.
-                    db.execute("DELETE FROM bot_positions "
-                               "WHERE bot_id = ? AND user_id = ?",
-                               (pending, user["id"]))
-                    db.execute("DELETE FROM bots WHERE id = ? AND user_id = ?",
-                               (pending, user["id"]))
+                    _delete_bot(db, user["id"], pending)
                     db.commit()
                     _log(app, user["id"], "bot_delete",
                          f"Deleted bot '{bot['name']}' (assistant).", bot["mode"])
@@ -3071,8 +3075,8 @@ def register_routes(app: Flask) -> None:
             real_txt = (f"{real_sol:.4f} SOL" if real_sol is not None
                         else "unavailable right now")
             return jsonify({"reply":
-                f"Paper: ${_paper(app, user['id']):,.2f} cash + "
-                f"${value:,.2f} in holdings. Real wallet: {real_txt} "
+                f"Paper: ${_paper(app, user['id']):,.2f} CAD cash + "
+                f"${value:,.2f} CAD in holdings. Real wallet: {real_txt} "
                 f"(network: {_cfg(app).network})."})
 
         if intent == "wallet_show":

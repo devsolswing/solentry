@@ -57,7 +57,7 @@ CAPABILITIES = (
 )
 
 PAPER_HELP = (
-    "Paper trading is practice with fake money — you start with $10,000. "
+    "Paper trading is practice with fake money — you start with $50 CAD. "
     "Buy and sell coins at the current price and your portfolio tracks "
     "gains and losses, but no real money ever moves. It is the safe way to "
     "try a strategy before using real SOL. Switch to Real mode on your "

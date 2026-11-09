@@ -81,14 +81,14 @@ class HomeBase(unittest.TestCase):
             routes, "get_prices",
             return_value=make_prices({
                 "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (86.0, 5.25), "USDC": (1.0, 0.0),
+                "SOL": (10.0, 5.25), "USDC": (1.0, 0.0),
                 "DOGE": (0.07, 3.0), "PEPE": (0.000005, -1.0),
                 "BONK": (0.000003, 8.0), "JUP": (0.23, -0.5)}))
         self.prices_patch.start()
         # _paper_price (single-coin price) must agree with the mocked
         # list prices, or SOL conversions drift between the two.
         self.price_patch = mock.patch.object(
-            prices, "get_price", return_value=(86.0, "snapshot", "test"))
+            prices, "get_price", return_value=(10.0, "snapshot", "test"))
         self.price_patch.start()
         # The coins page fetches the trenches feed; keep it local.
         self.trenches_patch = mock.patch.object(
@@ -127,7 +127,7 @@ class HomeBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="860"):
+    def _buy_sol(self, usd="10"):
         return self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
             "usd": usd, "bot_id": ""})
@@ -281,7 +281,7 @@ class TestCoinDetail(HomeBase):
 
 class TestDetailTradingSol(HomeBase):
     def test_paper_buy_in_sol_converts_at_sol_price(self):
-        # 1 SOL at the mocked $86 SOL price buys $86 of SOL.
+        # 1 SOL at the mocked $10 SOL price buys $10 of SOL.
         resp = self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
             "amount_sol": "1", "bot_id": ""})
@@ -296,19 +296,19 @@ class TestDetailTradingSol(HomeBase):
         self.assertAlmostEqual(holding["amount"], 1.0)
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        self.assertAlmostEqual(cash, 10000.0 - 86.0)
+        self.assertAlmostEqual(cash, 50.0 - 10.0)
 
     def test_paper_sell_in_sol_converts_at_prices(self):
-        self._buy_sol()  # 10 SOL at $86
+        self._buy_sol()  # 1 SOL at $10
         resp = self.client.post("/coins/SOL/sell", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "amount_sol": "1"})
+            "amount_sol": "0.5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
         holding = self.db.execute(
             "SELECT amount FROM paper_holdings WHERE coin_id = 'SOL'"
         ).fetchone()
-        self.assertAlmostEqual(holding["amount"], 9.0)
+        self.assertAlmostEqual(holding["amount"], 0.5)
 
     def test_paper_sell_all_sells_whole_holding(self):
         self._buy_sol()
@@ -322,7 +322,7 @@ class TestDetailTradingSol(HomeBase):
         ).fetchone())
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        self.assertAlmostEqual(cash, 10000.0)
+        self.assertAlmostEqual(cash, 50.0)
 
     def test_sell_all_with_nothing_held_refuses_plainly(self):
         resp = self.client.post("/coins/SOL/sell", data={
@@ -455,7 +455,7 @@ class TestOneScreen(HomeBase):
         self._buy_sol()
         self.client.post("/coins/BTC/buy", data={
             "csrf_token": csrf(self.client, "/coins/BTC"),
-            "usd": "74", "bot_id": ""})
+            "usd": "10", "bot_id": ""})
         html = self._html("/dashboard")
         self.assertIn("/coins/SOL/detail", html)
         self.assertIn("/coins/BTC/detail", html)

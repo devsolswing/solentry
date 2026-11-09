@@ -58,7 +58,7 @@
       <input type="hidden" name="mode" value="paper">
       <button class="btn big chooser-btn" type="submit">Demo trading</button>
     </form>
-    <p class="muted small">Practice with fake money ($10,000 paper).</p>
+    <p class="muted small">Practice with fake money ($50 CAD paper).</p>
     <form method="post" action="{{ url_for('choose_mode') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="mode" value="devnet">

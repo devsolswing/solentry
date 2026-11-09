@@ -387,6 +387,32 @@ def _backfill_signing_bots(conn: sqlite3.Connection) -> None:
         ensure_signing_bot(conn, user_id)
 
 
+def _reset_paper_50_cad(conn: sqlite3.Connection) -> None:
+    """One-time reset (2026-11-09): paper trading restarts at $50 CAD.
+
+    Every existing paper account is reset to $50 cash and its paper
+    positions are cleared — the old $10,000-scale holdings do not fit
+    a $50 account. Runs once: a marker row in meta() records it, so
+    later restarts never touch paper balances again (a user who
+    trades down to $40 stays at $40). Paper trade history and P&L
+    snapshots are kept as records of what happened; only the live
+    balance and open positions are reset. Real SOL is never touched.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'paper_reset_50_cad'"
+    ).fetchone()
+    if row:
+        return
+    conn.execute("UPDATE paper_portfolio SET cash_usd = 50")
+    conn.execute("DELETE FROM paper_holdings")
+    conn.execute(
+        "INSERT INTO meta (key, value) "
+        "VALUES ('paper_reset_50_cad', '2026-11-09')")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, column, ddl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(
@@ -402,5 +428,6 @@ def init_db(path: str) -> sqlite3.Connection:
     _migrate(conn)
     _backfill_pumpfun_wallets(conn)
     _backfill_signing_bots(conn)
+    _reset_paper_50_cad(conn)
     conn.commit()
     return conn

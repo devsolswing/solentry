@@ -8,8 +8,8 @@
 </form>
 <div class="card portfolio-head">
   <p class="portfolio-mode"><strong>{{ mode_label }}</strong></p>
-  <p class="portfolio-total">{% if mode == 'paper' %}${{ "%.2f"|format(portfolio_usd) }}{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "%.2f"|format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable{% endif %}{% endif %}</p>
-  <p class="muted small">{% if mode == 'paper' %}${{ "%.2f"|format(paper_cash) }} cash · Holdings ${{ "%.2f"|format(holdings_value) }}{% else %}Your app wallet, on-chain (devnet){% endif %}</p>
+  <p class="portfolio-total">{% if mode == 'paper' %}${{ "%.2f"|format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "%.2f"|format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable{% endif %}{% endif %}</p>
+  <p class="muted small">{% if mode == 'paper' %}${{ "%.2f"|format(paper_cash) }} CAD cash · Holdings ${{ "%.2f"|format(holdings_value) }} CAD{% else %}Your app wallet, on-chain (devnet){% endif %}</p>
   <div class="portfolio-chart">
     {% if portfolio_has_data %}{{ portfolio_chart_svg|safe }}{% else %}<p class="muted small">No chart data yet — your portfolio chart builds as you trade.</p>{% endif %}
   </div>
@@ -84,14 +84,14 @@
       <p class="muted small" id="quick-trade-source"></p>
       <p id="quick-trade-held"></p>
       <div class="amount-kind" role="group" aria-label="Amount in dollars or tokens">
-        <label><input type="radio" name="quick-amount-kind" value="usd" checked> $</label>
+        <label><input type="radio" name="quick-amount-kind" value="usd" checked> {{ 'CAD $' if mode == 'paper' else '$' }}</label>
         <label><input type="radio" name="quick-amount-kind" value="tokens"> tokens</label>
       </div>
       <p class="muted small" id="quick-trade-equiv"></p>
       <h3>Buy</h3>
       <form id="quick-trade-buy-form" method="post" action="{{ url_for('coin_buy', coin_id='SOL') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Amount <input id="quick-trade-buy-amount" type="number" name="usd" step="any" min="0" placeholder="0" required></label>
+        <label>Amount ({{ 'CAD $' if mode == 'paper' else '$' }}) <input id="quick-trade-buy-amount" type="number" name="usd" step="any" min="0" placeholder="0" required></label>
         {% if mode == 'paper' %}
         <label>Bot to look after this coin (optional)
           <select name="bot_id">
@@ -112,7 +112,7 @@
       <h3>Sell</h3>
       <form id="quick-trade-sell-form" method="post" action="{{ url_for('coin_sell', coin_id='SOL') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Amount <input id="quick-trade-sell-amount" type="number" name="amount_usd" step="any" min="0" placeholder="0" required></label>
+        <label>Amount ({{ 'CAD $' if mode == 'paper' else '$' }}) <input id="quick-trade-sell-amount" type="number" name="amount_usd" step="any" min="0" placeholder="0" required></label>
         {% if mode != 'paper' %}
         <label>Real bot to manage this sell (required)
           <select name="bot_id" required>
@@ -218,6 +218,9 @@ const qtBuyAmount = document.getElementById('quick-trade-buy-amount');
 const qtSellAmount = document.getElementById('quick-trade-sell-amount');
 let qtCoin = null;
 let qtTimer = null;
+// Paper amounts are CAD (fake money); real-mode amounts are $ at the
+// live USD price. The live coin price itself stays $ (CoinGecko USD).
+const qtCur = '{{ 'CAD $' if mode == 'paper' else '$' }}';
 function qtClose() { if (qtOverlay) qtOverlay.classList.add('hidden'); }
 function qtAmountKind() {
   const kind = (document.querySelector('input[name="quick-amount-kind"]:checked') || {}).value || 'usd';
@@ -237,9 +240,9 @@ function qtEquiv() {
     return;
   }
   if (kind === 'usd') {
-    el.textContent = '$' + val + ' ≈ ' + (val / qtCoin.price_usd).toFixed(4) + ' ' + qtCoin.symbol + ' at the live price.';
+    el.textContent = qtCur + val + ' ≈ ' + (val / qtCoin.price_usd).toFixed(4) + ' ' + qtCoin.symbol + ' at the live price.';
   } else {
-    el.textContent = val + ' ' + qtCoin.symbol + ' ≈ $' + (val * qtCoin.price_usd).toFixed(2) + ' at the live price.';
+    el.textContent = val + ' ' + qtCoin.symbol + ' ≈ ' + qtCur + (val * qtCoin.price_usd).toFixed(2) + ' at the live price.';
   }
 }
 function qtSelect(r) {

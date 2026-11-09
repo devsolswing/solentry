@@ -91,12 +91,12 @@ class CoinsPageBase(unittest.TestCase):
             routes, "get_prices",
             return_value=make_prices({
                 "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (86.0, 5.25), "USDC": (1.0, 0.0),
+                "SOL": (10.0, 5.25), "USDC": (1.0, 0.0),
                 "DOGE": (0.07, 3.0), "PEPE": (0.000005, -1.0),
                 "BONK": (0.000003, 8.0), "JUP": (0.23, -0.5)}))
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
-            prices_mod, "get_price", return_value=(86.0, "snapshot", "test"))
+            prices_mod, "get_price", return_value=(10.0, "snapshot", "test"))
         self.price_patch.start()
         self.trenches_patch = mock.patch.object(
             routes, "fetch_trenches_scan",
@@ -147,7 +147,7 @@ class CoinsPageBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="860"):
+    def _buy_sol(self, usd="10"):
         return self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
             "usd": usd, "bot_id": ""})
@@ -221,7 +221,7 @@ class TestCoinSearch(CoinsPageBase):
         self.assertIn("SOL", ids)
         sol = next(r for r in data["results"] if r["coin_id"] == "SOL")
         self.assertEqual(sol["name"], "Solana")
-        self.assertEqual(sol["price_usd"], 86.0)
+        self.assertEqual(sol["price_usd"], 10.0)
         self.assertEqual(sol["held"], 0.0)
         # Every result is a real coin with a live price — nothing
         # invented, no Ethereum pair from the DexScreener payload.
@@ -242,7 +242,7 @@ class TestCoinSearch(CoinsPageBase):
         self._buy_sol()
         data = self._search("sol")
         sol = next(r for r in data["results"] if r["coin_id"] == "SOL")
-        self.assertEqual(sol["held"], 10.0)
+        self.assertEqual(sol["held"], 1.0)
 
     def test_search_nonsense_returns_nothing_invented(self):
         with mock.patch.object(charts_mod, "_default_get",
@@ -288,23 +288,23 @@ class TestQuickTradeAmounts(CoinsPageBase):
     def test_sell_by_usd_amount(self):
         self._choose_mode("paper")
         self._buy_sol()
-        self.assertEqual(self._holding("SOL"), 10.0)
+        self.assertEqual(self._holding("SOL"), 1.0)
         resp = self.client.post("/coins/SOL/sell", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "amount_usd": "86"})
+            "amount_usd": "5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertEqual(self._holding("SOL"), 9.0)
+        self.assertEqual(self._holding("SOL"), 0.5)
 
     def test_sell_by_token_amount_still_works(self):
         self._choose_mode("paper")
         self._buy_sol()
         resp = self.client.post("/coins/SOL/sell", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "amount": "1"})
+            "amount": "0.5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertEqual(self._holding("SOL"), 9.0)
+        self.assertEqual(self._holding("SOL"), 0.5)
 
     def test_buy_tokens_without_price_refuses_plainly(self):
         self._choose_mode("paper")
@@ -358,7 +358,7 @@ class TestRefreshLive(unittest.TestCase):
         routes._TRENCHES_CACHE.update(
             {"at": 0.0, "rows": None, "error": None})
         prices_mod.clear_price_cache()
-        self.sol_price = 86.0
+        self.sol_price = 10.0
 
         def _live():
             base = {"BTC": 74000.0, "ETH": 2100.0, "SOL": self.sol_price,
@@ -379,7 +379,7 @@ class TestRefreshLive(unittest.TestCase):
             "csrf_token": csrf(self.client, "/wallet"), "mode": "paper"})
         self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "usd": "860", "bot_id": ""})
+            "usd": "10", "bot_id": ""})
 
     def tearDown(self):
         self.live_patch.stop()
@@ -398,10 +398,10 @@ class TestRefreshLive(unittest.TestCase):
             (self.user_id,)).fetchone()["c"]
 
     def test_refresh_clears_price_cache_and_records_snapshot(self):
-        self.assertIn("$86.0000", self._html("/dashboard"))
+        self.assertIn("$10.0000", self._html("/dashboard"))
         self.sol_price = 99.0
         # Still the cached price until a refresh.
-        self.assertIn("$86.0000", self._html("/dashboard"))
+        self.assertIn("$10.0000", self._html("/dashboard"))
         before = self._snapshots()
         resp = self.client.post("/dashboard/refresh", data={
             "csrf_token": csrf(self.client, "/dashboard")})

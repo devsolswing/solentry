@@ -32,7 +32,7 @@ class TestAuth(unittest.TestCase):
         cash = db.execute(
             "SELECT cash_usd FROM paper_portfolio WHERE user_id = ?",
             (user["id"],)).fetchone()
-        self.assertEqual(cash["cash_usd"], 10000.0)
+        self.assertEqual(cash["cash_usd"], 50.0)
 
     def test_signup_rejects_duplicate_username(self):
         self.assertEqual(signup(self.client, "alice").status_code, 302)

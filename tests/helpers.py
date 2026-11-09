@@ -18,7 +18,7 @@ def make_config(tmpdir: str) -> Config:
         "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
         "NETWORK": "devnet",
         "DATABASE_PATH": os.path.join(tmpdir, "test.db"),
-        "PAPER_START_CASH": "10000",
+        "PAPER_START_CASH": "50",
     }
     return Config(env=env)
 

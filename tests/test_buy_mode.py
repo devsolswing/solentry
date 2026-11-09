@@ -78,7 +78,7 @@ class TestDeleteButton(unittest.TestCase):
         # Manual buy with this bot as managing bot opens a position.
         resp = self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "usd": "100", "bot_id": str(bot_id)})
+            "usd": "10", "bot_id": str(bot_id)})
         self.assertEqual(resp.status_code, 200)
         db = self.app.config["DB"]
         self.assertIsNotNone(db.execute(
@@ -122,8 +122,8 @@ class TestModeSwitch(unittest.TestCase):
         self.assertEqual(mode, "paper")
         html = self._header()
         self.assertIn("Paper", html)
-        # Fresh account: $10,000 paper cash, no holdings.
-        self.assertIn("$10,000.00", html)
+        # Fresh account: $50 CAD paper cash, no holdings.
+        self.assertIn("$50.00 CAD", html)
 
     def test_switch_persists_and_header_follows(self):
         self.client.post("/mode", data={
@@ -149,7 +149,7 @@ class TestModeSwitch(unittest.TestCase):
             "SELECT active_mode FROM users WHERE username = 'alice'"
             ).fetchone()["active_mode"]
         self.assertEqual(mode, "paper")
-        self.assertIn("$10,000.00", self._header())
+        self.assertIn("$50.00 CAD", self._header())
 
     def test_invalid_mode_changes_nothing(self):
         resp = self.client.post("/mode", data={
@@ -181,7 +181,7 @@ class TestBuySelectors(unittest.TestCase):
         return self.db.execute("SELECT id FROM bots WHERE name = ?",
                                (name,)).fetchone()["id"]
 
-    def _buy(self, coin="SOL", usd="100", bot_id=""):
+    def _buy(self, coin="SOL", usd="10", bot_id=""):
         return self.client.post(f"/coins/{coin}/buy", data={
             "csrf_token": csrf(self.client, f"/coins/{coin}"),
             "usd": usd, "bot_id": bot_id})
@@ -225,7 +225,7 @@ class TestBuySelectors(unittest.TestCase):
         signup(bob, "bob")
         resp = bob.post("/coins/SOL/buy", data={
             "csrf_token": csrf(bob, "/coins/SOL"),
-            "usd": "100", "bot_id": str(bot_id)})
+            "usd": "10", "bot_id": str(bot_id)})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Nothing was bought", resp.get_data(as_text=True))
         self.assertEqual(self.db.execute(
@@ -254,7 +254,7 @@ class TestBuySelectors(unittest.TestCase):
         self.assertNotIn('action="/paper/sell"', html)
         self.assertEqual(self.client.post(
             "/paper/buy", data={"csrf_token": csrf(self.client, "/dashboard"),
-                                "coin": "SOL", "usd": "100"}).status_code,
+                                "coin": "SOL", "usd": "10"}).status_code,
             404)
         self.assertEqual(self.client.post(
             "/paper/sell", data={"csrf_token": csrf(self.client, "/dashboard"),

@@ -42,12 +42,12 @@ class TestPaper(unittest.TestCase):
         self.rpc_patch.stop()
         self.tmp.cleanup()
 
-    def _buy(self, coin="SOL", usd="1000"):
+    def _buy(self, coin="SOL", usd="10"):
         return self.client.post(f"/coins/{coin}/buy", data={
             "csrf_token": csrf(self.client, f"/coins/{coin}"),
             "usd": usd, "bot_id": ""})
 
-    def _sell(self, coin="SOL", amount="4"):
+    def _sell(self, coin="SOL", amount="0.04"):
         return self.client.post(f"/coins/{coin}/sell", data={
             "csrf_token": csrf(self.client, f"/coins/{coin}"),
             "amount": amount})
@@ -59,14 +59,14 @@ class TestPaper(unittest.TestCase):
         db = self.app.config["DB"]
         cash = db.execute("SELECT cash_usd FROM paper_portfolio"
                           ).fetchone()["cash_usd"]
-        self.assertEqual(cash, 9000.0)
+        self.assertEqual(cash, 40.0)
         holding = db.execute("SELECT amount, avg_price FROM paper_holdings "
                              "WHERE coin_id = 'SOL'").fetchone()
-        self.assertEqual(holding["amount"], 10.0)
+        self.assertEqual(holding["amount"], 0.1)
         self.assertEqual(holding["avg_price"], 100.0)
         trade = db.execute("SELECT * FROM paper_trades").fetchone()
         self.assertEqual(trade["side"], "buy")
-        self.assertEqual(trade["total_usd"], 1000.0)
+        self.assertEqual(trade["total_usd"], 10.0)
 
     def test_buy_more_than_cash_rejected(self):
         resp = self._buy(usd="999999")
@@ -74,7 +74,7 @@ class TestPaper(unittest.TestCase):
         self.assertIn("Nothing was bought", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT cash_usd FROM paper_portfolio"
-                                    ).fetchone()["cash_usd"], 10000.0)
+                                    ).fetchone()["cash_usd"], 50.0)
         self.assertEqual(db.execute("SELECT COUNT(*) c FROM paper_holdings"
                                     ).fetchone()["c"], 0)
 
@@ -85,20 +85,20 @@ class TestPaper(unittest.TestCase):
         self.assertIn("Sold", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT cash_usd FROM paper_portfolio"
-                                    ).fetchone()["cash_usd"], 9400.0)
-        self.assertEqual(db.execute("SELECT amount FROM paper_holdings "
+                                    ).fetchone()["cash_usd"], 44.0)
+        self.assertAlmostEqual(db.execute("SELECT amount FROM paper_holdings "
                                     "WHERE coin_id='SOL'").fetchone()["amount"],
-                         6.0)
+                         0.06, places=9)
 
     def test_sell_more_than_held_rejected(self):
-        self._buy(usd="100")
+        self._buy(usd="10")
         resp = self._sell(amount="99")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Nothing was sold", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT amount FROM paper_holdings "
                                     "WHERE coin_id='SOL'").fetchone()["amount"],
-                         1.0)
+                         0.1)
 
     def test_unknown_coin_rejected(self):
         resp = self.client.post("/coins/FAKE/buy", data={

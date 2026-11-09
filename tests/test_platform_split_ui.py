@@ -117,7 +117,7 @@ class SplitBase(unittest.TestCase):
             self.db.commit()
         return bot["id"]
 
-    def _paper_buy(self, coin="SOL", usd="100"):
+    def _paper_buy(self, coin="SOL", usd="10"):
         return self.client.post(f"/coins/{coin}/buy", data={
             "csrf_token": csrf(self.client, f"/coins/{coin}"),
             "usd": usd, "bot_id": ""})
@@ -173,7 +173,7 @@ class TestModeChooser(SplitBase):
 class TestModeSeparation(SplitBase):
     def setUp(self):
         super().setUp()
-        self._paper_buy("SOL", "100")
+        self._paper_buy("SOL", "10")
         self.paper_bot = self._create_bot("Luna", mode="paper")
         self.real_bot = self._create_bot("Nova", mode="real")
 
@@ -361,7 +361,7 @@ class TestCoinPopup(SplitBase):
     def test_paper_buy_shows_confirmation_then_back(self):
         resp = self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "usd": "100", "bot_id": ""})
+            "usd": "10", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Bought", html)
@@ -384,9 +384,9 @@ class TestCoinPopup(SplitBase):
             "SELECT COUNT(*) c FROM paper_holdings").fetchone()["c"], 0)
 
     def test_paper_sell_shows_confirmation(self):
-        self._paper_buy("SOL", "100")
+        self._paper_buy("SOL", "10")
         resp = self.client.post("/coins/SOL/sell", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"), "amount": "0.5"})
+            "csrf_token": csrf(self.client, "/coins/SOL"), "amount": "0.05"})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Sold", html)

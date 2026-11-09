@@ -145,9 +145,9 @@ class TestHoldingsPnl(PnlBase):
     def test_portfolio_totals(self):
         self._add_holding("SOL", 1.0, 90.0)
         totals = portfolio_totals(self.db, self.user_id, {"SOL": 100.0})
-        self.assertAlmostEqual(totals["cash_usd"], 10000.0)
+        self.assertAlmostEqual(totals["cash_usd"], 50.0)
         self.assertAlmostEqual(totals["holdings_value_usd"], 100.0)
-        self.assertAlmostEqual(totals["total_value_usd"], 10100.0)
+        self.assertAlmostEqual(totals["total_value_usd"], 150.0)
 
 
 class TestPnlPage(PnlBase):
@@ -166,7 +166,7 @@ class TestPnlPage(PnlBase):
         self.assertIn("No data yet", html)
         self.assertIn("All-time", html)
         self.assertIn("1 hour", html)
-        self.assertIn("$10000.00", html)  # paper portfolio value
+        self.assertIn("$50.00 CAD", html)  # paper portfolio value
         self.assertNotIn("2.0000 SOL", html)
         # Real mode shows the on-chain balance only — no paper value.
         self.client.post("/mode", data={
@@ -174,7 +174,7 @@ class TestPnlPage(PnlBase):
         html = self.client.get("/pnl").get_data(as_text=True)
         self.assertIn("2.0000 SOL", html)  # mocked on-chain balance
         self.assertIn("No data yet", html)
-        self.assertNotIn("$10000.00", html)
+        self.assertNotIn("$50.00 CAD", html)
 
     def test_unknown_range_falls_back_to_all(self):
         resp = self.client.get("/pnl?range=bogus")
@@ -185,7 +185,7 @@ class TestPnlPage(PnlBase):
     def test_paper_buy_records_snapshot_and_page_shows_it(self):
         token = csrf(self.client, "/dashboard")
         resp = self.client.post("/coins/SOL/buy", data={
-            "csrf_token": token, "usd": "100", "bot_id": ""},
+            "csrf_token": token, "usd": "10", "bot_id": ""},
             follow_redirects=False)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Bought", resp.get_data(as_text=True))
@@ -193,7 +193,7 @@ class TestPnlPage(PnlBase):
             "SELECT * FROM portfolio_snapshots WHERE user_id = ?",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1)
-        self.assertAlmostEqual(rows[0]["total_value_usd"], 10000.0, places=1)
+        self.assertAlmostEqual(rows[0]["total_value_usd"], 50.0, places=1)
         resp = self.client.get("/pnl?range=all")
         html = resp.get_data(as_text=True)
         self.assertIn("SOL", html)

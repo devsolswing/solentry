@@ -38,8 +38,8 @@
   {% if mode == 'paper' %}
   <div class="card">
     <h2>📄 Paper balance</h2>
-    <p class="big-num">${{ "%.2f"|format(paper_cash + holdings_value) }}</p>
-    <p class="muted">Cash: ${{ "%.2f"|format(paper_cash) }} · Holdings: ${{ "%.2f"|format(holdings_value) }}</p>
+    <p class="big-num">${{ "%.2f"|format(paper_cash + holdings_value) }} CAD</p>
+    <p class="muted">Cash: ${{ "%.2f"|format(paper_cash) }} CAD · Holdings: ${{ "%.2f"|format(holdings_value) }} CAD</p>
     <p class="muted small">Paper trading is fake money. Your real wallet, send history and platform wallets live in Real trading — switch mode in the HUD below to see them.</p>
   </div>
   {% else %}

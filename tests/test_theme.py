@@ -107,7 +107,7 @@ class TestChange24h(ThemeBase):
         for coin in ("SOL", "BTC"):
             self.client.post(f"/coins/{coin}/buy", data={
                 "csrf_token": csrf(self.client, f"/coins/{coin}"),
-                "usd": "100", "bot_id": ""})
+                "usd": "10", "bot_id": ""})
         html = self._html("/dashboard")
         self.assertIn("coin-change", html)
         self.assertIn("+5.2%", html)
@@ -133,7 +133,7 @@ class TestChange24h(ThemeBase):
         # its row (with no change data) renders at all.
         self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "usd": "100", "bot_id": ""})
+            "usd": "10", "bot_id": ""})
         html = self._html("/dashboard")
         self.assertIn(
             'class="coin-change"><span class="muted">—</span>', html)
@@ -152,7 +152,7 @@ class TestPortfolioHeader(ThemeBase):
         self._set_prices({})
         html = self._html("/dashboard")
         self.assertIn("portfolio-head", html)
-        self.assertIn("$10,000.00", html)
+        self.assertIn("$50.00 CAD", html)
         self.assertIn("No chart data yet", html)
 
     def test_header_chart_draws_from_recorded_snapshots(self):
@@ -189,7 +189,7 @@ class TestTradeTicket(ThemeBase):
         self._set_prices({})
         resp = self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
-            "usd": "100", "bot_id": ""})
+            "usd": "10", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Bought", html)
