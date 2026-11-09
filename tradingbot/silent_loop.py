@@ -45,6 +45,7 @@ from .config import Config
 from .db import init_db
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
+from .pnl import portfolio_totals, record_snapshot
 from .prices import get_prices
 from .rules import load_rules
 from .signals import signal_for_coin
@@ -608,7 +609,47 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             outcomes.append({"bot_id": bot["id"], "bot_name": bot["name"],
                              "user_id": bot["user_id"], "mode": bot["mode"],
                              "actions": [], "error": str(exc)[:200]})
+    _record_snapshots(db, cfg, prices_data, trenches_data, rpc_factory,
+                      {o["user_id"] for o in outcomes})
     return outcomes
+
+
+def _record_snapshots(db: sqlite3.Connection, cfg: Config,
+                      prices_data: dict, trenches_data: dict | None,
+                      rpc_factory, user_ids: set) -> None:
+    """One P&L snapshot per user evaluated this iteration.
+
+    Prices merge the CoinGecko list with the trenches feed so held
+    memecoin mints are valued at the price the loop just saw. The
+    on-chain SOL balance is recorded when the RPC answers, else NULL
+    (shown as "unavailable"). A snapshot failure is logged to stdout
+    and never breaks the loop.
+    """
+    merged = {c: e.get("price", 0.0)
+              for c, e in prices_data.get("prices", {}).items()}
+    if trenches_data:
+        for mint, entry in (trenches_data.get("prices") or {}).items():
+            if entry.get("price_usd") is not None:
+                merged[mint] = entry["price_usd"]
+    for user_id in sorted(user_ids):
+        try:
+            totals = portfolio_totals(db, user_id, merged)
+            real_sol = None
+            try:
+                wallet = db.execute(
+                    "SELECT pubkey FROM wallets WHERE user_id = ?",
+                    (user_id,)).fetchone()
+                if wallet:
+                    client = rpc_factory(cfg.rpc_url)
+                    real_sol = lamports_to_sol(
+                        client.get_balance_lamports(wallet["pubkey"]))
+            except Exception:
+                real_sol = None
+            record_snapshot(db, user_id, totals["cash_usd"],
+                            totals["holdings_value_usd"], real_sol)
+        except Exception as exc:  # snapshots never break trading
+            print(f"[silent-loop] snapshot failed for user {user_id}: "
+                  f"{exc}", flush=True)
 
 
 def loop_forever(db_path: str, cfg: Config, interval: int | None = None,

@@ -241,11 +241,12 @@ class TestRulesParser(unittest.TestCase):
                          "bots_list")
 
 
-def _entry(mint, price, change_5m=None, change_24h=None):
+def _entry(mint, price, change_5m=None, change_24h=None, cap=None):
     return {"mint": mint, "symbol": mint[:6], "name": mint,
             "price_usd": price, "change_5m_pct": change_5m,
             "change_1h_pct": None, "change_6h_pct": None,
             "change_24h_pct": change_24h, "liquidity_usd": 1000,
+            "market_cap_usd": cap,
             "dex_id": "pumpfun", "pair_address": "pair" + mint,
             "pair_created_at": 0}
 
@@ -357,6 +358,44 @@ class TestRulesEngine(RulesEngineBase):
                             trenches_fetcher=scan)
         self.assertEqual(outcomes[0]["actions"], [])
         self.assertIsNone(self._position(bot_id, "MINTA"))
+
+    def test_tiny_market_cap_coin_qualifies(self):
+        """No market-cap floor: a $400 coin gaining 3.5% in 5 min buys."""
+        bot_id = self._insert_bot(rules=trenches_ruleset())
+        scan = _FakeScan([_entry("TINY", 0.001, change_5m=3.5, cap=400)])
+        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
+                            trenches_fetcher=scan)
+        self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
+        self.assertEqual(outcomes[0]["actions"][0]["coin"], "TINY")
+        self.assertIsNotNone(self._position(bot_id, "TINY"))
+
+    def test_huge_market_cap_coin_qualifies(self):
+        """No market-cap cap: a $500M coin gaining 3.5% in 5 min buys."""
+        bot_id = self._insert_bot(rules=trenches_ruleset())
+        scan = _FakeScan([_entry("HUGE", 2.5, change_5m=3.5,
+                                 cap=500_000_000)])
+        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
+                            trenches_fetcher=scan)
+        self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
+        self.assertEqual(outcomes[0]["actions"][0]["coin"], "HUGE")
+        self.assertIsNotNone(self._position(bot_id, "HUGE"))
+
+    def test_strongest_gainer_wins_regardless_of_cap(self):
+        """Ranking reads the 5-minute gain alone: the tiny-cap coin
+        gaining 9% beats the huge-cap coin gaining 4%."""
+        bot_id = self._insert_bot(rules=trenches_ruleset())
+        scan = _FakeScan([
+            _entry("HUGE", 2.5, change_5m=4.0, cap=500_000_000),
+            _entry("TINY", 0.001, change_5m=9.0, cap=400),
+        ])
+        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
+                            trenches_fetcher=scan)
+        buys = [a for a in outcomes[0]["actions"]
+                if a["action"] == "buy"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["coin"], "TINY")
+        self.assertIsNotNone(self._position(bot_id, "TINY"))
+        self.assertIsNone(self._position(bot_id, "HUGE"))
 
     def test_strongest_gainer_wins_one_position(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())

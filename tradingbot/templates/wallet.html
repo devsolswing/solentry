@@ -12,6 +12,13 @@
   <p class="muted small">Network: {{ network }}</p>
 </div>
 
+<div class="card">
+  <h2>🫧 Pump.fun trading wallet</h2>
+  <p>Pump.fun has no separate accounts — trading on pump.fun uses this linked Solana wallet. This is your app wallet above, linked as your pump.fun trading wallet, so the bot can trade on pump.fun on your behalf.</p>
+  <p class="addr">{{ pumpfun_wallet or wallet.pubkey }}</p>
+  <button class="btn" onclick="navigator.clipboard.writeText('{{ pumpfun_wallet or wallet.pubkey }}'); this.textContent='Copied!';">Copy address</button>
+</div>
+
 <div class="cards">
   <div class="card">
     <h2>⬆ Send</h2>

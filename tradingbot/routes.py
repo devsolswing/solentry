@@ -33,6 +33,7 @@ from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 from . import assistant as assistant_mod
 from . import donations as donations_mod
 from . import passkey as passkey_mod
+from . import pnl as pnl_mod
 from .config import Config
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
@@ -46,6 +47,7 @@ from .security import (decrypt_secret, encrypt_secret, hash_password,
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
                      lamports_to_sol, sol_to_lamports)
+from .trenches import fetch_prices_for_mints
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
@@ -141,6 +143,18 @@ def _paper(app, user_id: int):
     return row["cash_usd"] if row else 0.0
 
 
+def _record_pnl_snapshot(app, user_id: int, price_map: dict) -> None:
+    """One P&L snapshot after a trade. Never breaks the trade itself."""
+    try:
+        totals = pnl_mod.portfolio_totals(_db(app), user_id, price_map)
+        wallet = _wallet(app, user_id)
+        real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
+        pnl_mod.record_snapshot(_db(app), user_id, totals["cash_usd"],
+                                totals["holdings_value_usd"], real_sol)
+    except Exception:
+        pass
+
+
 def _check_login_lock(app, username: str):
     row = _db(app).execute(
         "SELECT fail_count, locked_until FROM login_attempts WHERE username = ?",
@@ -231,6 +245,12 @@ def register_routes(app: Flask) -> None:
             db.execute(
                 "INSERT INTO wallets (user_id, pubkey, encrypted_secret) "
                 "VALUES (?, ?, ?)", (user_id, pubkey, blob))
+            # The app wallet IS the user's pump.fun trading wallet:
+            # pump.fun has no separate accounts, so trading on pump.fun
+            # uses this linked Solana wallet.
+            db.execute(
+                "UPDATE users SET pumpfun_wallet = ? WHERE id = ?",
+                (pubkey, user_id))
             db.execute(
                 "INSERT INTO paper_portfolio (user_id, cash_usd) "
                 "VALUES (?, ?)", (user_id, _cfg(app).paper_start_cash))
@@ -709,6 +729,54 @@ def register_routes(app: Flask) -> None:
             activity=activity)
 
     # ------------------------------------------------------------------
+    # P&L dashboard: balance, current coins with per-coin P&L, and a
+    # P&L chart built ONLY from recorded snapshots (never invented
+    # history). Ranges: All-time, 1 year, 1 month, 1 week, 1 day,
+    # 1 hour. The on-chain SOL balance is shown alongside the paper
+    # portfolio, labelled plainly, so any difference is visible.
+    # ------------------------------------------------------------------
+    @app.route("/pnl")
+    @login_required
+    def pnl():
+        user = _current_user(app)
+        range_key = (request.args.get("range") or "all").strip()
+        if range_key not in pnl_mod.RANGES:
+            range_key = "all"
+        prices = get_prices()
+        price_map = {c: e.get("price")
+                     for c, e in prices["prices"].items()}
+        db = _db(app)
+        held = db.execute(
+            "SELECT DISTINCT coin_id FROM paper_holdings WHERE user_id = ?",
+            (user["id"],)).fetchall()
+        trenches_mints = [r["coin_id"] for r in held
+                          if r["coin_id"] not in price_map]
+        if trenches_mints:
+            try:
+                for mint, price in fetch_prices_for_mints(
+                        trenches_mints).items():
+                    price_map[mint] = price
+            except Exception:
+                pass
+        totals = pnl_mod.portfolio_totals(db, user["id"], price_map)
+        wallet = _wallet(app, user["id"])
+        real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
+        sol_price = prices["prices"].get("SOL", {}).get("price")
+        real_sol_usd = (real_sol * sol_price
+                        if real_sol is not None and sol_price else None)
+        start_cash = _cfg(app).paper_start_cash
+        points, has_data = pnl_mod.chart_points(db, user["id"], range_key)
+        return render_template(
+            "pnl.html", range_key=range_key,
+            ranges=pnl_mod.RANGES, totals=totals,
+            real_sol=real_sol, real_sol_usd=real_sol_usd,
+            sol_price=sol_price, start_cash=start_cash,
+            total_pnl=totals["total_value_usd"] - start_cash,
+            points=points, has_data=has_data,
+            chart_svg=pnl_mod.chart_svg(points),
+            prices_source=prices["source"], prices_as_of=prices["as_of"])
+
+    # ------------------------------------------------------------------
     # Wallet: view / send (two-step) / deposit
     # ------------------------------------------------------------------
     @app.route("/wallet")
@@ -717,12 +785,16 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         wallet = _wallet(app, user["id"])
         real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
+        pumpfun_wallet = _db(app).execute(
+            "SELECT pumpfun_wallet FROM users WHERE id = ?",
+            (user["id"],)).fetchone()["pumpfun_wallet"]
         intents = _db(app).execute(
             "SELECT id, destination, amount_lamports, token, status, "
             "signature, created_at FROM send_intents WHERE user_id = ? "
             "ORDER BY id DESC LIMIT 20", (user["id"],)).fetchall()
         return render_template("wallet.html", wallet=wallet,
-                               real_sol=real_sol, intents=intents)
+                               real_sol=real_sol, intents=intents,
+                               pumpfun_wallet=pumpfun_wallet)
 
     @app.route("/wallet/send", methods=["GET", "POST"])
     @login_required
@@ -844,6 +916,10 @@ def register_routes(app: Flask) -> None:
         _log(app, user["id"], "paper_buy",
              f"Bought {amount:.4f} {coin} for ${usd:.2f} (paper, "
              f"price source: {source}).")
+        _record_pnl_snapshot(
+            app, user["id"],
+            {c: e.get("price", 0.0)
+             for c, e in get_prices()["prices"].items()})
         flash(f"Bought {amount:.4f} {coin} (paper).")
         return redirect(url_for("dashboard"))
 
@@ -877,6 +953,10 @@ def register_routes(app: Flask) -> None:
         _log(app, user["id"], "paper_sell",
              f"Sold {amount:.4f} {coin} for ${usd:.2f} (paper, "
              f"price source: {source}).")
+        _record_pnl_snapshot(
+            app, user["id"],
+            {c: e.get("price", 0.0)
+             for c, e in get_prices()["prices"].items()})
         flash(f"Sold {amount:.4f} {coin} (paper).")
         return redirect(url_for("dashboard"))
 

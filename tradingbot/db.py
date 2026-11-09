@@ -191,6 +191,22 @@ CREATE TABLE IF NOT EXISTS donations (
     network TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- P&L snapshots: one row per user per silent-loop evaluation and per
+-- manual paper trade. The P&L chart is built ONLY from these recorded
+-- rows — history is never invented. real_sol is the app wallet's
+-- on-chain SOL balance when the RPC answered, else NULL (shown as
+-- "unavailable", never guessed).
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    cash_usd REAL NOT NULL,
+    holdings_value_usd REAL NOT NULL,
+    total_value_usd REAL NOT NULL,
+    real_sol REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
 """
 
 
@@ -226,7 +242,21 @@ _MIGRATIONS = (
     ("bot_positions", "peak_price", "REAL"),
     ("bot_positions", "orig_amount", "REAL"),
     ("bot_positions", "ladder_stage", "INTEGER NOT NULL DEFAULT 0"),
+    # The user's pump.fun trading wallet: pump.fun has no separate
+    # accounts, so trading on pump.fun uses the linked Solana wallet —
+    # the per-user app wallet, recorded here at signup.
+    ("users", "pumpfun_wallet", "TEXT NOT NULL DEFAULT ''"),
 )
+
+
+def _backfill_pumpfun_wallets(conn: sqlite3.Connection) -> None:
+    """One-time, idempotent backfill: users created before the
+    pumpfun_wallet column existed get their app wallet linked."""
+    conn.execute(
+        "UPDATE users SET pumpfun_wallet = "
+        "(SELECT pubkey FROM wallets WHERE wallets.user_id = users.id) "
+        "WHERE pumpfun_wallet = '' AND EXISTS "
+        "(SELECT 1 FROM wallets WHERE wallets.user_id = users.id)")
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -242,5 +272,6 @@ def init_db(path: str) -> sqlite3.Connection:
     conn = connect(path)
     conn.executescript(SCHEMA)
     _migrate(conn)
+    _backfill_pumpfun_wallets(conn)
     conn.commit()
     return conn

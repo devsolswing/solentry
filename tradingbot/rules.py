@@ -75,6 +75,7 @@ TRENCHES_PRESET_NAME = "Trenches"
 # James's spec, exactly: scan the trenches every minute; buy a coin
 # gaining 3.4% in a 5-minute window (strongest gainer wins); sell 10%
 # at +3% profit, the rest at +10%; sell all at 7% below the peak.
+# No market-cap filter: a trending coin qualifies at any market cap.
 TRENCHES_RULES = {
     "version": 1,
     "kind": "trenches",

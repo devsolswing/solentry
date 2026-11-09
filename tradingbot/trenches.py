@@ -12,6 +12,11 @@ be read server-side, so the feed reads DexScreener's free public API
 Every failure returns an error dict, never an exception and never
 fake data: the rules engine treats a feed error as "no trades this
 scan". A pair with no price or no change data is skipped, not guessed.
+
+There is NO market-cap filter anywhere in this feed or in the rules
+engine: a trending coin qualifies at any market cap, tiny or huge.
+`market_cap_usd` is recorded on each entry for display only — the
+buy decision reads the 5-minute gain alone.
 """
 
 from __future__ import annotations
@@ -82,6 +87,14 @@ def _entry(mint: str, pair: dict) -> dict:
             return float(value)
         except (TypeError, ValueError):
             return None
+    def _num(key):
+        value = pair.get(key)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
     return {
         "mint": mint,
         "symbol": (pair.get("baseToken") or {}).get("symbol") or mint[:8],
@@ -92,10 +105,45 @@ def _entry(mint: str, pair: dict) -> dict:
         "change_6h_pct": _pct("h6"),
         "change_24h_pct": _pct("h24"),
         "liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
+        # Recorded for display only. Nothing filters on it: a trending
+        # coin qualifies at any market cap.
+        "market_cap_usd": _num("marketCap"),
         "dex_id": pair.get("dexId"),
         "pair_address": pair.get("pairAddress"),
         "pair_created_at": pair.get("pairCreatedAt"),
     }
+
+
+def fetch_prices_for_mints(mints, http_get=None) -> dict:
+    """Current USD prices for specific mints (held positions).
+
+    Used by the P&L page to price coins the CoinGecko list does not
+    cover. Returns {mint: price_usd} for pump.fun / PumpSwap pairs
+    only; a mint with no usable pair is left out (the caller values
+    it at cost and says so), and any fetch failure returns {}.
+    """
+    http_get = http_get or _default_get
+    wanted = [m for m in dict.fromkeys(mints or []) if m]
+    if not wanted:
+        return {}
+    try:
+        out = {}
+        for i in range(0, len(wanted), _CHUNK):
+            chunk = wanted[i:i + _CHUNK]
+            data = http_get(TOKENS_URL.format(",".join(chunk)))
+            by_mint: dict = {}
+            for pair in data.get("pairs") or []:
+                base = pair.get("baseToken") or {}
+                addr = base.get("address")
+                if addr:
+                    by_mint.setdefault(addr, []).append(pair)
+            for mint, pairs in by_mint.items():
+                best = _best_pair(pairs)
+                if best is not None:
+                    out[mint] = float(best["priceUsd"])
+        return out
+    except Exception:
+        return {}
 
 
 def fetch_trenches_scan(mints=None, http_get=None) -> dict:

@@ -44,6 +44,7 @@
     <p class="big-num">{% if real_sol is not none %}{{ "%.4f"|format(real_sol) }} SOL{% else %}Balance unavailable{% endif %}</p>
     <p class="muted small">Network: {{ network }} · Deposit to the address above.</p>
     <p><a class="btn" href="{{ url_for('wallet') }}">Open wallet</a>
+    <a class="btn ghost" href="{{ url_for('pnl') }}">P&amp;L dashboard</a>
     <a class="btn ghost" href="{{ url_for('bots') }}">My bots ({{ bots|length }})</a></p>
     <h3>Your bots</h3>
     {% if bots %}
