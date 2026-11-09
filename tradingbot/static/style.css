@@ -1,16 +1,22 @@
+/* ------------------------------------------------------------------ */
+/* SolEntry — ONE theme everywhere: the red login page theme.        */
+/* Red/gold neon (DogeWifHat login look) on every page — dashboard,  */
+/* bots, wallet, P&L, settings, auth, popups and HUD. Green/red are  */
+/* used ONLY for data (gains/losses, 24h change), never for chrome.  */
+/* ------------------------------------------------------------------ */
 * { box-sizing: border-box; }
-body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #0b0e14; color: #e8ecf1; }
-a { color: #4ade80; }
-.topbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #11151f; border-bottom: 1px solid #232a38; position: sticky; top: 0; z-index: 10; flex-wrap: wrap; row-gap: 8px; }
-.brand { font-weight: 800; font-size: 18px; color: #fff; text-decoration: none; }
+body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: radial-gradient(120% 60% at 50% 0%, #2a0705 0%, #0a0505 55%, #050303 100%); color: #e8ecf1; }
+a { color: #ffd700; }
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #1a0805; border-bottom: 2px solid #ffb300; position: sticky; top: 0; z-index: 10; flex-wrap: wrap; row-gap: 8px; }
+.brand { font-weight: 900; font-style: italic; font-size: 18px; text-decoration: none; background: linear-gradient(100deg, #ff1e14 0%, #ff5e1f 35%, #ffb300 65%, #ffd700 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-.nav-link { color: #cbd5e1; text-decoration: none; font-size: 14px; }
+.nav-link { color: #b9a99a; text-decoration: none; font-size: 14px; }
 .wallet-menu { position: relative; }
-.wallet-btn { cursor: pointer; background: #16a34a; color: #fff; border: none; border-radius: 999px; padding: 8px 14px; font-size: 15px; list-style: none; }
+.wallet-btn { cursor: pointer; background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border: 2px solid #ffcf3d; border-radius: 999px; padding: 8px 14px; font-size: 15px; font-weight: 700; list-style: none; }
 .wallet-btn::-webkit-details-marker { display: none; }
-.wallet-drop { position: absolute; right: 0; top: 40px; background: #1a2030; border: 1px solid #2b3446; border-radius: 10px; min-width: 170px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+.wallet-drop { position: absolute; right: 0; top: 40px; background: #160b08; border: 2px solid #ffb300; border-radius: 10px; min-width: 170px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
 .wallet-drop a { display: block; padding: 9px 10px; color: #e8ecf1; text-decoration: none; border-radius: 6px; }
-.wallet-drop a:hover { background: #232b3d; }
+.wallet-drop a:hover { background: #241503; }
 .wrap { max-width: 480px; margin: 0 auto; padding: 16px 12px 40px; }
 @media (min-width: 900px) { .wrap { max-width: 860px; } }
 h1 { font-size: 24px; margin: 8px 0 12px; }
@@ -18,32 +24,124 @@ h2 { font-size: 18px; margin: 0 0 8px; }
 h3 { font-size: 15px; margin: 14px 0 6px; }
 .hero { text-align: center; padding: 24px 0 8px; }
 .hero h1 { font-size: 30px; }
-.sub { color: #9aa7b8; }
+.sub { color: #b9a99a; }
 .cards { display: grid; gap: 12px; margin: 12px 0; }
 @media (min-width: 900px) { .cards { grid-template-columns: 1fr 1fr; } }
-.card { background: #141926; border: 1px solid #232a38; border-radius: 14px; padding: 16px; margin: 12px 0; }
+.card { background: #160b08; border: 2px solid #ffb300; border-radius: 14px; padding: 16px; margin: 12px 0; box-shadow: 0 0 16px rgba(255, 120, 0, .25); }
 .card.narrow { max-width: 420px; margin: 12px auto; }
-.muted { color: #9aa7b8; }
+.muted { color: #b9a99a; }
 .small { font-size: 12px; }
-.big-num { font-size: 26px; font-weight: 800; margin: 6px 0; }
-.addr { word-break: break-all; background: #0b0e14; border: 1px solid #232a38; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 13px; }
-.btn { display: inline-block; background: #16a34a; color: #fff; border: none; border-radius: 999px; padding: 10px 16px; font-size: 15px; cursor: pointer; text-decoration: none; }
-.btn.ghost { background: transparent; border: 1px solid #4ade80; color: #4ade80; }
+.big-num { font-size: 26px; font-weight: 800; margin: 6px 0; color: #ffd700; }
+.addr { word-break: break-all; background: #000; border: 2px solid #ffb300; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 13px; }
+.btn { display: inline-block; background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border: 2px solid #ffcf3d; border-radius: 999px; padding: 10px 16px; font-size: 15px; font-weight: 700; cursor: pointer; text-decoration: none; }
+.btn.ghost { background: transparent; border: 1px solid #ffb300; color: #ffd700; }
 .btn.danger { background: #dc2626; margin-top: 12px; }
 .btn.big { padding: 12px 22px; font-size: 16px; }
 .btn.small { padding: 6px 10px; font-size: 13px; }
 label { display: block; margin: 12px 0; font-size: 14px; }
-input[type=text], input[type=password], input[type=number], select { width: 100%; padding: 10px; margin-top: 4px; background: #0b0e14; color: #e8ecf1; border: 1px solid #2b3446; border-radius: 8px; font-size: 15px; }
+input[type=text], input[type=password], input[type=number], select { width: 100%; padding: 10px; margin-top: 4px; background: #000; color: #fff; border: 2px solid #ffb300; border-radius: 8px; font-size: 15px; }
+input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, select:focus { outline: none; border-color: #ffd700; box-shadow: 0 0 12px rgba(255, 200, 0, .4); }
 .inline { display: inline; }
 .inline input, .inline select { width: auto; }
-.flash { background: #3f1d1d; border: 1px solid #7f2d2d; border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
+.flash { background: #3f1d1d; border: 1px solid #e62e1b; border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
-th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #232a38; }
-.chat-log { max-height: 260px; overflow-y: auto; background: #0b0e14; border: 1px solid #232a38; border-radius: 8px; padding: 10px; margin: 8px 0; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #4a1f0d; }
+.chat-log { max-height: 260px; overflow-y: auto; background: #000; border: 2px solid #ffb300; border-radius: 8px; padding: 10px; margin: 8px 0; }
 .chat-log p { margin: 6px 0; font-size: 14px; }
 #chat-form { display: flex; gap: 8px; }
 #chat-form input { flex: 1; }
-.foot { text-align: center; color: #6b7686; font-size: 12px; padding: 16px; }
+.foot { text-align: center; color: #b9a99a; font-size: 12px; padding: 16px; }
+
+/* Data colours only: gains green, losses red. Chrome never uses them. */
+.up { color: #4ade80; font-weight: 700; }
+.down { color: #f87171; font-weight: 700; }
+
+/* Silent trading badges + explanation box */
+.badge { display: inline-block; font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 999px; vertical-align: middle; }
+.badge.silent-on { background: #3a2a00; color: #ffd700; border: 1px solid #ffb300; }
+.badge.silent-off { background: #1a0805; color: #b9a99a; border: 1px solid #4a1f0d; }
+.silent-box { border: 1px solid #ffb300; border-radius: 10px; padding: 10px 12px; margin: 12px 0; background: #1a0805; }
+.silent-box label { font-weight: 700; }
+
+/* Header balance chip + Paper/Devnet switch (top corner). Plain
+   form + button, no JavaScript, so it works in any browser. */
+.mode-form { display: flex; align-items: center; gap: 8px; margin: 0; }
+.balance-chip { font-size: 14px; background: #1a0805; border: 1px solid #ffb300; border-radius: 999px; padding: 7px 12px; white-space: nowrap; }
+.balance-chip strong { color: #ffd700; }
+.mode-switch { display: inline-flex; background: #000; border: 1px solid #ffb300; border-radius: 999px; padding: 2px; cursor: pointer; }
+.mode-switch .mode-opt { padding: 5px 10px; border-radius: 999px; font-size: 13px; color: #b9a99a; }
+.mode-switch .mode-opt.on { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; font-weight: 700; }
+@media (max-width: 560px) {
+  .topbar { padding: 8px 10px; }
+  .brand { font-size: 16px; }
+  .nav-link { font-size: 13px; }
+  .balance-chip { font-size: 13px; padding: 6px 10px; }
+  .mode-switch .mode-opt { padding: 4px 8px; font-size: 12px; }
+}
+
+/* ------------------------------------------------------------------ */
+/* App shell: one screen, HUD at the bottom. The page itself never
+   scrolls — the content area scrolls internally, and the HUD stays
+   on screen so the user can always change the page or the mode.   */
+/* ------------------------------------------------------------------ */
+body.app-shell { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
+.mode-banner { background: #160b08; border: 1px solid #ffb300; border-radius: 999px; padding: 8px 14px; font-size: 14px; margin: 4px 0 10px; display: inline-block; }
+.mode-banner strong { color: #ffd700; }
+
+/* HUD: bottom navigation bar + mode switch (Kraken-style tabs). */
+.hud { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; align-items: center; justify-content: space-around; gap: 2px; background: #1a0805; border-top: 2px solid #ffb300; padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
+.hud-item { display: flex; flex-direction: column; align-items: center; gap: 1px; color: #b9a99a; text-decoration: none; font-size: 18px; padding: 4px 8px; border-radius: 8px; border-top: 2px solid transparent; }
+.hud-item span { font-size: 11px; }
+.hud-item.active { color: #ffd700; font-weight: 700; border-top-color: #ffd700; }
+.hud-mode { margin: 0; }
+.hud-switch { padding: 2px; }
+.hud-switch .mode-opt { padding: 6px 9px; }
+
+/* Portfolio header (Kraken-style): total balance + chart. */
+.portfolio-head { text-align: center; }
+.portfolio-mode { margin: 0; font-size: 14px; }
+.portfolio-mode strong { color: #ffd700; }
+.portfolio-total { font-size: 30px; font-weight: 900; color: #ffd700; margin: 6px 0 2px; }
+.portfolio-chart { margin-top: 10px; }
+.portfolio-chart svg { width: 100%; height: auto; display: block; }
+
+/* Coins list: one tappable row per coin. */
+.coin-list { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; }
+.coin-row { display: flex; align-items: center; gap: 10px; padding: 11px 10px; background: #160b08; border: 1px solid rgba(255, 179, 0, .35); border-radius: 10px; color: #e8ecf1; text-decoration: none; }
+.coin-row:active { background: #241503; }
+.coin-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coin-price { flex: 0 0 auto; font-weight: 700; }
+.coin-change { flex: 0 0 56px; text-align: right; font-weight: 700; }
+.coin-pnl { flex: 0 0 74px; text-align: right; font-weight: 700; }
+
+/* Overlays: mode chooser + coin popup (bottom sheet). */
+.overlay { position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .72); display: flex; align-items: flex-end; justify-content: center; }
+.chooser-card { width: 100%; max-width: 480px; max-height: 92dvh; overflow-y: auto; background: #160b08; border: 2px solid #ffb300; border-radius: 16px 16px 0 0; padding: 18px 16px 28px; text-align: center; box-shadow: 0 0 24px rgba(255, 120, 0, .3); }
+.chooser-logo { font-size: 44px; margin: 6px 0 2px; }
+.chooser-btn { width: 100%; margin-top: 10px; }
+.chooser-btn.real { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border: 2px solid #ffcf3d; }
+.coin-popup { width: 100%; max-width: 480px; max-height: 92dvh; overflow-y: auto; background: #160b08; border: 2px solid #ffb300; border-bottom: none; border-radius: 16px 16px 0 0; padding: 12px 16px 28px; }
+.popup-head { text-align: right; margin: 0; }
+.popup-close { color: #b9a99a; text-decoration: none; font-size: 20px; padding: 6px 10px; }
+.popup-actions h3 { margin: 18px 0 6px; }
+.popup-actions label { margin: 8px 0; }
+
+/* Trade ticket: one Buy/Sell switch over the coin popup's buy and
+   sell forms. CSS-only radio switch — no JavaScript, so it works
+   in any in-app browser. Same forms, same endpoints as before. */
+.trade-ticket { background: #000; border: 2px solid #ffb300; border-radius: 14px; padding: 12px; margin: 12px 0; }
+.ticket-radio { position: absolute; opacity: 0; pointer-events: none; }
+.ticket-switch { display: flex; background: #1a0805; border: 1px solid #ffb300; border-radius: 999px; padding: 2px; margin-bottom: 10px; }
+.ticket-switch label { flex: 1; text-align: center; padding: 8px; border-radius: 999px; color: #b9a99a; font-weight: 700; cursor: pointer; margin: 0; }
+#ticket-buy:checked ~ .ticket-switch label[for="ticket-buy"], #ticket-sell:checked ~ .ticket-switch label[for="ticket-sell"] { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; }
+.ticket-panel { display: none; }
+#ticket-buy:checked ~ .ticket-buy-panel { display: block; }
+#ticket-sell:checked ~ .ticket-sell-panel { display: block; }
+
+/* Platform wallet rows (bot form + wallet page). */
+.platform-row { border-top: 1px solid #4a1f0d; padding: 10px 0; }
+.platform-row:first-of-type { border-top: none; }
 
 /* ------------------------------------------------------------------ */
 /* SolEntry login page — red/gold neon, from James's design.         */
@@ -98,69 +196,3 @@ th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid #232a38; }
 .se-version { color: #ffd700; font-weight: 700; font-size: 17px; }
 .se-version b { color: #ff2d20; }
 .se-sig { font-family: 'Brush Script MT', 'Segoe Script', 'Snell Roundhand', cursive; color: #ffd700; font-size: 38px; transform: rotate(-4deg); text-shadow: 0 0 10px rgba(255, 200, 0, .4); }
-
-/* Silent trading badges + explanation box */
-.badge { display: inline-block; font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 999px; vertical-align: middle; }
-.badge.silent-on { background: #14532d; color: #4ade80; border: 1px solid #4ade80; }
-.badge.silent-off { background: #1f2937; color: #9ca3af; border: 1px solid #4b5563; }
-.silent-box { border: 1px solid #f59e0b; border-radius: 10px; padding: 10px 12px; margin: 12px 0; background: #1c1917; }
-.silent-box label { font-weight: 700; }
-
-/* Header balance chip + Paper/Devnet switch (top corner). Plain
-   form + button, no JavaScript, so it works in any browser. */
-.mode-form { display: flex; align-items: center; gap: 8px; margin: 0; }
-.balance-chip { font-size: 14px; background: #1a2030; border: 1px solid #2b3446; border-radius: 999px; padding: 7px 12px; white-space: nowrap; }
-.balance-chip strong { color: #4ade80; }
-.mode-switch { display: inline-flex; background: #0b0e14; border: 1px solid #2b3446; border-radius: 999px; padding: 2px; cursor: pointer; }
-.mode-switch .mode-opt { padding: 5px 10px; border-radius: 999px; font-size: 13px; color: #9aa7b8; }
-.mode-switch .mode-opt.on { background: #16a34a; color: #fff; font-weight: 700; }
-@media (max-width: 560px) {
-  .topbar { padding: 8px 10px; }
-  .brand { font-size: 16px; }
-  .nav-link { font-size: 13px; }
-  .balance-chip { font-size: 13px; padding: 6px 10px; }
-  .mode-switch .mode-opt { padding: 4px 8px; font-size: 12px; }
-}
-
-/* ------------------------------------------------------------------ */
-/* App shell: one screen, HUD at the bottom. The page itself never
-   scrolls — the content area scrolls internally, and the HUD stays
-   on screen so the user can always change the page or the mode.   */
-/* ------------------------------------------------------------------ */
-body.app-shell { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
-body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
-.mode-banner { background: #1a2030; border: 1px solid #2b3446; border-radius: 999px; padding: 8px 14px; font-size: 14px; margin: 4px 0 10px; display: inline-block; }
-.mode-banner strong { color: #4ade80; }
-
-/* HUD: bottom navigation bar + mode switch. */
-.hud { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; align-items: center; justify-content: space-around; gap: 2px; background: #11151f; border-top: 1px solid #232a38; padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
-.hud-item { display: flex; flex-direction: column; align-items: center; gap: 1px; color: #9aa7b8; text-decoration: none; font-size: 11px; padding: 4px 8px; border-radius: 8px; }
-.hud-item span { font-size: 11px; }
-.hud-item.active { color: #4ade80; font-weight: 700; }
-.hud-mode { margin: 0; }
-.hud-switch { padding: 2px; }
-.hud-switch .mode-opt { padding: 6px 9px; }
-
-/* Coins list: one tappable row per coin. */
-.coin-list { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; }
-.coin-row { display: flex; align-items: center; gap: 10px; padding: 11px 10px; background: #141926; border: 1px solid #232a38; border-radius: 10px; color: #e8ecf1; text-decoration: none; }
-.coin-row:active { background: #1c2333; }
-.coin-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.coin-price { flex: 0 0 auto; font-weight: 700; }
-.coin-pnl { flex: 0 0 74px; text-align: right; font-weight: 700; }
-
-/* Overlays: mode chooser + coin popup (bottom sheet). */
-.overlay { position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .72); display: flex; align-items: flex-end; justify-content: center; }
-.chooser-card { width: 100%; max-width: 480px; max-height: 92dvh; overflow-y: auto; background: #160b08; border: 2px solid #ffb300; border-radius: 16px 16px 0 0; padding: 18px 16px 28px; text-align: center; box-shadow: 0 0 24px rgba(255, 120, 0, .3); }
-.chooser-logo { font-size: 44px; margin: 6px 0 2px; }
-.chooser-btn { width: 100%; margin-top: 10px; }
-.chooser-btn.real { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border: 2px solid #ffcf3d; }
-.coin-popup { width: 100%; max-width: 480px; max-height: 92dvh; overflow-y: auto; background: #141926; border: 1px solid #2b3446; border-bottom: none; border-radius: 16px 16px 0 0; padding: 12px 16px 28px; }
-.popup-head { text-align: right; margin: 0; }
-.popup-close { color: #9aa7b8; text-decoration: none; font-size: 20px; padding: 6px 10px; }
-.popup-actions h3 { margin: 18px 0 6px; }
-.popup-actions label { margin: 8px 0; }
-
-/* Platform wallet rows (bot form + wallet page). */
-.platform-row { border-top: 1px solid #232a38; padding: 10px 0; }
-.platform-row:first-of-type { border-top: none; }

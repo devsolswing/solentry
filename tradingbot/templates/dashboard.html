@@ -1,7 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Coins — SolEntry{% endblock %}
 {% block content %}
-<p class="mode-banner"><strong>{{ mode_label }}</strong>{% if mode == 'paper' %} · ${{ "%.2f"|format(paper_cash) }} cash · Holdings ${{ "%.2f"|format(holdings_value) }}{% else %} · {% if real_sol is not none %}{{ "%.4f"|format(real_sol) }} SOL{% else %}Balance unavailable{% endif %}{% endif %}</p>
+<div class="card portfolio-head">
+  <p class="portfolio-mode"><strong>{{ mode_label }}</strong></p>
+  <p class="portfolio-total">{% if mode == 'paper' %}${{ "%.2f"|format(portfolio_usd) }}{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "%.2f"|format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable{% endif %}{% endif %}</p>
+  <p class="muted small">{% if mode == 'paper' %}${{ "%.2f"|format(paper_cash) }} cash · Holdings ${{ "%.2f"|format(holdings_value) }}{% else %}Your app wallet, on-chain (devnet){% endif %}</p>
+  <div class="portfolio-chart">
+    {% if portfolio_has_data %}{{ portfolio_chart_svg|safe }}{% else %}<p class="muted small">No chart data yet — your portfolio chart builds as you trade.</p>{% endif %}
+  </div>
+</div>
 {% if support_id %}<p class="muted small">Your signing bot — Support ID: <b>{{ support_id }}</b> (for tech support — this ID cannot be changed)</p>{% endif %}
 
 <h1>Coins</h1>
@@ -10,6 +17,7 @@
   <a class="coin-row" href="{{ url_for('coin_popup', coin_id=row.coin_id) }}">
     <span class="coin-name"><strong>{{ row.name }}</strong><span class="muted small"> {{ row.ticker }}</span></span>
     <span class="coin-price">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span>
+    <span class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
     <span class="coin-pnl">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
   </a>
   {% endfor %}
@@ -85,10 +93,22 @@
     <h2>{{ popup_coin.name }} <span class="muted">({{ popup_coin.ticker }})</span></h2>
     <p class="muted small">{{ mode_label }}</p>
     <p class="big-num">{% if popup_coin.price is not none %}${{ "%.4f"|format(popup_coin.price) }}{% else %}Price unavailable{% endif %}</p>
+    <p class="muted small">{% if popup_coin.change_24h is not none %}24h <span class="{{ 'up' if popup_coin.change_24h >= 0 else 'down' }}">{% if popup_coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(popup_coin.change_24h) }}%</span>{% else %}24h change unavailable{% endif %}</p>
     <p>{% if popup_coin.held > 0 %}You hold <strong>{{ "%.4f"|format(popup_coin.held) }}</strong>{% if popup_coin.avg_price is not none %} at avg ${{ "%.4f"|format(popup_coin.avg_price) }}{% endif %}{% if popup_coin.pnl is not none %} · P&amp;L <strong>{% if popup_coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(popup_coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 
     <div class="popup-actions">
-      <h3>Buy</h3>
+      {# Trade ticket: one Buy/Sell switch over the same buy and sell
+         forms as before (same actions, same fields, same endpoints).
+         CSS-only radio switch — no JavaScript, so it works in any
+         in-app browser. #}
+      <div class="trade-ticket">
+        <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-buy" checked>
+        <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-sell">
+        <div class="ticket-switch">
+          <label for="ticket-buy">Buy</label>
+          <label for="ticket-sell">Sell</label>
+        </div>
+        <div class="ticket-panel ticket-buy-panel">
       {% if mode == 'paper' %}
       <form method="post" action="{{ url_for('coin_buy', coin_id=popup_coin.coin_id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -115,8 +135,8 @@
       </form>
       <p class="muted small">Buys on pump.fun (devnet), signed by your signing bot, within the bot's limits. If the coin is not a live pump.fun token, the buy is refused plainly and nothing is placed.</p>
       {% endif %}
-
-      <h3>Sell</h3>
+        </div>
+        <div class="ticket-panel ticket-sell-panel">
       {% if mode == 'paper' %}
       <form method="post" action="{{ url_for('coin_sell', coin_id=popup_coin.coin_id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -137,6 +157,8 @@
       </form>
       <p class="muted small">Sells only the part you hold by hand. Coins a bot is managing are sold by that bot's rules.</p>
       {% endif %}
+        </div>
+      </div>
 
       <h3>Send</h3>
       {% if popup_coin.coin_id == 'SOL' %}

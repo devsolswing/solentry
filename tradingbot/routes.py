@@ -309,6 +309,8 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
             pnl = (float(price) - float(h["avg_price"])) * float(h["amount"])
         rows.append({"coin_id": symbol, "name": info["name"],
                      "ticker": symbol, "price": price,
+                     "change_24h": prices["prices"].get(symbol, {}).get(
+                         "change_24h"),
                      "held": float(h["amount"]) if h else 0.0,
                      "avg_price": float(h["avg_price"]) if h else None,
                      "pnl": pnl, "is_mint": False})
@@ -323,7 +325,8 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
         rows.append({"coin_id": mint,
                      "name": "Pump.fun token " + mint[:4] + "…" + mint[-4:],
                      "ticker": mint[:4] + "…",
-                     "price": price, "held": float(h["amount"]),
+                     "price": price, "change_24h": None,
+                     "held": float(h["amount"]),
                      "avg_price": float(h["avg_price"]),
                      "pnl": pnl, "is_mint": True})
     return rows
@@ -960,6 +963,26 @@ def register_routes(app: Flask) -> None:
         coin_rows = _coin_rows(db, user["id"], mode, prices)
         holdings_value = sum(r["held"] * (r["price"] or 0.0)
                              for r in coin_rows)
+        # Portfolio header (Kraken-style): total balance + chart from
+        # recorded snapshots only — never invented history. Paper
+        # totals cash + holdings in USD; real totals the on-chain SOL
+        # balance (with a USD approx. when SOL has a price).
+        sol_price = prices["prices"].get("SOL", {}).get("price")
+        if mode == "devnet":
+            portfolio_sol = real_sol
+            portfolio_usd = (real_sol * sol_price
+                             if real_sol is not None and sol_price
+                             else None)
+            _points, portfolio_has_data = pnl_mod.chart_points_real(
+                db, user["id"], "all")
+            portfolio_chart_svg = pnl_mod.chart_svg(
+                _points, unit="SOL ")
+        else:
+            portfolio_sol = None
+            portfolio_usd = _paper(app, user["id"]) + holdings_value
+            _points, portfolio_has_data = pnl_mod.chart_points(
+                db, user["id"], "all")
+            portfolio_chart_svg = pnl_mod.chart_svg(_points)
         bots = db.execute(
             "SELECT * FROM bots WHERE user_id = ? AND mode = ? "
             "ORDER BY id DESC",
@@ -975,6 +998,10 @@ def register_routes(app: Flask) -> None:
                 "bots": bots, "activity": activity,
                 "coin_rows": coin_rows, "mode": mode,
                 "mode_label": _mode_label(mode),
+                "portfolio_sol": portfolio_sol,
+                "portfolio_usd": portfolio_usd,
+                "portfolio_chart_svg": portfolio_chart_svg,
+                "portfolio_has_data": portfolio_has_data,
                 "show_mode_chooser": not session.get("mode_chosen"),
                 "support_id": signing_bot["support_id"]
                 if signing_bot else "",
@@ -1068,6 +1095,8 @@ def register_routes(app: Flask) -> None:
                    "ticker": coin_id_resolved if info else
                    coin_id_resolved[:4] + "…",
                    "price": price, "held": 0.0, "avg_price": None,
+                   "change_24h": prices["prices"].get(
+                       coin_id_resolved, {}).get("change_24h"),
                    "pnl": None, "is_mint": coin_id_resolved not in COINS}
         data = _dashboard_data(app, user, popup_coin=row)
         return render_template("dashboard.html", **data)
