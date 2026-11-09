@@ -23,8 +23,22 @@ Schema (version 1):
       "sell_ladder": [{"pct_of_position": 10, "profit_pct": 3},
                       {"pct_of_position": 90, "profit_pct": 10}],
       "trailing_stop_pct": 7.0,
+      "rug_sell": {"drop_pct": 15.0, "window_seconds": 60,
+                   "drop_5m_pct": 25.0},
       "max_new_positions_per_scan": 1,
     }
+
+  * rug_sell is the fast-drop exit: sell ALL immediately when the
+    price collapses — either a drop of drop_pct (default 15%) since
+    the last recorded price mark, where the mark is at most
+    window_seconds old (60 or 300), or a fall of drop_5m_pct
+    (default 25%) in the feed's 5-minute change. It is checked
+    FIRST in the position evaluation, before the stop loss, trailing
+    stop and sell ladder, so it fires on the same scan that sees the
+    collapse. It is PRICE-based: the feed (DexScreener) cannot see
+    the token creator's wallet, so a dev selling shows up only as
+    the price falling — the rule triggers on that fall, never on a
+    faked "dev sold" signal.
 
   * kind "trenches": scan pump.fun / PumpSwap new tokens through the
     DexScreener feed (trenches.py). kind "signals": the bot's own coin
@@ -66,8 +80,19 @@ LIMIT_FIELDS = (
 
 _TOP_LEVEL_KEYS = (
     "version", "kind", "scan_sources", "scan_interval_seconds", "buy",
-    "sell_ladder", "trailing_stop_pct", "max_new_positions_per_scan",
+    "sell_ladder", "trailing_stop_pct", "rug_sell",
+    "max_new_positions_per_scan",
 )
+
+# Rug-sell defaults (see the module docstring): sell everything on a
+# 15% drop in about a minute, or a 25% fall in 5 minutes. The windows
+# are the only ones the data supports: 60 seconds is one scan apart
+# (the price-mark comparison) and 300 seconds is the feed's 5-minute
+# change.
+RUG_SELL_DEFAULT = {"drop_pct": 15.0, "window_seconds": 60,
+                    "drop_5m_pct": 25.0}
+RUG_SELL_KEYS = ("drop_pct", "window_seconds", "drop_5m_pct")
+RUG_WINDOWS = (60, 300)
 
 TRENCHES_CATEGORY = "Memecoin build"
 TRENCHES_PRESET_NAME = "Trenches"
@@ -75,7 +100,10 @@ TRENCHES_PRESET_NAME = "Trenches"
 # James's spec, exactly: scan the trenches every minute; buy a coin
 # gaining 3.4% in a 5-minute window (strongest gainer wins); sell 10%
 # at +3% profit, the rest at +10%; sell all at 7% below the peak.
-# No market-cap filter: a trending coin qualifies at any market cap.
+# Rug sell on by default: sell everything on a 15% drop in about a
+# minute, or a 25% fall in 5 minutes — the fast-drop exit that gets
+# out before a dev rug finishes. No market-cap filter: a trending
+# coin qualifies at any market cap.
 TRENCHES_RULES = {
     "version": 1,
     "kind": "trenches",
@@ -86,6 +114,7 @@ TRENCHES_RULES = {
     "sell_ladder": [{"pct_of_position": 10, "profit_pct": 3},
                     {"pct_of_position": 90, "profit_pct": 10}],
     "trailing_stop_pct": 7.0,
+    "rug_sell": dict(RUG_SELL_DEFAULT),
     "max_new_positions_per_scan": 1,
 }
 
@@ -202,6 +231,34 @@ def validate_ruleset(raw, bot=None):
     if not _is_number(trailing) or not 0.5 <= float(trailing) <= 50:
         return _fail("Trailing stop must be between 0.5% and 50% below "
                      "the highest price since holding.")
+    rug = raw.get("rug_sell")
+    clean_rug = None
+    if rug is not None:
+        if not isinstance(rug, dict):
+            return _fail("The rug sell rule must be a set of settings "
+                         "(drop %, window, 5-minute drop %).")
+        for key in rug:
+            if key in LIMIT_FIELDS:
+                return _fail(f"'{key}' is a bot limit, not a rule.")
+            if key not in RUG_SELL_KEYS:
+                return _fail(f"Unknown rug sell setting '{key}'.")
+        drop = rug.get("drop_pct", RUG_SELL_DEFAULT["drop_pct"])
+        if not _is_number(drop) or not 1 <= float(drop) <= 90:
+            return _fail("The rug sell drop must be between 1% and 90%.")
+        rug_window = rug.get("window_seconds",
+                             RUG_SELL_DEFAULT["window_seconds"])
+        if not isinstance(rug_window, int) \
+                or isinstance(rug_window, bool) \
+                or rug_window not in RUG_WINDOWS:
+            return _fail("The rug sell window must be 1 minute or "
+                         "5 minutes — those are the windows the price "
+                         "data supports.")
+        drop_5m = rug.get("drop_5m_pct", RUG_SELL_DEFAULT["drop_5m_pct"])
+        if not _is_number(drop_5m) or not 1 <= float(drop_5m) <= 90:
+            return _fail("The rug sell 5-minute drop must be between "
+                         "1% and 90%.")
+        clean_rug = {"drop_pct": float(drop), "window_seconds": rug_window,
+                     "drop_5m_pct": float(drop_5m)}
     max_new = raw.get("max_new_positions_per_scan", 1)
     if not isinstance(max_new, int) or isinstance(max_new, bool) \
             or not 1 <= max_new <= 5:
@@ -217,6 +274,7 @@ def validate_ruleset(raw, bot=None):
                 "pick": "strongest"},
         "sell_ladder": clean_ladder,
         "trailing_stop_pct": float(trailing),
+        "rug_sell": clean_rug,
         "max_new_positions_per_scan": max_new,
     }
     return cleaned, None
@@ -276,6 +334,16 @@ def summarize_rules(rules) -> str:
         f"Sell everything if the price falls "
         f"{rules['trailing_stop_pct']}% below the highest price since "
         f"holding.")
+    rug = rules.get("rug_sell")
+    if rug:
+        window_words = _window_words(rug["window_seconds"])
+        lines.append(
+            f"Rug sell: sell everything if the price drops "
+            f"{rug['drop_pct']:.0f}% in {window_words}, or falls "
+            f"{rug['drop_5m_pct']:.0f}% in 5 minutes. This is "
+            f"price-based — the feed cannot see the dev's wallet, so "
+            f"it triggers on the price falling, not on the dev "
+            f"selling.")
     lines.append(
         f"At most {rules['max_new_positions_per_scan']} new position(s) "
         f"per scan.")

@@ -33,6 +33,13 @@ CAPABILITIES = (
     "them or its limits)\n"
     "- \"show rules for <bot>\" — what rules a bot follows right now\n"
     "- \"remove rules for <bot>\" — back to the standard signals\n"
+    "- \"sell everything if the dev starts selling\" — add a rug sell "
+    "rule to a bot: it dumps the whole position on a fast price drop "
+    "(15% in a minute or 25% in 5 minutes). The feed cannot see the "
+    "dev's wallet, so it triggers on the price falling, not on the "
+    "dev selling. I show it back and ask you to confirm first\n"
+    "- \"sell if the price drops 15% in a minute\" — set the rug sell "
+    "drop and window yourself\n"
     "- \"turn on silent trading for <bot>\" — the bot trades on its own "
     "within your limits (I ask first); \"turn it off\" stops it at once\n"
     "- \"is silent trading on\" — which bots are silent right now\n"
@@ -73,6 +80,68 @@ _WINDOW_WORDS = {"min": 1, "mins": 1, "minute": 1, "minutes": 1,
                  "day": 1440, "days": 1440}
 
 
+def _extract_bot_name(raw: str):
+    """Bot name from "bot <name>" up to the next keyword, or
+    "for <name>"."""
+    nm = re.search(
+        r"\bbot\s+(?:named\s+)?([A-Za-z0-9_\- ]+?)"
+        r"(?:\s+(?:scan|set|rules|buy|sell|,\s)|$)", raw, re.IGNORECASE)
+    if nm:
+        return nm.group(1).strip()
+    fm = re.search(r"\bfor\s+(?:bot\s+)?([A-Za-z0-9_\- ]+?)\s*$",
+                   raw, re.IGNORECASE)
+    if fm:
+        return fm.group(1).strip()
+    return None
+
+
+def _parse_rug(msg: str, raw: str):
+    """Parse a rug-sell instruction into (rug, bot_name, error).
+
+    Returns (None, None, None) when the message carries no rug
+    instruction; (rug, bot_name, None) when it does; (None, None,
+    error) when the instruction names a window the data cannot
+    support. A rug instruction is one of:
+      * the dev selling: "sell everything if the dev starts
+        selling" / "if the creator dumps" — the dev's wallet is NOT
+        visible in the feed, so this maps to the price-based fast
+        drop with the default thresholds.
+      * a rug rule: "add a rug rule (to bot X)" / "rug protection".
+      * a fast drop: "sell if the price drops 15% in a minute" /
+        "sell everything if it falls 25% in 5 minutes".
+    """
+    drop = None
+    window_seconds = None
+    dm = re.search(
+        r"(?:drop|drops|fall|falls|decline|declines|down)\s+"
+        r"(?:by\s+)?([\d.]+)\s*%\s*(?:in|over|within)?\s*"
+        r"(?:(?:(\d+)|a|an)\s+)?(min|mins|minute|minutes|hour|hours)\b",
+        msg)
+    if dm:
+        drop = float(dm.group(1))
+        n = int(dm.group(2)) if dm.group(2) else 1
+        window_seconds = n * _WINDOW_WORDS[dm.group(3)] * 60
+        if window_seconds not in (60, 300):
+            return (None, None,
+                    "A rug sell can only watch a 1-minute or a "
+                    "5-minute drop — those are the windows the price "
+                    "data supports. Nothing was changed; try again "
+                    "with one of those windows.")
+    dev_sell = re.search(
+        r"\b(dev|developer|creator)\b[^.]{0,50}\b(sell|sells|selling|"
+        r"dump|dumps|dumping|rug|rugs|pull|pulls|exit|exits)\b", msg)
+    rug_word = re.search(
+        r"(\brug\b[^.]{0,30}\b(sell|rule|protection|exit)\b"
+        r"|\b(sell|add|set|turn on)\b[^.]{0,30}\brug\b)", msg)
+    if drop is None and not dev_sell and not rug_word:
+        return (None, None, None)
+    rug = {"drop_pct": drop if drop is not None else 15.0,
+           "window_seconds": window_seconds
+           if window_seconds is not None else 60,
+           "drop_5m_pct": 25.0}
+    return (rug, _extract_bot_name(raw), None)
+
+
 def _parse_rules_command(msg: str, raw: str):
     """Parse a plain-language rules instruction into a partial rule set.
 
@@ -82,6 +151,13 @@ def _parse_rules_command(msg: str, raw: str):
     partial rule set may leave trailing_stop_pct as None — the route
     fills it from the bot's own stop loss before validating.
     """
+    # A rug instruction on its own ("sell everything if the dev
+    # starts selling") carries no buy signal: it is a change to a
+    # bot's existing rules, handled by the rules_rug intent — not a
+    # fresh rule set.
+    rug, rug_bot, rug_err = _parse_rug(msg, raw)
+    if rug_err:
+        return ("unsupported", rug_err)
     # Buy pattern, two shapes:
     #   "gains 5% in 5 minutes" / "up 3.4% in 5 min"
     #   "gaining in a 5 min window by 5%"
@@ -98,6 +174,8 @@ def _parse_rules_command(msg: str, raw: str):
             r"(min|mins|minute|minutes|hour|hours|h|day|days)\s*"
             r"(?:window\s*)?(?:by\s+)?([\d.]+)\s*%", msg)
         if not buy2:
+            if rug is not None:
+                return ("rug_only", rug_bot, rug)
             return None
         window_minutes = int(buy2.group(1)) * _WINDOW_WORDS[buy2.group(2)]
         threshold = float(buy2.group(3))
@@ -110,17 +188,7 @@ def _parse_rules_command(msg: str, raw: str):
                 "those windows.")
 
     # Bot name: "bot <name>" up to the next keyword, or "for <name>".
-    bot_name = None
-    nm = re.search(
-        r"\bbot\s+(?:named\s+)?([A-Za-z0-9_\- ]+?)"
-        r"(?:\s+(?:scan|set|rules|buy|sell|,\s)|$)", raw, re.IGNORECASE)
-    if nm:
-        bot_name = nm.group(1).strip()
-    else:
-        fm = re.search(r"\bfor\s+(?:bot\s+)?([A-Za-z0-9_\- ]+?)\s*$",
-                       raw, re.IGNORECASE)
-        if fm:
-            bot_name = fm.group(1).strip()
+    bot_name = _extract_bot_name(raw)
 
     sources = []
     if "pump.fun" in msg or "pump fun" in msg:
@@ -183,6 +251,7 @@ def _parse_rules_command(msg: str, raw: str):
                 "threshold_pct": threshold, "pick": "strongest"},
         "sell_ladder": ladder,
         "trailing_stop_pct": trailing,
+        "rug_sell": rug,
         "max_new_positions_per_scan": 1,
     }
     return partial, bot_name
@@ -272,8 +341,14 @@ def parse_message(text: str) -> dict:
     # Bot rules: "bot Luna scan pump.fun and pumpswap, buy when a coin
     # gains 5% in 5 minutes" / "set rules for bot Luna ...". The parser
     # only proposes — the route shows the rules back and asks for a
-    # confirmation before anything is stored.
+    # confirmation before anything is stored. A rug instruction on its
+    # own ("sell everything if the dev starts selling") is a change
+    # to a bot's existing rules, not a fresh rule set.
     parsed_rules = _parse_rules_command(msg, raw)
+    if isinstance(parsed_rules, tuple) and len(parsed_rules) == 3 \
+            and parsed_rules[0] == "rug_only":
+        return {"intent": "rules_rug", "bot_name": parsed_rules[1],
+                "rug": parsed_rules[2], "reply": ""}
     if isinstance(parsed_rules, tuple) and len(parsed_rules) == 2 \
             and parsed_rules[0] == "unsupported":
         return {"intent": "rules_unsupported",

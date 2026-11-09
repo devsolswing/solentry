@@ -202,7 +202,15 @@ class TestRulesParser(unittest.TestCase):
         self.assertEqual(p["intent"], "rules_propose")
         cleaned, err = validate_ruleset(p["rules"])
         self.assertIsNone(err)
-        self.assertEqual(cleaned, trenches_ruleset())
+        # The spec text predates the rug rule and does not mention
+        # one, so parsing it yields the preset without a rug trigger
+        # — a command that does not ask for a rug rule does not
+        # invent one. (The preset itself carries the rug rule on by
+        # default; see test_trenches_preset_carries_rug_sell.)
+        expected = trenches_ruleset()
+        expected["rug_sell"] = None
+        self.assertEqual(cleaned, expected)
+        self.assertIsNone(cleaned["rug_sell"])
         self.assertIn("3.4%", summarize_rules(cleaned))
         self.assertIn("10%", summarize_rules(cleaned))
 

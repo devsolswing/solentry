@@ -304,6 +304,11 @@ _MIGRATIONS = (
     ("bot_positions", "peak_price", "REAL"),
     ("bot_positions", "orig_amount", "REAL"),
     ("bot_positions", "ladder_stage", "INTEGER NOT NULL DEFAULT 0"),
+    # The last price the loop saw for a position, and when (rug sell:
+    # the fast-drop exit compares the current price against this mark,
+    # so a collapse between two scans is caught on the next one).
+    ("bot_positions", "last_price", "REAL"),
+    ("bot_positions", "last_price_at", "TEXT NOT NULL DEFAULT ''"),
     # The user's pump.fun trading wallet: pump.fun has no separate
     # accounts, so trading on pump.fun uses the linked Solana wallet —
     # the per-user app wallet, recorded here at signup.

@@ -119,9 +119,10 @@ def _open_position(db: sqlite3.Connection, bot, coin: str, amount: float,
         db.execute(
             "INSERT INTO bot_positions (user_id, bot_id, coin_id, amount, "
             "avg_price, mode, opened_at, peak_price, orig_amount, "
-            "ladder_stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            "ladder_stage, last_price, last_price_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
             (bot["user_id"], bot["id"], coin, amount, price,
-             bot["mode"], _now(), price, amount))
+             bot["mode"], _now(), price, amount, price, _now()))
     db.commit()
 
 
@@ -329,6 +330,52 @@ def _parse_scan_time(value) -> float | None:
         return None
 
 
+def _rug_window_words(window_seconds: int) -> str:
+    return {60: "about a minute", 300: "5 minutes"}.get(
+        window_seconds, f"{window_seconds} seconds")
+
+
+def _rug_reason(rug: dict, kind: str, coin: str, price: float,
+                pos, price_map: dict | None, now_ts: float) -> str | None:
+    """The rug sell check, run on every price update for an open
+    position — before the stop loss, trailing stop and sell ladder,
+    so a collapse exits on the same scan that sees it.
+
+    Two triggers, either one sells everything:
+      * feed 5-minute change (trenches only — CoinGecko has no 5m
+        change): the feed's change_5m_pct at or below -drop_5m_pct.
+      * fast drop since the last recorded price mark: the price fell
+        drop_pct or more and the mark is at most window_seconds old
+        (plus 30 seconds of scheduling jitter — scans run about a
+        minute apart, so a mark a few seconds stale is still a
+        one-minute drop).
+    Returns the plain-words reason, or None when nothing fired. This
+    is PRICE-based: the feed cannot see the token creator's wallet,
+    so a dev selling is only visible as the price falling — the rule
+    triggers on that fall, never on a faked "dev sold" signal.
+    """
+    drop_5m = float(rug["drop_5m_pct"])
+    if kind == "trenches" and price_map:
+        entry = price_map.get(coin) or {}
+        change_5m = entry.get("change_5m_pct")
+        if change_5m is not None and float(change_5m) <= -drop_5m:
+            return (f"rug sell: price fell {abs(float(change_5m)):.1f}% "
+                    f"in 5 minutes")
+    last_price = pos["last_price"] if "last_price" in pos.keys() else None
+    last_at = pos["last_price_at"] if "last_price_at" in pos.keys() else None
+    if last_price is not None and float(last_price) > 0:
+        age = None
+        if last_at:
+            parsed = _parse_scan_time(last_at)
+            age = now_ts - parsed if parsed is not None else None
+        if age is not None and age <= int(rug["window_seconds"]) + 30:
+            drop = (float(last_price) - price) / float(last_price) * 100.0
+            if drop >= float(rug["drop_pct"]):
+                return (f"rug sell: price fell {drop:.1f}% in "
+                        f"{_rug_window_words(int(rug['window_seconds']))}")
+    return None
+
+
 def _gte(a: float, b: float) -> bool:
     """a >= b with a 1e-9 relative tolerance — prices are floats and a
     target computed as avg_price * 1.10 can sit one ulp above the
@@ -398,7 +445,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     trailing_pct = float(rules["trailing_stop_pct"])
     ladder = rules["sell_ladder"]
 
-    # 1. Open positions: hard stop loss, trailing stop, sell ladder.
+    # 1. Open positions: rug sell first, then hard stop loss,
+    # trailing stop, sell ladder.
     for coin, pos in list(_positions(db, bot["id"]).items()):
         price = _price_for(coin)
         if price is None:
@@ -408,6 +456,22 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             actions.append({"action": "skip", "coin": coin,
                             "reason": "no price data"})
             continue
+        # 0. Rug sell, checked FIRST on every price update: a fast
+        # collapse sells everything on this scan, before the stop
+        # loss, trailing stop or ladder get a say. The price mark is
+        # refreshed here so the next scan compares against this one.
+        rug = rules.get("rug_sell")
+        if rug:
+            reason = _rug_reason(rug, kind, coin, price, pos, price_map,
+                                 now_ts)
+            if reason:
+                _sell_position(db, cfg, bot, coin, price, reason,
+                               rpc_factory, real_executor, actions)
+                continue
+            db.execute("UPDATE bot_positions SET last_price = ?, "
+                       "last_price_at = ? WHERE bot_id = ? AND coin_id = ?",
+                       (price, _now(), bot["id"], coin))
+            db.commit()
         avg_price = float(pos["avg_price"])
         peak = pos["peak_price"]
         peak = float(peak) if peak is not None else avg_price

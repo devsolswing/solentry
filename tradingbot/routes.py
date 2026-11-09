@@ -47,8 +47,9 @@ from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, get_prices
-from .rules import (TRENCHES_CATEGORY, TRENCHES_PRESET_NAME, load_rules,
-                    summarize_rules, trenches_ruleset, validate_ruleset)
+from .rules import (RUG_SELL_DEFAULT, TRENCHES_CATEGORY,
+                    TRENCHES_PRESET_NAME, load_rules, summarize_rules,
+                    trenches_ruleset, validate_ruleset)
 from .security import (encrypt_secret, hash_password, hash_token,
                        new_csrf_token, new_token, temporary_secret,
                        verify_password, verify_turnstile, wipe_secret)
@@ -2765,6 +2766,56 @@ def register_routes(app: Flask) -> None:
             if err:
                 return jsonify({"reply":
                     f"I can't use those rules: {err} Nothing was changed."})
+            summary = summarize_rules(cleaned)
+            session["pending_rules"] = {"bot_id": bot["id"],
+                                        "rules": cleaned}
+            return jsonify({"reply":
+                f"Here is what I understood for bot '{bot['name']}':\n"
+                f"{summary}\n\n"
+                f"The bot will only trade inside these rules, and never "
+                f"outside its limits (buy size {bot['buy_size_pct']}%, "
+                f"stop loss {bot['stop_loss_pct']}%, max "
+                f"{bot['max_open_trades']} open trades, never more than "
+                f"your balance). Reply \"yes\" to apply them, or \"no\" "
+                f"to leave the bot as it is."})
+
+        if intent == "rules_rug":
+            db = _db(app)
+            bot_name = parsed.get("bot_name")
+            if not bot_name:
+                return jsonify({"reply":
+                    "Which bot should get the rug sell rule? Say "
+                    "\"sell everything if the dev starts selling for "
+                    "<bot name>\" — or \"show my bots\" to see them."})
+            bot = _find_bot_by_name(db, user["id"], bot_name)
+            if not bot:
+                return jsonify({"reply":
+                    f"I couldn't find a bot called '{bot_name}'. "
+                    f"Say \"show my bots\" to see them."})
+            rules, rules_err = load_rules(bot)
+            if rules_err:
+                return jsonify({"reply":
+                    f"Bot '{bot['name']}' has stored rules I can't "
+                    f"read ({rules_err}) — it makes no trades until "
+                    f"they are fixed. Ask me to set new rules, or "
+                    f"remove them."})
+            if rules is None:
+                return jsonify({"reply":
+                    f"Bot '{bot['name']}' has no custom rules yet — "
+                    f"it uses the standard signals. Set its trading "
+                    f"rules first (for example: \"bot {bot['name']} "
+                    f"scan pump.fun, buy when a coin gains 5% in 5 "
+                    f"minutes\"), then add the rug sell rule. Nothing "
+                    f"was changed."})
+            merged = json.loads(json.dumps(rules))
+            rug = dict(RUG_SELL_DEFAULT)
+            rug.update(parsed.get("rug") or {})
+            merged["rug_sell"] = rug
+            cleaned, err = validate_ruleset(merged, bot=bot)
+            if err:
+                return jsonify({"reply":
+                    f"I can't use that rug rule: {err} Nothing was "
+                    f"changed."})
             summary = summarize_rules(cleaned)
             session["pending_rules"] = {"bot_id": bot["id"],
                                         "rules": cleaned}
