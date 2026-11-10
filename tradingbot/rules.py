@@ -26,6 +26,9 @@ Schema (version 1):
       "rug_sell": {"drop_pct": 15.0, "window_seconds": 60,
                    "drop_5m_pct": 25.0},
       "top10_rug": {"drop_pct": 10.0},
+      "trending_ladder": [{"pct_of_position": 10, "profit_pct": 26}],
+      "regime": {"volume_surge_x": 2.0, "require_buy_dominance": True,
+                 "require_h1_gain": True},
       "max_new_positions_per_scan": 1,
     }
 
@@ -48,11 +51,26 @@ Schema (version 1):
     gainers, buy a coin gaining 5% in 3 minutes (strongest gainer
     wins), tracked from price marks the loop records itself
     (scanner.py), because the feed only provides 5-minute changes.
-    A scanner has no sell ladder by default — it exits on the rug
-    sense, the trailing stop and the stop loss. Its top10_rug watches
-    the top 10 holders of every held coin through Solana RPC
-    getTokenLargestAccounts: a 10% drop in their combined holdings
-    from the peak since holding sells everything, proceeds in SOL.
+    Its sell_ladder is the SLOW-market ladder (25% at +3%, +10%,
+    +25%, the rest at +50%) and trending_ladder is the
+    TRENDING-market ladder (10% at +26%, +50%, +100%, +500%,
+    +1000%, the rest at +10000%) — the regime (see below) picks
+    which ladder a position follows on each scan. The 7% trailing
+    stop from the peak stays as the runner's profit lock, and the
+    stop loss (7% below the buy price, the bot's own limit) and the
+    rug sell still fire regardless of cost — a bad coin is cut at a
+    small loss. Its top10_rug watches the top 10 holders of every
+    held coin through Solana RPC getTokenLargestAccounts: a 10%
+    drop in their combined holdings from the peak since holding
+    sells everything, proceeds in SOL.
+  * regime (scanner only): what counts as a TRENDING market, judged
+    from the DexScreener feed — the app has NO social-media feed.
+    Trending needs the 5-minute volume at least volume_surge_x
+    times the average 5-minute pace of the last hour, buys
+    outnumbering sells in the last 5 minutes, and a positive
+    1-hour change (each requirement can be switched off). Any
+    missing data means SLOW — the slow ladder takes profits early
+    rather than holding on a guess.
   * buy.metric must match buy.window_seconds: 180 -> gain_3m_pct
     (scanner only, computed from recorded marks), 300 -> gain_5m_pct,
     3600 -> gain_1h_pct, 21600 -> gain_6h_pct, 86400 -> gain_24h_pct.
@@ -60,7 +78,13 @@ Schema (version 1):
     3-minute window the scanner computes itself.
   * sell_ladder rungs are % of the ORIGINAL position amount, executed
     in order as profit rises; rung profit thresholds must strictly
-    increase and the rung sizes must sum to <= 100.
+    increase and the rung sizes must sum to <= 100. A scanner's
+    sell_ladder is its slow-market ladder (up to 4 rungs) and
+    trending_ladder its trending-market ladder (up to 6 rungs,
+    profit targets up to +10000%); the loop tracks how much of the
+    position is already sold and fires the next rung of whichever
+    ladder the regime picks, so a regime flip mid-position never
+    re-sells a slice or loses track.
   * trailing_stop_pct sells ALL when the price falls that far below
     the highest price since the position opened. The bot's own stop
     loss % is still enforced separately as a hard stop.
@@ -70,6 +94,8 @@ from __future__ import annotations
 
 import copy
 import json
+
+from .scanner import REGIME_DEFAULT, SLOW_LADDER, TRENDING_LADDER
 
 RULE_VERSION = 1
 RULE_KINDS = ("trenches", "signals", "scanner")
@@ -97,7 +123,7 @@ LIMIT_FIELDS = (
 _TOP_LEVEL_KEYS = (
     "version", "kind", "scan_sources", "scan_interval_seconds", "buy",
     "sell_ladder", "trailing_stop_pct", "rug_sell", "top10_rug",
-    "max_new_positions_per_scan",
+    "trending_ladder", "regime", "max_new_positions_per_scan",
 )
 
 # Rug-sell defaults (see the module docstring): sell everything on a
@@ -157,10 +183,17 @@ SCANNER_BUY_GAIN_PCT = 5.0
 SCANNER_BUY_WINDOW_SECONDS = 180
 SCANNER_MAX_NEW_PER_SCAN = 1
 SCANNER_TOP10_DROP_PCT = 10.0
-# A scanner has no sell ladder: James's snipe only names the buy and
-# the rug exits. It exits on the top-10 dump sense, the fast-drop rug
-# sell, the trailing stop and the stop loss.
+# A scanner's profit ladders (James's spec): the slow-market ladder
+# secures a profit early (25% at +3%, +10%, +25%, the rest at
+# +50%); the trending-market ladder holds the runners (10% at
+# +26%, +50%, +100%, +500%, +1000%, the rest at +10000% or on the
+# trailing stop). The regime picks which ladder a position follows
+# on each scan. The stop loss (7% below the buy price, the bot's
+# own limit) and the rug sell still fire regardless of cost — a bad
+# coin is cut at a small loss.
 SCANNER_TRAILING_STOP_PCT = 7.0
+REGIME_KEYS = ("volume_surge_x", "require_buy_dominance",
+               "require_h1_gain")
 
 # James's spec, exactly: buy any coin gaining 5% in 3 minutes; scan
 # every 30 seconds for gainers and keep track of improving coins
@@ -169,7 +202,10 @@ SCANNER_TRAILING_STOP_PCT = 7.0
 # holdings drop 10% — the pump.fun sell pays out in SOL, so the
 # proceeds stay in SOL. The 3-minute gain is computed from price
 # marks the loop records itself (scanner.py) because the DexScreener
-# feed only provides 5-minute changes.
+# feed only provides 5-minute changes. Profit: slow market — 25% at
+# +3%, +10%, +25%, the rest at +50%; trending market — 10% at
+# +26%, +50%, +100%, +500%, +1000%, the rest at +10000% or on the
+# 7% trailing stop. A bad coin is cut at the 7% stop loss.
 SCANNER_RULES = {
     "version": 1,
     "kind": "scanner",
@@ -179,10 +215,12 @@ SCANNER_RULES = {
             "window_seconds": SCANNER_BUY_WINDOW_SECONDS,
             "threshold_pct": SCANNER_BUY_GAIN_PCT,
             "pick": "strongest"},
-    "sell_ladder": [],
+    "sell_ladder": [dict(r) for r in SLOW_LADDER],
     "trailing_stop_pct": SCANNER_TRAILING_STOP_PCT,
     "rug_sell": dict(RUG_SELL_DEFAULT),
     "top10_rug": {"drop_pct": SCANNER_TOP10_DROP_PCT},
+    "trending_ladder": [dict(r) for r in TRENDING_LADDER],
+    "regime": dict(REGIME_DEFAULT),
     "max_new_positions_per_scan": SCANNER_MAX_NEW_PER_SCAN,
 }
 
@@ -198,6 +236,44 @@ def _is_number(value) -> bool:
 
 def _fail(message: str):
     return None, message
+
+
+def _validate_ladder(ladder, label: str, max_rungs: int,
+                     max_profit: float):
+    """Validate one sell ladder. Returns (cleaned, None) or
+    (None, error). Rungs are % of the original position, profit
+    targets strictly increasing, sizes summing to at most 100."""
+    if not isinstance(ladder, list) or not 1 <= len(ladder) <= max_rungs:
+        return None, (f"A {label} ladder needs 1 to {max_rungs} "
+                      f"step{'s' if max_rungs > 1 else ''}.")
+    total_pct = 0
+    prev_profit = None
+    clean = []
+    for rung in ladder:
+        if not isinstance(rung, dict) \
+                or set(rung) != {"pct_of_position", "profit_pct"}:
+            return None, ("Each sell step needs exactly a % of the "
+                          "position and a % profit.")
+        pct = rung["pct_of_position"]
+        profit = rung["profit_pct"]
+        if not _is_number(pct) or not 1 <= float(pct) <= 100:
+            return None, ("Each sell step must sell between 1% and 100% "
+                          "of the position.")
+        if not _is_number(profit) or not 0.1 <= float(profit) <= max_profit:
+            return None, (f"Each sell step's profit target must be "
+                          f"between 0.1% and {max_profit:.0f}%.")
+        if prev_profit is not None and float(profit) <= prev_profit:
+            return None, ("Sell steps must rise in profit — a later step "
+                          "cannot trigger at a lower profit than an "
+                          "earlier one.")
+        prev_profit = float(profit)
+        total_pct += float(pct)
+        clean.append({"pct_of_position": float(pct),
+                      "profit_pct": float(profit)})
+    if total_pct > 100:
+        return None, ("Sell steps add up to more than 100% of the "
+                      "position — they cannot sell more than you hold.")
+    return clean, None
 
 
 def validate_ruleset(raw, bot=None):
@@ -270,38 +346,61 @@ def validate_ruleset(raw, bot=None):
         return _fail("Only 'strongest gainer wins' is supported for "
                      "picking between coins.")
     ladder = raw.get("sell_ladder")
-    min_rungs = 0 if kind == "scanner" else 1
-    if not isinstance(ladder, list) or not min_rungs <= len(ladder) <= 3:
-        return _fail("A sell ladder needs 1 to 3 steps (a scanner may "
-                     "have none — it exits on the rug sense, trailing "
-                     "stop and stop loss).")
-    total_pct = 0
-    prev_profit = None
-    clean_ladder = []
-    for rung in ladder:
-        if not isinstance(rung, dict) \
-                or set(rung) != {"pct_of_position", "profit_pct"}:
-            return _fail("Each sell step needs exactly a % of the "
-                         "position and a % profit.")
-        pct = rung["pct_of_position"]
-        profit = rung["profit_pct"]
-        if not _is_number(pct) or not 1 <= float(pct) <= 100:
-            return _fail("Each sell step must sell between 1% and 100% "
-                         "of the position.")
-        if not _is_number(profit) or not 0.1 <= float(profit) <= 1000:
-            return _fail("Each sell step's profit target must be between "
-                         "0.1% and 1000%.")
-        if prev_profit is not None and float(profit) <= prev_profit:
-            return _fail("Sell steps must rise in profit — a later step "
-                         "cannot trigger at a lower profit than an "
-                         "earlier one.")
-        prev_profit = float(profit)
-        total_pct += float(pct)
-        clean_ladder.append({"pct_of_position": float(pct),
-                             "profit_pct": float(profit)})
-    if total_pct > 100:
-        return _fail("Sell steps add up to more than 100% of the "
-                     "position — they cannot sell more than you hold.")
+    if kind == "scanner" and (ladder is None or ladder == []):
+        # A scanner with no slow ladder gets the default one — the
+        # slow ladder is the scanner's profit-taking, not an
+        # optional extra. (Stored rules from before the ladders
+        # existed load as the new defaults on the next evaluation.)
+        clean_ladder = [dict(r) for r in SLOW_LADDER]
+    else:
+        max_rungs = 4 if kind == "scanner" else 3
+        clean_ladder, ladder_err = _validate_ladder(
+            ladder, "sell", max_rungs, 1000.0)
+        if ladder_err is not None:
+            return _fail(ladder_err)
+    trending = raw.get("trending_ladder")
+    clean_trending = None
+    if trending is not None:
+        if kind != "scanner":
+            return _fail("The trending profit ladder is a scanner rule — "
+                         "it only applies to scanner bots.")
+        clean_trending, trend_err = _validate_ladder(
+            trending, "trending", 6, 10000.0)
+        if trend_err is not None:
+            return _fail(trend_err)
+    if kind == "scanner" and clean_trending is None:
+        clean_trending = [dict(r) for r in TRENDING_LADDER]
+    regime = raw.get("regime")
+    clean_regime = None
+    if regime is not None:
+        if kind != "scanner":
+            return _fail("The market regime is a scanner rule — it only "
+                         "applies to scanner bots.")
+        if not isinstance(regime, dict):
+            return _fail("The market regime must be a set of settings "
+                         "(volume surge, buy dominance, 1-hour gain).")
+        for key in regime:
+            if key in LIMIT_FIELDS:
+                return _fail(f"'{key}' is a bot limit, not a rule.")
+            if key not in REGIME_KEYS:
+                return _fail(f"Unknown market regime setting '{key}'.")
+        surge = regime.get("volume_surge_x",
+                           REGIME_DEFAULT["volume_surge_x"])
+        if not _is_number(surge) or not 1.0 <= float(surge) <= 10.0:
+            return _fail("The volume surge must be between 1x and 10x "
+                         "the average 5-minute pace of the last hour.")
+        for flag in ("require_buy_dominance", "require_h1_gain"):
+            if not isinstance(regime.get(flag, True), bool):
+                return _fail(f"'{flag}' must be true or false.")
+        clean_regime = {
+            "volume_surge_x": float(surge),
+            "require_buy_dominance": bool(
+                regime.get("require_buy_dominance", True)),
+            "require_h1_gain": bool(
+                regime.get("require_h1_gain", True)),
+        }
+    if kind == "scanner" and clean_regime is None:
+        clean_regime = dict(REGIME_DEFAULT)
     trailing = raw.get("trailing_stop_pct")
     if trailing is None:
         trailing = float(bot["stop_loss_pct"]) if bot is not None else 7.0
@@ -376,6 +475,9 @@ def validate_ruleset(raw, bot=None):
     }
     if kind == "scanner" or clean_top10 is not None:
         cleaned["top10_rug"] = clean_top10
+    if kind == "scanner":
+        cleaned["trending_ladder"] = clean_trending
+        cleaned["regime"] = clean_regime
     return cleaned, None
 
 
@@ -431,7 +533,30 @@ def summarize_rules(rules) -> str:
         f"{_window_words(buy['window_seconds'])}"
         f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner') else ''}"
         f"{' — the 3-minute gain is tracked from recorded prices, because the feed only gives 5-minute changes' if rules['kind'] == 'scanner' else ''}.")
-    if rules["sell_ladder"]:
+    if rules["kind"] == "scanner":
+        slow = "; ".join(
+            f"sell {r['pct_of_position']:.0f}% at +{r['profit_pct']:.0f}% profit"
+            for r in rules["sell_ladder"])
+        lines.append(f"Slow market — sell ladder: {slow}.")
+        trending = rules.get("trending_ladder") or []
+        if trending:
+            runner = "; ".join(
+                f"sell {r['pct_of_position']:.0f}% at "
+                f"+{r['profit_pct']:.0f}% profit"
+                for r in trending)
+            lines.append(
+                f"Trending market — hold the runners: {runner}.")
+        regime = rules.get("regime")
+        if regime:
+            lines.append(
+                f"Market regime: trending when the 5-minute volume is "
+                f"{regime['volume_surge_x']:.0f}x the average 5-minute "
+                f"pace of the last hour, buys outnumber sells in the "
+                f"last 5 minutes, and the 1-hour change is positive — "
+                f"otherwise slow. (There is no social-media feed: "
+                f"trending is judged from the price feed's volume and "
+                f"buyers, never guessed.)")
+    elif rules["sell_ladder"]:
         ladder = "; ".join(
             f"sell {r['pct_of_position']:.0f}% at +{r['profit_pct']:.0f}% profit"
             for r in rules["sell_ladder"])

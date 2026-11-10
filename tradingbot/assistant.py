@@ -13,9 +13,23 @@ from __future__ import annotations
 
 import re
 
-from .rules import WINDOW_METRICS
+from .rules import WINDOW_METRICS, scanner_ruleset
 
 STRATEGIES = ("careful", "balanced", "bold")
+
+# "Never sell below what I paid" is NOT a rule the scanner follows:
+# a bad coin is cut at the 7% stop loss instead, so one dead coin
+# cannot ride to zero. The agent explains that and changes nothing.
+NEVER_BELOW_COST_REPLY = (
+    "The Scanner doesn't do that on purpose — it cuts a bad coin at "
+    "7% below the buy price and takes the small loss instead. If it "
+    "never sold below cost, a dead coin would ride all the way to "
+    "zero, and one zero wipes out a lot of winners. The profit comes "
+    "from the asymmetry: winners run to +25–50% when the market is "
+    "slow and +26% to +10000% when it's trending, while losers are "
+    "capped at about 7%. Nothing was changed — say \"hold the "
+    "runners\" if you want the Scanner on the profit ladders."
+)
 
 CAPABILITIES = (
     "Here's what I can do for you:\n"
@@ -38,6 +52,12 @@ CAPABILITIES = (
     "- \"snipe coins gaining 5% in 3 minutes\" — set up a scanner "
     "sniper the same way (I show the rules back and ask you to "
     "confirm first)\n"
+    "- \"scanner take profit at 3% when the market is slow\" — the "
+    "scanner's slow-market ladder: 25% at +3%, +10%, +25%, the rest "
+    "at +50%\n"
+    "- \"hold the runners\" — the scanner holds trending coins for "
+    "the big gains (10% at +26%, +50%, +100%, +500%, +1000%, the "
+    "rest at +10000% or on the trailing stop)\n"
     "- \"show rules for <bot>\" — what rules a bot follows right now\n"
     "- \"remove rules for <bot>\" — back to the standard signals\n"
     "- \"sell everything if the dev starts selling\" — add a rug sell "
@@ -92,7 +112,7 @@ def _extract_bot_name(raw: str):
     "for <name>"."""
     nm = re.search(
         r"\bbot\s+(?:named\s+)?([A-Za-z0-9_\- ]+?)"
-        r"(?:\s+(?:scan|set|rules|buy|sell|,\s)|$)", raw, re.IGNORECASE)
+        r"(?:\s+(?:scan|set|rules|buy|sell|hold|take|,\s)|$)", raw, re.IGNORECASE)
     if nm:
         return nm.group(1).strip()
     fm = re.search(r"\bfor\s+(?:bot\s+)?([A-Za-z0-9_\- ]+?)\s*$",
@@ -181,6 +201,17 @@ def _parse_rules_command(msg: str, raw: str):
     rug, rug_bot, rug_err = _parse_rug(msg, raw)
     if rug_err:
         return ("unsupported", rug_err)
+    # Scanner profit rules: "scanner take profit at 3% when the
+    # market is slow" / "hold the runners" — the scanner's profit
+    # ladders (slow ladder + trending runner ladder). No buy signal
+    # is named, so the full scanner preset is proposed: slow market
+    # secures profit early, trending market holds the runners.
+    if re.search(
+            r"\b(take profit|take profits|secure (a )?profit|"
+            r"hold (the )?runners?|hold (the )?bull ?runners?)\b",
+            msg) and ("scanner" in msg or "snipe" in msg
+                      or "sniper" in msg or "runner" in msg):
+        return dict(scanner_ruleset()), _extract_bot_name(raw)
     # Buy pattern, two shapes:
     #   "gains 5% in 5 minutes" / "up 3.4% in 5 min"
     #   "gaining in a 5 min window by 5%"
@@ -380,6 +411,17 @@ def parse_message(text: str) -> dict:
                 break
         return {"intent": "bot_create", "bot_name": name,
                 "strategy": strategy, "reply": ""}
+
+    # "Never sell below what I paid": not a rule — the scanner cuts
+    # a bad coin at the 7% stop loss instead. Explain, change
+    # nothing. The route returns this reply as-is.
+    if re.search(
+            r"\bnever\s+sell\s+(below|at a loss|for less)\b|"
+            r"\b(don't|do not|never)\s+sell\b[^.]{0,60}\b"
+            r"(below (cost|what i paid|my (buy|entry) price)|at a loss)\b",
+            msg):
+        return {"intent": "never_below_cost",
+                "reply": NEVER_BELOW_COST_REPLY}
 
     # Bot rules: "bot Luna scan pump.fun and pumpswap, buy when a coin
     # gains 5% in 5 minutes" / "set rules for bot Luna ...". The parser

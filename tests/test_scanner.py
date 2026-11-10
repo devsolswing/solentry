@@ -28,9 +28,11 @@ from tradingbot.assistant import parse_message
 from tradingbot.rules import (SCANNER_DISPLAY, load_rules,
                               scanner_ruleset, summarize_rules,
                               trenches_ruleset, validate_ruleset)
-from tradingbot.scanner import (check_top10_rug, gain_3m_pct,
+from tradingbot.scanner import (check_top10_rug, detect_regime,
+                                gain_3m_pct, next_ladder_rung,
                                 record_marks, top10_total)
 from tradingbot.silent_loop import run_once
+from tradingbot.trenches import _entry as feed_entry
 
 
 def _now(offset_seconds=0):
@@ -39,14 +41,25 @@ def _now(offset_seconds=0):
                 "%Y-%m-%dT%H:%M:%SZ")
 
 
-def _entry(mint, price, change_5m=None):
+def _entry(mint, price, change_5m=None, change_1h=None,
+           volume_m5=None, volume_h1=None, buys=None, sells=None):
     return {"mint": mint, "symbol": mint[:6], "name": mint,
             "price_usd": price, "change_5m_pct": change_5m,
-            "change_1h_pct": None, "change_6h_pct": None,
+            "change_1h_pct": change_1h, "change_6h_pct": None,
             "change_24h_pct": None, "liquidity_usd": 1000,
             "market_cap_usd": None,
             "dex_id": "pumpfun", "pair_address": "pair" + mint,
-            "pair_created_at": 0}
+            "pair_created_at": 0,
+            "volume_m5_usd": volume_m5, "volume_h1_usd": volume_h1,
+            "txns_m5_buys": buys, "txns_m5_sells": sells}
+
+
+def _trending_entry(mint, price, change_5m=None):
+    """An entry that reads TRENDING: 5-minute volume 5000 vs an
+    hourly average 5-minute pace of 1000 (2.5x the 2x threshold),
+    40 buys vs 10 sells, +25% in the last hour."""
+    return _entry(mint, price, change_5m=change_5m, change_1h=25.0,
+                  volume_m5=5000, volume_h1=12000, buys=40, sells=10)
 
 
 class _FakeScan:
@@ -93,17 +106,115 @@ class TestScannerValidation(unittest.TestCase):
         self.assertEqual(rules["buy"]["metric"], "gain_3m_pct")
         self.assertEqual(rules["buy"]["window_seconds"], 180)
         self.assertEqual(rules["buy"]["threshold_pct"], 5.0)
-        self.assertEqual(rules["sell_ladder"], [])
+        # Slow ladder: 25% at +3%, +10%, +25%, the rest at +50%.
+        self.assertEqual(rules["sell_ladder"], [
+            {"pct_of_position": 25, "profit_pct": 3},
+            {"pct_of_position": 25, "profit_pct": 10},
+            {"pct_of_position": 25, "profit_pct": 25},
+            {"pct_of_position": 25, "profit_pct": 50}])
+        # Trending ladder: 10% at +26%..+1000%, the rest at +10000%.
+        self.assertEqual(rules["trending_ladder"], [
+            {"pct_of_position": 10, "profit_pct": 26},
+            {"pct_of_position": 10, "profit_pct": 50},
+            {"pct_of_position": 10, "profit_pct": 100},
+            {"pct_of_position": 10, "profit_pct": 500},
+            {"pct_of_position": 10, "profit_pct": 1000},
+            {"pct_of_position": 50, "profit_pct": 10000}])
+        self.assertEqual(rules["regime"], {
+            "volume_surge_x": 2.0, "require_buy_dominance": True,
+            "require_h1_gain": True})
         self.assertEqual(rules["top10_rug"], {"drop_pct": 10.0})
         self.assertEqual(rules["max_new_positions_per_scan"], 1)
         cleaned, err = validate_ruleset(rules)
         self.assertIsNone(err)
         self.assertEqual(cleaned, rules)
 
-    def test_scanner_allows_empty_ladder(self):
-        cleaned, err = validate_ruleset(scanner_ruleset())
+    def test_empty_ladder_fills_slow_default(self):
+        # A scanner with no sell ladder gets the slow default — the
+        # slow ladder is the scanner's profit-taking, not optional.
+        rules = scanner_ruleset()
+        rules["sell_ladder"] = []
+        cleaned, err = validate_ruleset(rules)
         self.assertIsNone(err)
-        self.assertEqual(cleaned["sell_ladder"], [])
+        self.assertEqual(cleaned["sell_ladder"],
+                         scanner_ruleset()["sell_ladder"])
+
+    def test_old_preset_loads_as_new_defaults(self):
+        # Stored rules from before the profit ladders existed (empty
+        # sell ladder, no trending ladder, no regime) load as the
+        # new defaults on the next evaluation — no migration needed.
+        rules = scanner_ruleset()
+        rules["sell_ladder"] = []
+        del rules["trending_ladder"]
+        del rules["regime"]
+        cleaned, err = validate_ruleset(rules)
+        self.assertIsNone(err)
+        self.assertEqual(cleaned, scanner_ruleset())
+
+    def test_rejects_trending_ladder_on_trenches(self):
+        rules = trenches_ruleset()
+        rules["trending_ladder"] = scanner_ruleset()["trending_ladder"]
+        _cleaned, err = validate_ruleset(rules)
+        self.assertIsNotNone(err)
+        self.assertIn("scanner", err)
+
+    def test_rejects_bad_trending_ladder(self):
+        base = scanner_ruleset()["trending_ladder"]
+        bad_ladders = [
+            base + [{"pct_of_position": 10, "profit_pct": 20000}],
+            [{"pct_of_position": 10, "profit_pct": 10001}],
+            [{"pct_of_position": 60, "profit_pct": 26},
+             {"pct_of_position": 60, "profit_pct": 50}],
+            [{"pct_of_position": 10, "profit_pct": 50},
+             {"pct_of_position": 10, "profit_pct": 26}],
+            [{"pct_of_position": 0, "profit_pct": 26}],
+        ]
+        for bad in bad_ladders:
+            rules = scanner_ruleset()
+            rules["trending_ladder"] = bad
+            _cleaned, err = validate_ruleset(rules)
+            self.assertIsNotNone(err, f"ladder {bad!r} accepted")
+
+    def test_rejects_scanner_sell_ladder_over_4_rungs(self):
+        rules = scanner_ruleset()
+        rules["sell_ladder"] = [
+            {"pct_of_position": 20, "profit_pct": p}
+            for p in (3, 10, 25, 50, 100)]
+        _cleaned, err = validate_ruleset(rules)
+        self.assertIsNotNone(err)
+
+    def test_rejects_bad_regime(self):
+        bad_regimes = [
+            {"volume_surge_x": 0.5},
+            {"volume_surge_x": 11},
+            {"volume_surge_x": "2"},
+            {"volume_surge_x": 2.0, "social_media": True},
+            {"volume_surge_x": 2.0, "require_buy_dominance": "yes"},
+            {"volume_surge_x": 2.0, "buy_size_pct": 50},
+        ]
+        for bad in bad_regimes:
+            rules = scanner_ruleset()
+            rules["regime"] = bad
+            _cleaned, err = validate_ruleset(rules)
+            self.assertIsNotNone(err, f"regime {bad!r} accepted")
+
+    def test_rejects_regime_on_trenches(self):
+        rules = trenches_ruleset()
+        rules["regime"] = {"volume_surge_x": 2.0}
+        _cleaned, err = validate_ruleset(rules)
+        self.assertIsNotNone(err)
+        self.assertIn("scanner", err)
+
+    def test_missing_trending_and_regime_fill_defaults(self):
+        rules = scanner_ruleset()
+        del rules["trending_ladder"]
+        del rules["regime"]
+        cleaned, err = validate_ruleset(rules)
+        self.assertIsNone(err)
+        self.assertEqual(cleaned["trending_ladder"],
+                         scanner_ruleset()["trending_ladder"])
+        self.assertEqual(cleaned["regime"],
+                         scanner_ruleset()["regime"])
 
     def test_trenches_still_needs_a_ladder(self):
         rules = trenches_ruleset()
@@ -167,7 +278,16 @@ class TestScannerValidation(unittest.TestCase):
         self.assertIn("5.0% in 3 minutes", summary)
         self.assertIn("strongest gainer wins", summary)
         self.assertIn("tracked from recorded prices", summary)
-        self.assertIn("Sell ladder: none", summary)
+        self.assertIn("Slow market", summary)
+        self.assertIn("sell 25% at +3% profit", summary)
+        self.assertIn("sell 25% at +50% profit", summary)
+        self.assertIn("Trending market", summary)
+        self.assertIn("hold the runners", summary)
+        self.assertIn("sell 10% at +26% profit", summary)
+        self.assertIn("sell 50% at +10000% profit", summary)
+        self.assertIn("Market regime", summary)
+        self.assertIn("2x the average 5-minute pace", summary)
+        self.assertIn("no social-media feed", summary)
         self.assertIn("Top-10 wallets", summary)
         self.assertIn("10%", summary)
         self.assertIn("proceeds stay in SOL", summary)
@@ -260,6 +380,157 @@ class TestScannerMarks(unittest.TestCase):
         self.assertTrue(fired)
 
 
+class TestScannerRegime(unittest.TestCase):
+    def _base(self, **over):
+        entry = {"mint": "MINTA", "price_usd": 1.0,
+                 "volume_m5_usd": 5000, "volume_h1_usd": 12000,
+                 "txns_m5_buys": 40, "txns_m5_sells": 10,
+                 "change_1h_pct": 25.0}
+        entry.update(over)
+        return entry
+
+    def test_trending_when_surge_and_buys_and_h1_gain(self):
+        self.assertEqual(detect_regime(self._base()), "trending")
+
+    def test_slow_when_no_volume_surge(self):
+        # 5-min volume 1500 vs an hourly average 5-min pace of 1000:
+        # 1.5x, below the 2x threshold.
+        self.assertEqual(
+            detect_regime(self._base(volume_m5_usd=1500)), "slow")
+
+    def test_slow_when_sells_outnumber_buys(self):
+        self.assertEqual(
+            detect_regime(self._base(txns_m5_buys=10, txns_m5_sells=40)),
+            "slow")
+
+    def test_slow_when_h1_flat_or_down(self):
+        self.assertEqual(
+            detect_regime(self._base(change_1h_pct=0.0)), "slow")
+        self.assertEqual(
+            detect_regime(self._base(change_1h_pct=-5.0)), "slow")
+
+    def test_slow_when_volume_data_missing(self):
+        # Fail-closed: no volume or txn data means SLOW, never a
+        # guess at trending.
+        self.assertEqual(
+            detect_regime({"mint": "MINTA", "price_usd": 1.0}), "slow")
+        self.assertEqual(
+            detect_regime(self._base(volume_m5_usd=None)), "slow")
+        self.assertEqual(
+            detect_regime(self._base(txns_m5_buys=None)), "slow")
+        self.assertEqual(
+            detect_regime(self._base(change_1h_pct=None)), "slow")
+
+    def test_fresh_burst_counts_as_surge(self):
+        # All volume in the last 5 minutes (h1 volume zero): the
+        # crowd just arrived.
+        self.assertEqual(
+            detect_regime(self._base(volume_h1_usd=0)), "trending")
+
+    def test_no_volume_means_slow_even_with_buys(self):
+        self.assertEqual(
+            detect_regime(self._base(volume_m5_usd=0)), "slow")
+
+    def test_custom_surge_threshold_respected(self):
+        regime = {"volume_surge_x": 3.0, "require_buy_dominance": True,
+                  "require_h1_gain": True}
+        # 5000 vs an hourly average pace of 1000 is 5x: trending
+        # at 2x and at 3x.
+        self.assertEqual(detect_regime(self._base(), regime), "trending")
+        # 2500 is 2.5x: trending at 2x, slow at 3x.
+        self.assertEqual(
+            detect_regime(self._base(volume_m5_usd=2500)), "trending")
+        self.assertEqual(
+            detect_regime(self._base(volume_m5_usd=2500), regime), "slow")
+
+    def test_requirements_can_be_switched_off(self):
+        regime = {"volume_surge_x": 2.0, "require_buy_dominance": False,
+                  "require_h1_gain": False}
+        self.assertEqual(
+            detect_regime(self._base(txns_m5_buys=10, txns_m5_sells=40,
+                                     change_1h_pct=-5.0), regime),
+            "trending")
+
+
+class TestScannerLadderSteps(unittest.TestCase):
+    def test_slow_ladder_fires_in_order(self):
+        slow = scanner_ruleset()["sell_ladder"]
+        self.assertEqual(next_ladder_rung(slow, 0.0, 4.0), (0.25, 3.0))
+        self.assertEqual(next_ladder_rung(slow, 0.25, 11.0), (0.25, 10.0))
+        self.assertEqual(next_ladder_rung(slow, 0.5, 30.0), (0.25, 25.0))
+        self.assertEqual(next_ladder_rung(slow, 0.75, 60.0), (0.25, 50.0))
+        self.assertIsNone(next_ladder_rung(slow, 1.0, 60.0))
+
+    def test_trending_ladder_fires_in_order(self):
+        trend = scanner_ruleset()["trending_ladder"]
+        self.assertEqual(next_ladder_rung(trend, 0.0, 30.0), (0.10, 26.0))
+        self.assertEqual(next_ladder_rung(trend, 0.1, 60.0), (0.10, 50.0))
+        self.assertEqual(next_ladder_rung(trend, 0.2, 120.0),
+                         (0.10, 100.0))
+        self.assertEqual(next_ladder_rung(trend, 0.5, 12000.0),
+                         (0.50, 10000.0))
+
+    def test_no_fire_below_target(self):
+        slow = scanner_ruleset()["sell_ladder"]
+        self.assertIsNone(next_ladder_rung(slow, 0.0, 2.9))
+        self.assertIsNone(next_ladder_rung(slow, 0.25, 9.9))
+
+    def test_sold_rung_never_refires(self):
+        trend = scanner_ruleset()["trending_ladder"]
+        # +26% and +50% rungs sold (20%); at +60% the next target
+        # (+100%) is not reached yet.
+        self.assertIsNone(next_ladder_rung(trend, 0.2, 60.0))
+
+    def test_regime_flip_tops_up_to_slow_schedule(self):
+        # Sold 20% on the trending ladder, then the market goes
+        # slow: the slow ladder wants 25% sold by +3% — the next
+        # rung tops the position up by 5% at the +3% rung.
+        slow = scanner_ruleset()["sell_ladder"]
+        self.assertEqual(next_ladder_rung(slow, 0.2, 80.0), (0.05, 3.0))
+        # After topping up to 25%, the next slow rung is +10% (50%).
+        self.assertEqual(next_ladder_rung(slow, 0.25, 80.0), (0.25, 10.0))
+
+
+class TestFeedEntry(unittest.TestCase):
+    def _pair(self, **over):
+        pair = {"chainId": "solana", "dexId": "pumpfun",
+                "priceUsd": "0.01",
+                "priceChange": {"m5": 5.0, "h1": 25.0},
+                "liquidity": {"usd": 1000},
+                "volume": {"m5": 5000, "h1": 12000, "h24": 100000},
+                "txns": {"m5": {"buys": 40, "sells": 10},
+                         "h1": {"buys": 400, "sells": 100}},
+                "baseToken": {"symbol": "MINTA", "name": "Mint A",
+                              "address": "MINTA"},
+                "pairAddress": "pairMINTA", "pairCreatedAt": 0}
+        pair.update(over)
+        return pair
+
+    def test_volume_and_txns_parsed(self):
+        entry = feed_entry("MINTA", self._pair())
+        self.assertEqual(entry["volume_m5_usd"], 5000)
+        self.assertEqual(entry["volume_h1_usd"], 12000)
+        self.assertEqual(entry["txns_m5_buys"], 40)
+        self.assertEqual(entry["txns_m5_sells"], 10)
+
+    def test_missing_volume_and_txns_are_none(self):
+        pair = self._pair()
+        del pair["volume"]
+        del pair["txns"]
+        entry = feed_entry("MINTA", pair)
+        self.assertIsNone(entry["volume_m5_usd"])
+        self.assertIsNone(entry["volume_h1_usd"])
+        self.assertIsNone(entry["txns_m5_buys"])
+        self.assertIsNone(entry["txns_m5_sells"])
+
+    def test_bad_volume_and_txns_are_none(self):
+        pair = self._pair(volume={"m5": "nope", "h1": None},
+                          txns={"m5": {"buys": "x", "sells": None}})
+        entry = feed_entry("MINTA", pair)
+        self.assertIsNone(entry["volume_m5_usd"])
+        self.assertIsNone(entry["txns_m5_buys"])
+
+
 class TestScannerParser(unittest.TestCase):
     def test_create_scanner_bot(self):
         parsed = parse_message("create a scanner bot")
@@ -333,6 +604,43 @@ class TestScannerParser(unittest.TestCase):
             "5 minutes")
         self.assertEqual(parsed["intent"], "rules_propose")
         self.assertEqual(parsed["rules"]["kind"], "trenches")
+
+    def test_scanner_take_profit_slow(self):
+        parsed = parse_message(
+            "scanner take profit at 3% when the market is slow")
+        self.assertEqual(parsed["intent"], "rules_propose")
+        self.assertIsNone(parsed["bot_name"])
+        rules = parsed["rules"]
+        self.assertEqual(rules["kind"], "scanner")
+        self.assertEqual(rules["sell_ladder"],
+                         scanner_ruleset()["sell_ladder"])
+        self.assertEqual(rules["trending_ladder"],
+                         scanner_ruleset()["trending_ladder"])
+        self.assertEqual(rules["regime"],
+                         scanner_ruleset()["regime"])
+
+    def test_hold_the_runners(self):
+        parsed = parse_message("hold the runners")
+        self.assertEqual(parsed["intent"], "rules_propose")
+        self.assertIsNone(parsed["bot_name"])
+        self.assertEqual(parsed["rules"]["kind"], "scanner")
+        self.assertEqual(parsed["rules"]["trending_ladder"],
+                         scanner_ruleset()["trending_ladder"])
+
+    def test_hold_the_bull_runners_for_named_bot(self):
+        parsed = parse_message("bot Luna hold the bull runners")
+        self.assertEqual(parsed["intent"], "rules_propose")
+        self.assertEqual(parsed["bot_name"], "Luna")
+        self.assertEqual(parsed["rules"]["kind"], "scanner")
+
+    def test_never_sell_below_cost_is_explained_not_applied(self):
+        parsed = parse_message("never sell below what I paid")
+        self.assertEqual(parsed["intent"], "never_below_cost")
+        self.assertIn("7% below the buy price", parsed["reply"])
+        self.assertIn("Nothing was changed", parsed["reply"])
+        self.assertNotIn("rules", parsed)
+        parsed = parse_message("don't sell below cost")
+        self.assertEqual(parsed["intent"], "never_below_cost")
 
 
 class ScannerEngineBase(unittest.TestCase):
@@ -607,6 +915,133 @@ class TestScannerEngine(ScannerEngineBase):
             (bot_id, "MINTA")).fetchone()
         self.assertIsNone(top10)
 
+    def test_slow_ladder_sells_25pct_per_rung(self):
+        """No volume data in the entries means SLOW: 25% at +3%,
+        another 25% at +10%, another at +25%, the rest at +50%."""
+        bot_id = self._insert_bot(rules=scanner_ruleset())
+        self._insert_position(bot_id, "MINTA", 100, 0.01)
+        outcomes = self._run([_entry("MINTA", 0.0103)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 25)
+        self.assertIn("sell ladder (slow): 25% at +3% profit",
+                      sells[0]["reason"])
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 75)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_entry("MINTA", 0.011)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 25)
+        self.assertIn("sell ladder (slow): 25% at +10% profit",
+                      sells[0]["reason"])
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 50)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_entry("MINTA", 0.0125)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 25)
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 25)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_entry("MINTA", 0.015)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 25)
+        self.assertIsNone(self._position(bot_id, "MINTA"))
+
+    def test_trending_ladder_holds_the_runner(self):
+        """Trending entries (volume surge + buys + 1h gain): only
+        10% per rung, so at +100% just 30% is sold and 70% is still
+        holding the runner."""
+        bot_id = self._insert_bot(rules=scanner_ruleset())
+        self._insert_position(bot_id, "MINTA", 100, 0.01)
+        outcomes = self._run([_trending_entry("MINTA", 0.0126)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 10)
+        self.assertIn("sell ladder (trending): 10% at +26% profit",
+                      sells[0]["reason"])
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 90)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_trending_entry("MINTA", 0.015)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 10)
+        self.assertIn("sell ladder (trending): 10% at +50% profit",
+                      sells[0]["reason"])
+        self._reset_scan(bot_id)
+        outcomes = self._run([_trending_entry("MINTA", 0.02)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 10)
+        self.assertIn("sell ladder (trending): 10% at +100% profit",
+                      sells[0]["reason"])
+        # At +100% only 30% is sold — 70% still rides the runner.
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 70)
+
+    def test_regime_flip_tops_up_to_slow_schedule(self):
+        """Sold 25% on the slow ladder, then the market turns
+        trending: the trending ladder's first unmet rung (+100%,
+        30% cumulative) tops the position up by 5%."""
+        bot_id = self._insert_bot(rules=scanner_ruleset())
+        self._insert_position(bot_id, "MINTA", 100, 0.01)
+        self._run([_entry("MINTA", 0.0103)])
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 75)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_trending_entry("MINTA", 0.02)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["amount"], 5)
+        self.assertIn("sell ladder (trending): 5% at +100% profit",
+                      sells[0]["reason"])
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 70)
+
+    def test_stop_loss_still_cuts_below_cost(self):
+        """A bad coin is cut at 7% below the buy price — the stop
+        loss was NOT removed."""
+        bot_id = self._insert_bot(rules=scanner_ruleset())
+        self._insert_position(bot_id, "MINTA", 100, 0.01)
+        outcomes = self._run([_entry("MINTA", 0.0093)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["reason"], "stop_loss")
+        self.assertIsNone(self._position(bot_id, "MINTA"))
+
+    def test_rug_sell_fires_below_cost(self):
+        """The rug sell is a loss limiter: it fires below cost too."""
+        bot_id = self._insert_bot(rules=scanner_ruleset())
+        self._insert_position(bot_id, "MINTA", 100, 0.01)
+        outcomes = self._run([_entry("MINTA", 0.006, change_5m=-40.0)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertIn("rug sell", sells[0]["reason"])
+        self.assertIsNone(self._position(bot_id, "MINTA"))
+
+    def test_trailing_stop_locks_in_runner_profit(self):
+        """Peak $0.02, price falls 7% from the peak: the trailing
+        stop sells everything, even though the ladder would hold."""
+        bot_id = self._insert_bot(rules=scanner_ruleset())
+        self._insert_position(bot_id, "MINTA", 100, 0.01)
+        self._run([_trending_entry("MINTA", 0.02)])
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 90)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_entry("MINTA", 0.0186)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["reason"], "trailing stop")
+        self.assertIsNone(self._position(bot_id, "MINTA"))
+
+
     def test_top10_real_mode_proceeds_in_sol(self):
         """Real mode: the sell reason says the proceeds are in SOL —
         the pump.fun sell pays out in SOL by construction."""
@@ -781,6 +1216,38 @@ class TestScannerRoutes(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(rules["kind"], "scanner")
         self.assertEqual(rules["top10_rug"], {"drop_pct": 10.0})
+
+    def test_agent_scanner_profit_slow_needs_yes(self):
+        data = self._ask(
+            "scanner take profit at 3% when the market is slow")
+        self.assertIn("Slow market", data["reply"])
+        self.assertIn("sell 25% at +3% profit", data["reply"])
+        self.assertIn("Trending market", data["reply"])
+        self.assertIn("Reply \"yes\"", data["reply"])
+        self.assertEqual(len(self._bots()), 0)
+        data = self._ask("yes")
+        self.assertIn("Done", data["reply"])
+        bots = self._bots()
+        self.assertEqual(len(bots), 1)
+        rules, err = load_rules(bots[0])
+        self.assertIsNone(err)
+        self.assertEqual(rules, scanner_ruleset())
+
+    def test_agent_hold_the_runners_needs_yes(self):
+        data = self._ask("hold the runners")
+        self.assertIn("hold the runners", data["reply"])
+        self.assertIn("Trending market", data["reply"])
+        self.assertIn("sell 10% at +26% profit", data["reply"])
+        self.assertIn("Reply \"yes\"", data["reply"])
+        data = self._ask("yes")
+        self.assertIn("Done", data["reply"])
+        self.assertEqual(len(self._bots()), 1)
+
+    def test_agent_never_below_cost_explains_and_changes_nothing(self):
+        data = self._ask("never sell below what I paid")
+        self.assertIn("7% below the buy price", data["reply"])
+        self.assertIn("Nothing was changed", data["reply"])
+        self.assertEqual(len(self._bots()), 0)
 
 
 if __name__ == "__main__":

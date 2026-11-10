@@ -95,6 +95,25 @@ def _entry(mint: str, pair: dict) -> dict:
             return float(value)
         except (TypeError, ValueError):
             return None
+    def _vol(key):
+        volume = pair.get("volume") or {}
+        value = volume.get(key)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    def _txn(window, side):
+        txns = pair.get("txns") or {}
+        bucket = txns.get(window) or {}
+        value = bucket.get(side)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
     return {
         "mint": mint,
         "symbol": (pair.get("baseToken") or {}).get("symbol") or mint[:8],
@@ -111,6 +130,14 @@ def _entry(mint: str, pair: dict) -> dict:
         "dex_id": pair.get("dexId"),
         "pair_address": pair.get("pairAddress"),
         "pair_created_at": pair.get("pairCreatedAt"),
+        # Regime inputs for the ∆scanner∆ profit ladders: 5-minute
+        # and 1-hour USD volume, and 5-minute buy/sell counts.
+        # Missing here means the regime reads SLOW (fail-closed) —
+        # never guessed.
+        "volume_m5_usd": _vol("m5"),
+        "volume_h1_usd": _vol("h1"),
+        "txns_m5_buys": _txn("m5", "buys"),
+        "txns_m5_sells": _txn("m5", "sells"),
     }
 
 

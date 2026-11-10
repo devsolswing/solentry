@@ -15,6 +15,33 @@ the position opened; a drop of 10% from that peak means the big
 holders are dumping — sell everything. If the RPC cannot serve a
 mint, that coin's watch is skipped for that scan and logged — never
 faked.
+
+Market regime (profit ladders): the app has NO social-media feed, so
+"trending + community active" is judged from the DexScreener feed
+alone. TRENDING needs all three at once — a 5-minute volume surge
+(volume.m5 at least 2x the average 5-minute pace of the last hour),
+more buys than sells in the last 5 minutes, and a positive 1-hour
+price change. Anything else is SLOW. Missing data means SLOW
+(fail-closed: the slow ladder takes profits early rather than
+holding on a guess). A coin whose volume is ALL in the last
+5 minutes (h1 volume zero) counts as a surge — the crowd just
+arrived; that biases very fresh tokens toward TRENDING, which is
+the safe direction for a sniper (runners hold).
+
+Profit ladders (scanner only, % of the original position):
+  * SLOW: sell 25% at +3%, 25% at +10%, 25% at +25%, the rest at
+    +50% — secure a profit early and often.
+  * TRENDING (bullrunners hold): sell 10% at +26%, 10% at +50%,
+    10% at +100%, 10% at +500%, 10% at +1000%, the rest at
+    +10000% or on the 7% trailing stop, whichever comes first.
+Rungs are tracked by cumulative fraction sold (derived from the
+position's amount vs its original amount), so the regime can flip
+between scans without losing track: a rung fires only when its
+profit target is met AND its cumulative fraction is above what is
+already sold. The stop loss (7% below the buy price) and the rug
+sell still fire regardless of cost — a bad coin is cut at a small
+loss, which is what lets the big winners pay for the losers even
+when fewer than half the trades win.
 """
 
 from __future__ import annotations
@@ -23,6 +50,125 @@ from datetime import datetime, timezone
 
 MARK_WINDOW_SECONDS = 180
 MARK_KEEP_SECONDS = 600
+
+# --- Scanner profit ladders (James's spec) ---------------------------
+# Rungs are % of the ORIGINAL position, executed in order as profit
+# rises. SLOW takes profits early; TRENDING holds the runners for
+# the big gains. The last rung of each ladder sells the rest (100%
+# cumulative), so a position always fully exits through the ladder
+# once its top target is reached.
+SLOW_LADDER = [
+    {"pct_of_position": 25, "profit_pct": 3},
+    {"pct_of_position": 25, "profit_pct": 10},
+    {"pct_of_position": 25, "profit_pct": 25},
+    {"pct_of_position": 25, "profit_pct": 50},
+]
+TRENDING_LADDER = [
+    {"pct_of_position": 10, "profit_pct": 26},
+    {"pct_of_position": 10, "profit_pct": 50},
+    {"pct_of_position": 10, "profit_pct": 100},
+    {"pct_of_position": 10, "profit_pct": 500},
+    {"pct_of_position": 10, "profit_pct": 1000},
+    {"pct_of_position": 50, "profit_pct": 10000},
+]
+
+# Regime detection defaults: 5-minute volume at least 2x the average
+# 5-minute pace of the last hour, buys outnumbering sells in the
+# last 5 minutes, and a positive 1-hour change — all three, or SLOW.
+REGIME_DEFAULT = {"volume_surge_x": 2.0, "require_buy_dominance": True,
+                  "require_h1_gain": True}
+
+
+def _gte(a: float, b: float) -> bool:
+    """a >= b with a 1e-9 relative tolerance — prices are floats."""
+    return a >= b or abs(a - b) <= 1e-9 * max(1.0, abs(b))
+
+
+def detect_regime(entry, regime=None) -> str:
+    """'trending' or 'slow' for a feed entry.
+
+    TRENDING needs all three (when required by `regime`): the
+    5-minute volume at least volume_surge_x times the average
+    5-minute volume of the last hour (volume.h1 / 12), more buys
+    than sells in the last 5 minutes, and a positive 1-hour price
+    change. Any missing or unusable input means SLOW — never guess.
+    A coin with volume only in the last 5 minutes (h1 volume zero)
+    counts as a surge: the crowd just arrived.
+    """
+    cfg = regime or REGIME_DEFAULT
+    try:
+        surge_x = float(cfg.get("volume_surge_x", 2.0))
+    except (TypeError, ValueError):
+        return "slow"
+    vol_m5 = entry.get("volume_m5_usd")
+    vol_h1 = entry.get("volume_h1_usd")
+    if vol_m5 is None or vol_h1 is None:
+        return "slow"
+    try:
+        vol_m5 = float(vol_m5)
+        vol_h1 = float(vol_h1)
+    except (TypeError, ValueError):
+        return "slow"
+    if vol_m5 <= 0:
+        return "slow"
+    if vol_h1 <= 0:
+        surge = True
+    else:
+        surge = vol_m5 >= surge_x * (vol_h1 / 12.0)
+    if not surge:
+        return "slow"
+    if cfg.get("require_buy_dominance", True):
+        buys = entry.get("txns_m5_buys")
+        sells = entry.get("txns_m5_sells")
+        if buys is None or sells is None:
+            return "slow"
+        try:
+            if int(buys) <= int(sells):
+                return "slow"
+        except (TypeError, ValueError):
+            return "slow"
+    if cfg.get("require_h1_gain", True):
+        change_1h = entry.get("change_1h_pct")
+        if change_1h is None:
+            return "slow"
+        try:
+            if float(change_1h) <= 0:
+                return "slow"
+        except (TypeError, ValueError):
+            return "slow"
+    return "trending"
+
+
+def next_ladder_rung(ladder, sold_fraction: float, profit_pct: float):
+    """Next ladder rung to fire, or None.
+
+    `ladder` is a list of {pct_of_position, profit_pct} rungs.
+    `sold_fraction` is the fraction of the original position already
+    sold (0.0-1.0); `profit_pct` is the current profit vs the buy
+    price. A rung fires when its profit target is met AND its
+    cumulative fraction exceeds what is already sold — so the regime
+    can flip between scans and the ladder still converges: already
+    sold slices are never re-sold, and the first unmet rung fires.
+    Returns (sell_fraction_of_original, profit_target) or None.
+    """
+    try:
+        sold = float(sold_fraction)
+        profit = float(profit_pct)
+    except (TypeError, ValueError):
+        return None
+    cumulative = 0.0
+    for rung in ladder or []:
+        try:
+            pct = float(rung["pct_of_position"])
+            target = float(rung["profit_pct"])
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return None
+        cumulative += pct / 100.0
+        if _gte(profit, target) and cumulative > sold + 1e-9:
+            # Rounded: 0.1 + 0.1 + 0.1 sums to 0.30000000000000004
+            # in floats, and the sell amount must be exact.
+            return (round(cumulative - sold, 9), target)
+    return None
 
 
 def _fmt(ts: float) -> str:

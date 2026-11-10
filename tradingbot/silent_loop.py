@@ -53,8 +53,9 @@ from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
 from .pnl import portfolio_totals, record_snapshot
 from .prices import get_prices
 from .rules import load_rules
-from .scanner import (check_top10_rug, clear_watches, gain_3m_pct,
-                      record_marks, top10_total)
+from .scanner import (check_top10_rug, clear_watches, detect_regime,
+                      gain_3m_pct, next_ladder_rung, record_marks,
+                      top10_total)
 from .signals import signal_for_coin
 from .solana import SolanaRpcClient, lamports_to_sol
 from .trenches import fetch_trenches_scan
@@ -547,7 +548,35 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                            rpc_factory, real_executor, actions)
             continue
         stage = int(pos["ladder_stage"] or 0)
-        if stage < len(ladder):
+        if kind == "scanner" and rules.get("trending_ladder"):
+            # Regime-aware profit ladders (scanner only): the regime
+            # is picked fresh from this scan's feed entry and chooses
+            # the slow ladder or the trending runner ladder. Rungs
+            # fire on the cumulative fraction already sold (derived
+            # from the position's amount vs its original amount), so
+            # a regime flip mid-position never re-sells a slice and
+            # the ladder always converges to a full exit.
+            entry = (price_map or {}).get(coin) or {}
+            regime = detect_regime(entry, rules.get("regime"))
+            active = (rules["trending_ladder"]
+                      if regime == "trending" else ladder)
+            orig = pos["orig_amount"]
+            orig = float(orig) if orig is not None \
+                else float(pos["amount"])
+            sold_frac = (1.0 - float(pos["amount"]) / orig
+                         if orig > 0 else 0.0)
+            profit = ((price - avg_price) / avg_price * 100.0
+                      if avg_price > 0 else 0.0)
+            nxt = next_ladder_rung(active, sold_frac, profit)
+            if nxt is not None:
+                sell_frac, target = nxt
+                _sell_position(
+                    db, cfg, bot, coin, price,
+                    f"sell ladder ({regime}): {sell_frac * 100:.0f}% at "
+                    f"+{target:.0f}% profit",
+                    rpc_factory, real_executor, actions,
+                    amount=orig * sell_frac, ladder_stage=stage + 1)
+        elif stage < len(ladder):
             rung = ladder[stage]
             target = avg_price * (1 + float(rung["profit_pct"]) / 100.0)
             if _gte(price, target):
