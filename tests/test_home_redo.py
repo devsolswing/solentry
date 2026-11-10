@@ -1,14 +1,17 @@
-"""Home-page redo (2026-11-09).
+"""Home-page redo (2026-11-09) + home lift (2026-11-09).
 
 Rules under test:
-- Smaller, simpler home: the holdings section is a 1/4-screen
-  scrollable window in fine print — real name + ticker, amount
-  held, value — with a small-print summary (coin count + total,
-  paper cash in paper mode). The rest of the home UI is enlarged
-  (logo, portfolio total, Buy/Sell) to fill the freed space, and
-  the page still fits one phone screen (only the holdings window
-  scrolls). Home has Send and Receive buttons; Receive opens a
-  window with the app wallet address + copy.
+- Home lift (supersedes the redo's 1/4-screen fine-print panel):
+  the holdings section takes HALF the screen and scrolls internally;
+  every held coin is a NORMAL-SIZE coin button — real name + ticker,
+  amount held, value, and the 1-hour % from the feed ("—" when the
+  feed has no 1h figure, never guessed). The action buttons sit in
+  one row right under the fox logo, above the holdings list, and the
+  page still fits one phone screen (only the holdings list scrolls).
+  Home has Send and Receive buttons; Receive opens a window with
+  the app wallet address + copy. The portfolio chart moved off the
+  home page to make room for the half-screen list; the total, the
+  24h change and a "Full chart ›" link to the P&L page stay.
 - The X (back) button is GONE from the home screen: on the homepage
   it looped (back -> login page -> instant redirect to /wallet, so
   the homepage kept re-applying itself). It stays on Bots and
@@ -44,12 +47,15 @@ MINT = "11111111111111111111111111111111"
 
 
 def make_prices(changes):
-    """changes: {coin: (price, change_24h)}"""
-    return {
-        "prices": {c: {"price": p, "change_24h": ch}
-                   for c, (p, ch) in changes.items()},
-        "source": "snapshot", "as_of": "test",
-    }
+    """changes: {coin: (price, change_24h)} or
+    (price, change_24h, change_1h)"""
+    out = {}
+    for c, tup in changes.items():
+        price, ch24 = tup[0], tup[1]
+        ch1h = tup[2] if len(tup) > 2 else None
+        out[c] = {"price": price, "change_24h": ch24,
+                  "change_1h": ch1h}
+    return {"prices": out, "source": "snapshot", "as_of": "test"}
 
 
 def fake_chart(points):
@@ -65,7 +71,7 @@ class HomeRedoBase(unittest.TestCase):
             routes, "get_prices",
             return_value=make_prices({
                 "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25), "USDC": (1.0, 0.0)}))
+                "SOL": (10.0, 5.25, 2.5), "USDC": (1.0, 0.0)}))
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(10.0, "snapshot", "test"))
@@ -130,14 +136,18 @@ class TestHomeHasNoX(HomeRedoBase):
         self.assertIn("data-go-back", self._html("/trenches"))
 
 
-class TestHoldingsQuarterPanel(HomeRedoBase):
-    def test_holdings_panel_is_quarter_screen_and_scrolls(self):
+class TestHoldingsHalfPanel(HomeRedoBase):
+    def test_holdings_panel_is_half_screen_and_scrolls(self):
+        # Home lift (supersedes the 1/4-screen fine-print panel):
+        # the holdings list takes HALF the screen and scrolls
+        # internally; on short screens it may shrink so the page
+        # still fits one screen, never beyond half.
         css = open("tradingbot/static/style.css").read()
-        self.assertIn(".holdings-panel { flex: 0 0 25dvh;", css)
-        self.assertIn("height: 25dvh;", css)
+        self.assertIn(".holdings-panel { flex: 0 1 50dvh;", css)
+        self.assertIn("max-height: 50dvh;", css)
         self.assertIn("overflow-y: auto;", css)
 
-    def test_holdings_rows_are_fine_print_with_amount_and_value(self):
+    def test_holdings_rows_are_normal_size_with_value_and_1h(self):
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
@@ -149,9 +159,13 @@ class TestHoldingsQuarterPanel(HomeRedoBase):
         self.assertIn("1.0000 SOL", html)
         self.assertIn("$10.00", html)
         self.assertIn("1 coin", html)
-        # The fine-print rows carry amount + value, not the old
-        # price / 24h % / P&L columns (those live on the coins
-        # page and the coin detail page now).
+        # Normal-size rows now carry the 1-hour % (mocked +2.5%)
+        # next to the amount + value.
+        self.assertIn("holdings-1h", html)
+        self.assertIn("+2.50%", html)
+        self.assertIn("1h", html)
+        # The old P&L / 24h columns still live on the coins page
+        # and the coin detail page, not on the home rows.
         self.assertNotIn("coin-pnl", html)
         self.assertNotIn("coin-change", html)
 

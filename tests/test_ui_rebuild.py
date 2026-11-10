@@ -282,22 +282,27 @@ class TestHomePage(UiBase):
         self.assertIn("overflow: hidden", css)
         self.assertIn(".holdings-panel", css)
 
-    def test_home_chart_range_switches(self):
+    def test_home_chart_moved_to_pnl_no_range_switches(self):
+        # Home lift: the portfolio chart (and its range switches)
+        # moved off the home page to make room for the half-screen
+        # holdings list. The full chart lives on the P&L page.
         self._choose_mode("paper")
         html = self._html("/wallet?range=1h")
-        self.assertIn('href="/wallet?range=1h"', html)
-        # Invalid range falls back to 24h.
-        html = self._html("/wallet?range=bogus")
-        self.assertIn('href="/wallet?range=1d"', html)
-        # The chart ">" opens the full P&L chart page.
+        self.assertNotIn('href="/wallet?range=1h"', html)
+        self.assertNotIn("chart-ranges", html)
+        self.assertNotIn("portfolio-chart", html)
+        # The "Full chart ›" link opens the P&L page.
+        self.assertIn("Full chart ›", html)
         self.assertIn('href="/pnl"', html)
 
     def test_home_24h_change_dash_without_snapshots(self):
         self._choose_mode("paper")
         html = self._html("/wallet")
         self.assertIn("change-24h", html)
-        # No recorded snapshots yet: no invented change, no chart.
-        self.assertIn("No chart data yet", html)
+        # No recorded snapshots yet: no invented change. The chart
+        # itself lives on the P&L page now, not on home.
+        self.assertIn("—", html)
+        self.assertNotIn("No chart data yet", html)
 
     def test_home_24h_change_from_snapshot(self):
         self._choose_mode("paper")
@@ -315,9 +320,10 @@ class TestHomePage(UiBase):
         self.assertIn("(+150.00%)", html)
 
     def test_home_holdings_rows_link_to_detail(self):
-        # Home redo: holdings rows are fine print (name + ticker,
-        # amount held, value) — the 24h % and P&L columns live on
-        # the coins page and the coin detail page now.
+        # Home lift: holdings rows are normal-size coin buttons
+        # (name + ticker, amount held, value, 1h %) — the 24h % and
+        # P&L columns live on the coins page and the coin detail
+        # page now.
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")

@@ -8,6 +8,13 @@
 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: radial-gradient(120% 60% at 50% 0%, #2a0705 0%, #0a0505 55%, #050303 100%); color: #e8ecf1; }
 a { color: #ffd700; }
 .topbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: #1a0805; border-bottom: 2px solid #ffb300; position: sticky; top: 0; z-index: 10; flex-wrap: wrap; row-gap: 8px; }
+.top-left { display: flex; align-items: center; gap: 10px; }
+/* Page ID: the page's number in the top-left corner, same spot on
+   every page. Small gold pill on black, readable on a phone. */
+.page-id { font-size: 11px; font-weight: 700; color: #ffd700; background: #000; border: 1px solid #ffb300; border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+/* Slim link to the Trenches page on the Bots page — a plain link,
+   not a card, so it can never be mistaken for the Trenches bot. */
+.trenches-link { display: block; color: #ffd700; text-decoration: none; font-size: 14px; padding: 6px 2px; }
 .brand { font-weight: 900; font-style: italic; font-size: 18px; text-decoration: none; background: linear-gradient(100deg, #ff1e14 0%, #ff5e1f 35%, #ffb300 65%, #ffd700 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .nav-link { color: #b9a99a; text-decoration: none; font-size: 14px; }
@@ -304,11 +311,11 @@ body.trenches-theme .coin-list-panel { background: #000; border-color: #ffd700; 
 .se-sig { font-family: 'Brush Script MT', 'Segoe Script', 'Snell Roundhand', cursive; color: #ffd700; font-size: 38px; transform: rotate(-4deg); text-shadow: 0 0 10px rgba(255, 200, 0, .4); }
 
 /* ------------------------------------------------------------------ */
-/* Home redo: smaller, simpler home. Holdings live in a 1/4-screen  */
-/* scrollable window in fine print (real name + ticker, amount      */
-/* held, value); the rest of the home UI is enlarged to fill the    */
-/* freed space. The page still fits one phone screen — only the     */
-/* holdings window scrolls.                                         */
+/* Home redo: smaller, simpler home. Holdings live in a HALF-screen  */
+/* scrollable window as normal-size coin buttons (real name +       */
+/* ticker, amount held, value, 1hr %); the rest of the home UI is   */
+/* lifted up to fill the freed space. The page still fits one phone */
+/* screen — only the holdings window scrolls.                        */
 /* ------------------------------------------------------------------ */
 body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
 .home-screen .fox-logo { width: clamp(56px, 10dvh, 96px); height: clamp(56px, 10dvh, 96px); }
@@ -323,11 +330,11 @@ body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
 .send-receive-btn { flex: 1; text-align: center; padding: 10px; font-size: 15px; }
 .home-screen .section-title { margin: 8px 0 6px; }
 .holdings-summary { margin: 2px 0 6px; }
-.holdings-panel { flex: 0 0 25dvh; height: 25dvh; max-height: 25dvh; overflow-y: auto; }
-.holdings-row { font-size: 12px; padding: 7px 8px; }
-.holdings-row .coin-ico { flex: 0 0 28px; width: 28px; height: 28px; font-size: 13px; }
-.holdings-name { display: block; font-size: 13px; }
-.holdings-amount { display: block; font-size: 11px; margin-top: 1px; }
+.holdings-panel { flex: 0 1 50dvh; min-height: 140px; max-height: 50dvh; overflow-y: auto; }
+.holdings-row { font-size: 16px; padding: 11px 10px; }
+.holdings-row .coin-ico { flex: 0 0 34px; width: 34px; height: 34px; font-size: 15px; }
+.holdings-name { display: block; font-size: 15px; }
+.holdings-amount { display: block; font-size: 13px; margin-top: 1px; }
 
 /* Coin detail page: four action buttons + the live chart. */
 .coin-actions-row { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
@@ -343,3 +350,32 @@ body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
   .home-wordmark { font-size: 30px; }
   .home-total .portfolio-chart { max-width: 200px; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Home lift: everything lifted up, holdings take HALF the screen.   */
+/* This supersedes the 1/4-screen fine-print holdings of the home    */
+/* redo: each held coin is a NORMAL-SIZE coin button (name + ticker  */
+/* + value + 1hr %), the action buttons sit in one row right under  */
+/* the fox logo, and the page still fits one phone screen — only     */
+/* the holdings list scrolls internally. The portfolio chart moved   */
+/* off the home page to make room (the full chart is one tap away    */
+/* on the P&L page via "Full chart ›"); the total and 24h change    */
+/* stay. The holdings panel is 50dvh on tall screens and shrinks    */
+/* (flex-shrink) on short ones so nothing is ever clipped.          */
+/* ------------------------------------------------------------------ */
+body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
+.home-top { margin: 0 0 4px; }
+.home-logo { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 0 0 2px; }
+.home-logo .fox-logo { margin: 0; flex: 0 0 auto; }
+.home-logo .home-wordmark { margin: 0; text-align: left; }
+/* One row of four action buttons, raised near the top under the fox. */
+.home-actions-row { display: flex; gap: 8px; margin: 6px 0 8px; }
+.home-actions-row .buy-btn, .home-actions-row .sell-btn { flex: 1 1 0; padding: 12px 2px; font-size: 17px; }
+.home-actions-row .send-receive-btn { flex: 1 1 0; padding: 12px 2px; font-size: 15px; text-align: center; }
+.home-total { margin: 2px 0 4px; padding: 10px 14px; }
+.home-total .change-24h .chart-more { font-size: 14px; font-weight: 700; padding: 0 4px; }
+.home-screen .section-title { margin: 6px 0 4px; }
+.holdings-summary { margin: 2px 0 6px; }
+/* 1-hour % column on each holdings button. */
+.holdings-1h { flex: 0 0 auto; text-align: right; font-weight: 800; font-size: 16px; }
+.holdings-1h-label { display: block; font-size: 11px; font-weight: 700; color: #b9a99a; }

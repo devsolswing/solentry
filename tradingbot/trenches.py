@@ -173,6 +173,46 @@ def fetch_prices_for_mints(mints, http_get=None) -> dict:
         return {}
 
 
+def fetch_mint_1h_changes(mints, http_get=None) -> dict:
+    """1-hour % change for specific mints (held positions), from the
+    same DexScreener pairs `fetch_prices_for_mints` reads: the best
+    (highest-liquidity) pump.fun / PumpSwap pair's priceChange.h1.
+
+    Returns {mint: change_1h_pct}. A mint with no usable pair, or a
+    pair with no 1h figure, is left OUT (the caller shows "—") — a
+    change is never guessed — and any fetch failure returns {}.
+    """
+    http_get = http_get or _default_get
+    wanted = [m for m in dict.fromkeys(mints or []) if m]
+    if not wanted:
+        return {}
+    try:
+        out = {}
+        for i in range(0, len(wanted), _CHUNK):
+            chunk = wanted[i:i + _CHUNK]
+            data = http_get(TOKENS_URL.format(",".join(chunk)))
+            by_mint: dict = {}
+            for pair in data.get("pairs") or []:
+                base = pair.get("baseToken") or {}
+                addr = base.get("address")
+                if addr:
+                    by_mint.setdefault(addr, []).append(pair)
+            for mint, pairs in by_mint.items():
+                best = _best_pair(pairs)
+                if best is None:
+                    continue
+                change = (best.get("priceChange") or {}).get("h1")
+                if change is None:
+                    continue
+                try:
+                    out[mint] = float(change)
+                except (TypeError, ValueError):
+                    continue
+        return out
+    except Exception:
+        return {}
+
+
 def fetch_trenches_scan(mints=None, http_get=None) -> dict:
     """Scan the trenches once.
 

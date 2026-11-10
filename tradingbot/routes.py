@@ -42,6 +42,7 @@ from . import donations as donations_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
 from . import pnl as pnl_mod
+from .page_numbers import page_number_for
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
 from .charts import (CHART_RANGES, fetch_market_chart, fetch_trade_flow,
@@ -66,7 +67,8 @@ from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
                      lamports_to_sol, sol_to_lamports)
-from .trenches import fetch_prices_for_mints, fetch_trenches_scan
+from .trenches import (fetch_mint_1h_changes, fetch_prices_for_mints,
+                       fetch_trenches_scan)
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
@@ -466,12 +468,13 @@ def _real_avg_price(app, mint: str, amount_sol: float,
 
 def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
     """The coins list: ONLY the coins the user holds in the ACTIVE
-    mode, with name, ticker, current price and P&L. Coins the user
-    does not hold are not listed here at all — the trenches list and
-    the quick Buy/Sell popup (with live search) are how new coins
-    are found. P&L is (current price − average cost) × amount; a
-    holding with no current price has P&L None and is valued at
-    cost — never guessed."""
+    mode, with name, ticker, current price, P&L and 1-hour % change.
+    Coins the user does not hold are not listed here at all — the
+    trenches list and the quick Buy/Sell popup (with live search)
+    are how new coins are found. P&L is (current price − average
+    cost) × amount; a holding with no current price has P&L None
+    and is valued at cost — never guessed. A holding with no 1h
+    figure in the feed has change_1h None ("—" on the page)."""
     price_map = {c: e.get("price") for c, e in prices["prices"].items()}
     if mode == "devnet":
         held = {h["coin_id"]: h for h in _real_holdings_view(db, user_id)}
@@ -480,6 +483,7 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
             "SELECT coin_id, amount, avg_price FROM paper_holdings "
             "WHERE user_id = ?", (user_id,)).fetchall()}
     mint_ids = [c for c in held if c not in price_map]
+    changes_1h: dict = {}
     if mint_ids:
         try:
             for mint, price in fetch_prices_for_mints(
@@ -487,6 +491,10 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
                 price_map[mint] = price
         except Exception:
             pass
+        try:
+            changes_1h = fetch_mint_1h_changes(mint_ids)
+        except Exception:
+            changes_1h = {}
     rows = []
     for symbol, info in COINS.items():
         h = held.get(symbol)
@@ -500,6 +508,8 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
                      "ticker": symbol, "price": price,
                      "change_24h": prices["prices"].get(symbol, {}).get(
                          "change_24h"),
+                     "change_1h": prices["prices"].get(symbol, {}).get(
+                         "change_1h"),
                      "held": float(h["amount"]),
                      "avg_price": float(h["avg_price"]),
                      "pnl": pnl, "is_mint": False,
@@ -517,6 +527,7 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
                      "name": "Pump.fun token " + mint[:4] + "…" + mint[-4:],
                      "ticker": mint[:4] + "…",
                      "price": price, "change_24h": None,
+                     "change_1h": changes_1h.get(mint),
                      "held": float(h["amount"]),
                      "avg_price": float(h["avg_price"]),
                      "pnl": pnl, "is_mint": True,
@@ -730,6 +741,11 @@ def register_routes(app: Flask) -> None:
                 "header_balance": header_balance,
                 "header_mode": header_balance["mode"]
                 if header_balance else "paper",
+                # Page ID: the page's number in the top-left corner
+                # (see page_numbers.py — the single source of truth).
+                # None on popups, confirm screens and API/action
+                # endpoints, where no label renders.
+                "page_number": page_number_for(request.endpoint),
                 # The post-sign-in Demo / Real chooser: shown on any
                 # logged-in page until the user picks (the wallet is
                 # the landing page, so that is where it appears

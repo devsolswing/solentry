@@ -9,7 +9,10 @@
 <body{% if current_user %} class="app-shell {% block body_class %}{% endblock %}"{% endif %}>
 {% block header %}
 <header class="topbar">
-  <a class="brand" href="{% if current_user %}{{ url_for('wallet') }}{% else %}{{ url_for('login') }}{% endif %}">SolEntry</a>
+  <div class="top-left">
+    {% include "_page_id.html" %}
+    <a class="brand" href="{% if current_user %}{{ url_for('wallet') }}{% else %}{{ url_for('login') }}{% endif %}">SolEntry</a>
+  </div>
   {% if current_user %}
   <div class="top-actions">
     {# Paper/Devnet switch lives in the topbar now — same form,

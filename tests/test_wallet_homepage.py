@@ -1,10 +1,12 @@
-"""Wallet-homepage redesign.
+"""Wallet-homepage redesign + home lift.
 
 Rules under test:
 - The wallet is the homepage: sign-up, login (password and passkey)
-  and the mode chooser all land on /wallet, and the wallet page shows
-  the user's coins with ticker, position P&L and 24h %s, the
-  Dogewifhat door art (embedded base64), and a Canadian flag.
+  and the mode chooser all land on /wallet, and the wallet page
+  shows the user's coins as normal-size buttons with ticker, amount
+  held, value and 1h % (home lift), the Dogewifhat door art
+  (embedded base64), and a Canadian flag. Position P&L and 24h %
+  live on the coins page and the coin detail page.
 - Coin detail page: tap a coin and get a market chart with 24hr /
   1day / 1w / 1m / 1y / all-time ranges, 24h high and low, buyers and
   sellers %, and Buy / Sell / Sell all — all in SOL. Chart data is
@@ -56,12 +58,15 @@ class FakeRpc:
 
 
 def make_prices(changes):
-    """changes: {coin: (price, change_24h)}"""
-    return {
-        "prices": {c: {"price": p, "change_24h": ch}
-                   for c, (p, ch) in changes.items()},
-        "source": "snapshot", "as_of": "test",
-    }
+    """changes: {coin: (price, change_24h)} or
+    (price, change_24h, change_1h)"""
+    out = {}
+    for c, tup in changes.items():
+        price, ch24 = tup[0], tup[1]
+        ch1h = tup[2] if len(tup) > 2 else None
+        out[c] = {"price": price, "change_24h": ch24,
+                  "change_1h": ch1h}
+    return {"prices": out, "source": "snapshot", "as_of": "test"}
 
 
 def fake_chart(points):
@@ -81,7 +86,7 @@ class HomeBase(unittest.TestCase):
             routes, "get_prices",
             return_value=make_prices({
                 "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25), "USDC": (1.0, 0.0),
+                "SOL": (10.0, 5.25, 2.5), "USDC": (1.0, 0.0),
                 "DOGE": (0.07, 3.0), "PEPE": (0.000005, -1.0),
                 "BONK": (0.000003, 8.0), "JUP": (0.23, -0.5)}))
         self.prices_patch.start()
@@ -162,12 +167,12 @@ class TestWalletIsHomepage(HomeBase):
             (self.user_id,)).fetchone()["active_mode"], "paper")
         self.assertNotIn("How do you want to trade?", self._html("/wallet"))
 
-    def test_wallet_holdings_fine_print_name_ticker_amount_value(self):
-        # Home redo: holdings are a 1/4-screen scrollable window in
-        # fine print — real name + ticker, amount held, value — with
-        # a small-print summary (coin count + total). The old 24h %
-        # and P&L columns moved to the coins page and the coin detail
-        # page; the home rows no longer carry them.
+    def test_wallet_holdings_normal_size_name_ticker_amount_value_1h(self):
+        # Home lift: holdings are a HALF-screen scrollable list of
+        # NORMAL-SIZE coin buttons — real name + ticker, amount held,
+        # value, and the 1-hour % from the feed. The old 24h % and
+        # P&L columns still live on the coins page and the coin
+        # detail page; the home rows do not carry them.
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
@@ -181,6 +186,9 @@ class TestWalletIsHomepage(HomeBase):
         self.assertIn("1.0000 SOL", html)
         self.assertIn("$10.00", html)
         self.assertIn("1 coin", html)
+        # 1-hour % (mocked +2.5%) on the row.
+        self.assertIn("holdings-1h", html)
+        self.assertIn("+2.50%", html)
         self.assertNotIn("coin-pnl", html)
         self.assertNotIn("coin-change", html)
         # Tapping a coin goes to its detail page.

@@ -63,20 +63,21 @@
     <h2>🪙 Memecoin build</h2>
     <p class="muted small">Bots that scan pump.fun and PumpSwap for new memecoins. They follow strict rules you set — and never trade outside them or their limits.</p>
     <p class="muted small">Trenches (paper): scans the trenches every minute, buys a coin gaining 3.4% in 5 minutes (strongest gainer wins), sells 10% at +3% profit and the rest at +10%, sells everything if it falls 7% below its highest price since holding. Or ask the assistant: “create the trenches bot”.</p>
+    {% if not memecoin_bots %}
     <p>
       <form method="post" action="{{ url_for('bot_preset_trenches') }}" class="inline">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="btn small" type="submit">+ Create the Trenches bot</button>
       </form>
     </p>
+    {% else %}
+    <p class="muted small">Your Trenches bot is in the carousel above.</p>
+    {% endif %}
     <p class="muted small">The Scanner bot lives in Edit Bots under the Memecoin build category — ask the assistant: “create the scanner bot”.</p>
   </div>
   {% endif %}
 
-  <a class="card trenches-card" href="{{ url_for('trenches') }}">
-    <span class="trenches-card-title">🔥 Trenches</span>
-    <span class="muted small">Fresh pump.fun tokens by 1h gain — tap to trade them →</span>
-  </a>
+  <a class="trenches-link" href="{{ url_for('trenches') }}">🔥 Browse the Trenches page — fresh pump.fun tokens by 1h gain →</a>
 
   <p class="muted small">Bots suggest trades — they never move real money on their own unless you turn silent trading on for that bot, and silent is off by default. Every suggestion waits for your approval.</p>
   <p class="mode-banner"><strong>{{ mode_label }}</strong> — only {{ mode_label }} bots are shown here. Switch mode in the topbar to see the other side.</p>

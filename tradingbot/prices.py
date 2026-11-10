@@ -42,7 +42,8 @@ _cache: dict = {"at": 0.0, "data": None}
 def _fetch_live() -> dict | None:
     ids = ",".join(c["coingecko"] for c in COINS.values())
     url = ("https://api.coingecko.com/api/v3/simple/price"
-           f"?ids={ids}&vs_currencies=usd&include_24hr_change=true")
+           f"?ids={ids}&vs_currencies=usd&include_24hr_change=true"
+           "&include_1hr_change=true")
     try:
         req = urllib.request.Request(
             url, headers={"User-Agent": "trading-bot-app"})
@@ -58,6 +59,10 @@ def _fetch_live() -> dict | None:
         out[symbol] = {
             "price": float(entry["usd"]),
             "change_24h": entry.get("usd_24h_change"),
+            # 1-hour change for the home holdings list. A coin the
+            # feed has no 1h figure for gets None ("—" on the page)
+            # — never guessed.
+            "change_1h": entry.get("usd_1h_change"),
         }
     return out
 
@@ -73,10 +78,12 @@ def clear_price_cache() -> None:
 
 
 def get_prices() -> dict:
-    """Return {coin: {price, change_24h}, source, as_of}.
+    """Return {coin: {price, change_24h, change_1h}, source, as_of}.
 
     source is 'live' only when CoinGecko answered just now; otherwise
-    the baked snapshot is returned and labeled 'snapshot'.
+    the baked snapshot is returned and labeled 'snapshot'. A change
+    the feed has no figure for is None — the page shows "—", never
+    a guessed number.
     """
     now = time.time()
     if _cache["data"] and now - _cache["at"] < _CACHE_TTL_SECONDS:
@@ -87,7 +94,8 @@ def get_prices() -> dict:
                 "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
     else:
         data = {
-            "prices": {s: {"price": p, "change_24h": None}
+            "prices": {s: {"price": p, "change_24h": None,
+                           "change_1h": None}
                        for s, p in SNAPSHOT_PRICES.items()},
             "source": "snapshot",
             "as_of": SNAPSHOT_AS_OF,
