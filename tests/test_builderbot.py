@@ -765,6 +765,54 @@ class TestBuilderBotHttp(unittest.TestCase):
         self.assertEqual(json.loads(bot["rules_json"])["kind"],
                          "trenches")
 
+    def test_full_chatbox_flow_asks_each_question_in_order(self):
+        """Regression: all 12 questions are asked, in order, each
+        with its own suggestions — and the created bot stores the
+        stop loss the user actually answered. A double-sent
+        suggestion used to answer the NEXT question too, so the
+        stop-loss question was skipped (see
+        test_chatbox_sends_each_suggestion_once)."""
+        self.client.get("/bots/create")
+        for i, answer in enumerate(TestConversation.ANSWERS):
+            data = self._ask(answer)
+            if i < len(TestConversation.ANSWERS) - 1:
+                next_step = bb.STEPS[i + 1]
+                self.assertEqual(
+                    data["messages"][-1]["text"],
+                    bb._question_text(next_step))
+                self.assertEqual(data["suggestions"],
+                                 next_step["suggestions"])
+            else:
+                self.assertTrue(data["confirm"])
+            if i == 6:  # just answered max_open — stop loss is next
+                self.assertTrue(
+                    data["messages"][-1]["text"].startswith(
+                        "Stop loss"))
+                self.assertEqual(data["suggestions"],
+                                 ["5%", "7%", "10%"])
+        data = self._ask("yes")
+        self.assertIn("created", data)
+        bot = self.db.execute(
+            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+        self.assertIsNotNone(bot)
+        # The stop loss the user actually answered (7%), not a value
+        # leaked from another question.
+        self.assertEqual(bot["stop_loss_pct"], 7.0)
+
+    def test_chatbox_sends_each_suggestion_once(self):
+        """Regression for the skipped stop-loss question: the
+        chatbox used to wire TWO click handlers onto every
+        suggestion button (one direct, one delegated on the
+        container), so one tap sent the answer twice and the
+        duplicate was parsed as the answer to the next question.
+        There must be exactly one handler, plus an in-flight guard
+        so a double tap can never send twice."""
+        html = self.client.get("/bots/create").get_data(as_text=True)
+        self.assertNotIn("b.addEventListener('click'", html)
+        self.assertIn("suggBox.addEventListener('click'", html)
+        self.assertIn("let sending = false;", html)
+        self.assertIn("if (!text || sending) return;", html)
+
     def test_keypair_paste_refused_and_never_stored(self):
         self.client.get("/bots/create")
         data = self._ask(KEYPAIR_JSON)

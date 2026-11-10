@@ -33,34 +33,51 @@ function showSuggestions(list) {
     b.className = 'btn ghost small suggestion';
     b.type = 'button';
     b.textContent = s;
-    b.addEventListener('click', function () { send(s); });
+    // No click listener here on purpose: the single delegated
+    // listener on suggBox below handles every suggestion tap
+    // (server-rendered and rebuilt alike). A second listener here
+    // used to fire send() twice per tap, and the duplicate answer
+    // was parsed as the answer to the NEXT question — silently
+    // skipping it (the stop-loss question was answered with the
+    // max-open value before the user ever saw it).
     suggBox.appendChild(b);
   });
 }
+// One answer in flight at a time. While a send is in flight,
+// further taps are ignored — a second copy of an answer must never
+// reach the server, or it advances the conversation a second step.
+let sending = false;
 async function send(text) {
   text = (text || '').trim();
-  if (!text) return;
+  if (!text || sending) return;
+  sending = true;
   input.value = '';
-  const res = await fetch('{{ url_for('api_builderbot') }}', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: text, csrf_token: '{{ csrf_token }}'})
-  });
-  const data = await res.json();
-  // The reply carries the whole history; render only what is new
-  // since the last turn (your message and builderBot's answer both
-  // come back in it — that is what avoids showing either twice).
-  const seen = parseInt(log.dataset.seen || '0', 10);
-  (data.messages || []).slice(seen).forEach(function (m) {
-    log.innerHTML += '<p><strong>' + (m.role === 'builderbot' ? 'builderBot:' : 'You:') + '</strong> ' + esc(m.text) + '</p>';
-  });
-  log.dataset.seen = (data.messages || []).length;
-  showSuggestions(data.suggestions || []);
-  if (data.created) {
-    log.innerHTML += '<p><a class="btn big" href="/bots/' + data.created.bot_id + '">See your new bot →</a></p>';
-    input.disabled = true;
+  try {
+    const res = await fetch('{{ url_for('api_builderbot') }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: text, csrf_token: '{{ csrf_token }}'})
+    });
+    const data = await res.json();
+    // The reply carries the whole history; render only what is new
+    // since the last turn (your message and builderBot's answer both
+    // come back in it — that is what avoids showing either twice).
+    const seen = parseInt(log.dataset.seen || '0', 10);
+    (data.messages || []).slice(seen).forEach(function (m) {
+      log.innerHTML += '<p><strong>' + (m.role === 'builderbot' ? 'builderBot:' : 'You:') + '</strong> ' + esc(m.text) + '</p>';
+    });
+    log.dataset.seen = (data.messages || []).length;
+    showSuggestions(data.suggestions || []);
+    if (data.created) {
+      log.innerHTML += '<p><a class="btn big" href="/bots/' + data.created.bot_id + '">See your new bot →</a></p>';
+      input.disabled = true;
+    }
+    if (data.cancelled) input.disabled = true;
+  } catch (err) {
+    log.innerHTML += '<p><strong>builderBot:</strong> That did not reach me — check your connection and tap your answer again.</p>';
+  } finally {
+    sending = false;
   }
-  if (data.cancelled) input.disabled = true;
   log.scrollTop = log.scrollHeight;
 }
 document.getElementById('chat-form').addEventListener('submit', async (e) => {

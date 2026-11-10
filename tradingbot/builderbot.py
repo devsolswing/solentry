@@ -424,8 +424,8 @@ STEPS = [
     },
     {
         "key": "stop_loss",
-        "question": "If a coin drops this far below what you paid, "
-                    "sell it. How far? (Stop loss %.)",
+        "question": "Stop loss: if a coin drops this far below what "
+                    "you paid, sell it. How far?",
         "why": "The stop loss is the line that protects you: sell "
                "and take a small loss instead of watching a bad coin "
                "go to zero. 7% is the usual line — it caps what one "
