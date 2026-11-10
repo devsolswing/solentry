@@ -79,4 +79,21 @@
       }
     });
   });
+
+  /* Generic popup windows: any button with data-overlay-open="<id>"
+     opens that overlay; any button with data-overlay-close closes
+     the overlay it sits in. Used by the home Receive window and
+     the coin page's Send / Receive / Buy / Sell windows. */
+  document.querySelectorAll('[data-overlay-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var el = document.getElementById(btn.dataset.overlayOpen);
+      if (el) el.classList.remove('hidden');
+    });
+  });
+  document.querySelectorAll('[data-overlay-close]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var el = btn.closest('.overlay');
+      if (el) el.classList.add('hidden');
+    });
+  });
 })();

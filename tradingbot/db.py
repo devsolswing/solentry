@@ -437,6 +437,14 @@ _MIGRATIONS = (
     ("scanner_top10", "share_pct", "REAL"),
     ("scanner_top10", "rise_streak", "INTEGER NOT NULL DEFAULT 0"),
     ("scanner_top10", "last_checked_at", "TEXT NOT NULL DEFAULT ''"),
+    # When the user last answered the Demo / Real mode chooser
+    # (UTC timestamp, or '' when never answered since sign-in). The
+    # chooser shows once after sign-in; a sign-in clears this, an
+    # answer sets it. Remembering it in the database (not just the
+    # session cookie) means a dropped session flag alone can never
+    # make the chooser reappear mid-session — the user can still
+    # switch modes any time from the HUD.
+    ("users", "mode_chosen_at", "TEXT NOT NULL DEFAULT ''"),
 )
 
 

@@ -162,17 +162,27 @@ class TestWalletIsHomepage(HomeBase):
             (self.user_id,)).fetchone()["active_mode"], "paper")
         self.assertNotIn("How do you want to trade?", self._html("/wallet"))
 
-    def test_wallet_shows_coins_with_ticker_pnl_and_24h(self):
+    def test_wallet_holdings_fine_print_name_ticker_amount_value(self):
+        # Home redo: holdings are a 1/4-screen scrollable window in
+        # fine print — real name + ticker, amount held, value — with
+        # a small-print summary (coin count + total). The old 24h %
+        # and P&L columns moved to the coins page and the coin detail
+        # page; the home rows no longer carry them.
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
-        self.assertIn("Your coins", html)
+        self.assertIn("HOLDINGS", html)
         self.assertIn("Solana", html)
         self.assertIn("SOL", html)
-        # 24h change column alongside P&L, on the wallet homepage.
-        self.assertIn("+5.2%", html)
-        self.assertIn("coin-pnl", html)
-        self.assertIn("coin-change", html)
+        self.assertIn("holdings-row", html)
+        self.assertIn("holdings-panel", html)
+        self.assertIn("holdings-summary", html)
+        # 1 SOL bought at the mocked $10 price: 1.0000 SOL · $10.00.
+        self.assertIn("1.0000 SOL", html)
+        self.assertIn("$10.00", html)
+        self.assertIn("1 coin", html)
+        self.assertNotIn("coin-pnl", html)
+        self.assertNotIn("coin-change", html)
         # Tapping a coin goes to its detail page.
         self.assertIn("/coins/SOL/detail", html)
         # Portfolio header + support ID are on the homepage.
@@ -274,7 +284,13 @@ class TestCoinDetail(HomeBase):
                                              "no chart history"}):
             html = self._html("/coins/SOL/detail")
         self.assertIn("No data yet", html)
-        self.assertNotIn("<svg", html)
+        # The historical range chart draws nothing when it has no
+        # points (its SVG carries the P&L-chart label). The separate
+        # live chart is still on the page — an empty line that fills
+        # with real ticks once they arrive, never invented history.
+        self.assertNotIn('aria-label="P&amp;L chart"', html)
+        self.assertIn('id="live-chart"', html)
+        self.assertIn("Waiting for the first live tick", html)
         self.assertIn("24h high", html)
         self.assertIn("—", html)
 

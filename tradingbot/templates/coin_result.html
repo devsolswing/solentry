@@ -7,6 +7,6 @@
   {% for line in lines %}
   <p>{{ line }}</p>
   {% endfor %}
-  <p><a class="btn big" href="{{ url_for('dashboard') }}">← Back to coins</a></p>
+  <p><a class="btn big" href="{{ url_for('coin_detail', coin_id=coin_id) }}">← Back to coin</a> <a class="btn ghost big" href="{{ url_for('dashboard') }}">← Back to coins</a></p>
 </div>
 {% endblock %}

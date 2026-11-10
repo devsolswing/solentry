@@ -4,7 +4,6 @@
 {% block content %}
 <div class="home-screen">
   <div class="home-top">
-    <button class="icon-btn" type="button" data-go-back data-fallback="/wallet" aria-label="Back">✕</button>
     <a class="btn ghost small" href="{{ url_for('dashboard') }}#activity">Logs</a>
   </div>
 
@@ -17,7 +16,6 @@
     <p class="portfolio-mode">TOTAL PORTFOLIO VALUE <span class="wallet-flag" title="Canada">🇨🇦</span></p>
     <p class="portfolio-total" data-balance>{% if mode == 'paper' %}${{ "{:,.2f}".format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "{:,.2f}".format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable right now{% endif %}{% endif %}</p>
     <p class="change-24h">{% if change_24h %}<span class="{{ 'up' if change_24h.delta >= 0 else 'down' }}">{% if change_24h.delta >= 0 %}+{% endif %}{% if mode == 'paper' %}${{ "{:,.2f}".format(change_24h.delta) }}{% else %}{{ "%.4f"|format(change_24h.delta) }} SOL{% endif %} ({{ "%+.2f"|format(change_24h.pct) }}%)</span>{% else %}<span class="muted">—</span>{% endif %}</p>
-    <p class="muted small">{% if mode == 'paper' %}Paper balance: ${{ "%.2f"|format(paper_cash) }} CAD cash · Holdings ${{ "%.2f"|format(holdings_value) }} CAD{% else %}Your app wallet, on-chain (devnet){% endif %}</p>
     <div class="chart-bar">
       <div class="chart-ranges home-ranges">
         {% for key, label in [('1h', '1H'), ('1d', '24H'), ('1w', '1W'), ('1mo', '1M'), ('1y', '1Y'), ('all', 'All')] %}
@@ -36,17 +34,19 @@
     <button class="btn buy-btn" type="button" data-quick-trade-open data-trade="buy">↗ BUY</button>
     <button class="btn sell-btn" type="button" data-quick-trade-open data-trade="sell">↘ SELL</button>
   </div>
+  <div class="buy-sell-row send-receive-row">
+    <a class="btn ghost send-receive-btn" href="{{ url_for('wallet_send') }}">↑ Send</a>
+    <button class="btn ghost send-receive-btn" type="button" data-overlay-open="home-receive-overlay">↓ Receive</button>
+  </div>
 
   <h2 class="section-title">HOLDINGS <a class="section-link" href="{{ url_for('dashboard') }}">All coins →</a></h2>
+  <p class="muted small holdings-summary">{% if mode == 'paper' %}Paper balance: ${{ "%.2f"|format(paper_cash) }} CAD cash · {% endif %}{% if coin_rows %}{{ coin_rows|length }} coin{{ 's' if coin_rows|length != 1 else '' }} · total ${{ "%.2f"|format(holdings_value) }}{% else %}No coins held yet in {{ mode_label }}.{% endif %}</p>
   <div class="coin-list-panel holdings-panel">
     <div class="coin-list">
       {% for row in coin_rows %}
-      <a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
+      <a class="coin-row holdings-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
         <span class="coin-ico" aria-hidden="true">{{ row.ticker[:1] }}</span>
-        <span class="coin-name"><strong>{{ row.name }}</strong><span class="muted small"> {{ row.ticker }}</span></span>
-        <span class="coin-price">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span>
-        <span class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
-        <span class="coin-pnl">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+        <span class="coin-name"><span class="holdings-name"><strong>{{ row.name }}</strong><span class="muted"> ({{ row.ticker }})</span></span><span class="holdings-amount muted">{{ "%.4f"|format(row.held) }} {{ row.ticker }} · {% if row.value is not none %}${{ "%.2f"|format(row.value) }}{% else %}value unavailable{% endif %}</span></span>
       </a>
       {% endfor %}
       {% if not coin_rows %}
@@ -54,12 +54,22 @@
       {% endif %}
     </div>
   </div>
-  <p class="muted small">Your coins in {{ mode_label }} — tap one for its chart, 24h high/low, buyers &amp; sellers, and Buy / Sell / Sell all in SOL. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live){% endif %}.</p>
-
   <a class="card trenches-card" href="{{ url_for('trenches') }}">
     <span class="trenches-card-title">🔥 Trenches</span>
     <span class="muted small">Fresh pump.fun tokens by 1h gain — tap to trade them →</span>
   </a>
 </div>
 {% include "_quick_trade.html" %}
+{# Receive window: your app wallet address + copy. Opens from the
+   Receive button on the home page; a separate window, not a page. #}
+<div class="overlay hidden" id="home-receive-overlay" role="dialog" aria-label="Receive SOL">
+  <div class="coin-popup">
+    <p class="popup-head"><button class="popup-close" type="button" data-overlay-close aria-label="Close">✕</button></p>
+    <h2>Receive SOL</h2>
+    <p class="muted small">Send SOL to this address — it lands in your app wallet ({{ mode_label }}).</p>
+    <p class="addr">{{ receive_address }}</p>
+    <p><button class="btn big" type="button" data-copy="{{ receive_address }}">Copy address</button></p>
+    <p><button class="btn ghost big" type="button" data-overlay-close>← Back to home</button></p>
+  </div>
+</div>
 {% endblock %}

@@ -212,6 +212,35 @@ def _rotate_session(user_id: int) -> None:
     session["user_id"] = user_id
 
 
+def _mark_mode_chosen(db, user_id: int) -> None:
+    """Record in the database that the user answered the Demo / Real
+    chooser since sign-in (users.mode_chosen_at). Called on
+    choose_mode and on a HUD mode switch — either one is a mode
+    choice, so the chooser must not come back while this sign-in
+    lasts, even if the session flag is lost."""
+    db.execute("UPDATE users SET mode_chosen_at = ? WHERE id = ?",
+               (_now(), user_id))
+    db.commit()
+
+
+def _clear_mode_chosen(db, user_id: int) -> None:
+    """Forget the chooser answer: called on every sign-in, so the
+    chooser shows exactly once after sign-in, then never again
+    until the next sign-in."""
+    db.execute("UPDATE users SET mode_chosen_at = '' WHERE id = ?",
+               (user_id,))
+    db.commit()
+
+
+def _mode_chosen_in_db(db, user_id: int) -> bool:
+    """True when the user answered the chooser since sign-in
+    (mode_chosen_at set in the database)."""
+    row = db.execute(
+        "SELECT mode_chosen_at FROM users WHERE id = ?",
+        (user_id,)).fetchone()
+    return bool(row and row["mode_chosen_at"])
+
+
 def _record_login_event(app, username: str, success: bool) -> None:
     """One row per login attempt, for anomaly detection."""
     _db(app).execute(
@@ -473,7 +502,9 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
                          "change_24h"),
                      "held": float(h["amount"]),
                      "avg_price": float(h["avg_price"]),
-                     "pnl": pnl, "is_mint": False})
+                     "pnl": pnl, "is_mint": False,
+                     "value": (float(h["amount"]) * float(price))
+                     if price is not None else None})
     for mint in sorted(held):
         if mint in COINS:
             continue
@@ -488,7 +519,9 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
                      "price": price, "change_24h": None,
                      "held": float(h["amount"]),
                      "avg_price": float(h["avg_price"]),
-                     "pnl": pnl, "is_mint": True})
+                     "pnl": pnl, "is_mint": True,
+                     "value": (float(h["amount"]) * float(price))
+                     if price is not None else None})
     return rows
 
 
@@ -700,9 +733,15 @@ def register_routes(app: Flask) -> None:
                 # The post-sign-in Demo / Real chooser: shown on any
                 # logged-in page until the user picks (the wallet is
                 # the landing page, so that is where it appears
-                # first). The choice sticks for the session.
+                # first). The choice sticks for the sign-in: it is
+                # remembered in the session AND in the database, so
+                # a dropped session flag alone can never make the
+                # chooser reappear mid-session. Signing in clears
+                # the database flag, so the chooser shows once
+                # after the next sign-in.
                 "show_mode_chooser": user is not None
-                and not session.get("mode_chosen"),
+                and not session.get("mode_chosen")
+                and not _mode_chosen_in_db(_db(app), user["id"]),
                 # Cloudflare Turnstile site key, or '' when the
                 # challenge is not configured (then no widget renders
                 # and login/signup run without it).
@@ -788,6 +827,9 @@ def register_routes(app: Flask) -> None:
             _log(app, user_id, "signup",
                  "Account created; app wallet generated.")
             _rotate_session(user_id)
+            # Fresh sign-in: the mode chooser shows once, then the
+            # answer is remembered (see _clear_mode_chosen).
+            _clear_mode_chosen(_db(app), user_id)
             flash("Welcome! Your app wallet was created for you.")
             return redirect(url_for("wallet"))
         return render_template("auth.html", mode="signup")
@@ -838,6 +880,9 @@ def register_routes(app: Flask) -> None:
                 _db(app), f"login-fail:ip:{ip}")
             _record_login_event(app, username, True)
             _rotate_session(row["id"])
+            # Fresh sign-in: the mode chooser shows once, then the
+            # answer is remembered (see _clear_mode_chosen).
+            _clear_mode_chosen(_db(app), row["id"])
             return redirect(url_for("wallet"))
         # SolEntry login page: hero + donate card. The donation wallet is
         # created once, on first use, and its public address is shown as
@@ -1198,6 +1243,9 @@ def register_routes(app: Flask) -> None:
         _record_login_event(app, row["username"], True)
         _log(app, user_id, "passkey_login", "Signed in with a passkey.")
         _rotate_session(user_id)
+        # Fresh sign-in: the mode chooser shows once, then the
+        # answer is remembered (see _clear_mode_chosen).
+        _clear_mode_chosen(_db(app), user_id)
         return jsonify({"ok": True, "redirect": url_for("wallet")})
 
     # ------------------------------------------------------------------
@@ -1435,6 +1483,10 @@ def register_routes(app: Flask) -> None:
                    (mode, user["id"]))
         db.commit()
         session["mode_chosen"] = True
+        # Remembered in the database as well as the session, so a
+        # dropped session flag alone can never make the chooser
+        # reappear mid-session.
+        _mark_mode_chosen(db, user["id"])
         _log(app, user["id"], "mode_switch",
              f"Trading mode chosen: {_mode_label(mode)}.")
         flash(f"You are now on {_mode_label(mode)}.")
@@ -1458,6 +1510,9 @@ def register_routes(app: Flask) -> None:
         db.execute("UPDATE users SET active_mode = ? WHERE id = ?",
                    (mode, user["id"]))
         db.commit()
+        # A HUD switch is a mode choice too — the chooser must not
+        # come back while this sign-in lasts.
+        _mark_mode_chosen(db, user["id"])
         _log(app, user["id"], "mode_switch",
              f"Balance view switched to {mode}.")
         ref = request.referrer or ""
@@ -1550,6 +1605,48 @@ def register_routes(app: Flask) -> None:
             receive_address=wallet["pubkey"] if wallet else "",
             prices_source=prices["source"],
             prices_as_of=prices["as_of"])
+
+    @app.route("/api/coins/<coin_id>/tick")
+    @login_required
+    def coin_tick(coin_id: str):
+        """One live price tick for the coin detail page's live chart.
+
+        The page polls this once a second while it is open (and
+        pauses while the tab is hidden). Prices are never invented:
+        a known coin comes from the CoinGecko feed — cached up to
+        60 seconds server-side, so the returned as_of says when
+        that price was actually fetched — and a mint comes fresh
+        from the DexScreener trenches feed on each tick. When no
+        price is available the response says so (ok false) and the
+        page keeps showing the last real price and its time. This
+        is a read of the same feeds the coins list already uses —
+        no trade, no signing, nothing moves."""
+        upper = (coin_id or "").upper()
+        if upper in COINS:
+            price, source, as_of = _paper_price(upper)
+            if price is None:
+                return jsonify({"ok": False, "coin_id": upper,
+                                "price": None, "source": source,
+                                "as_of": as_of,
+                                "error": "Price unavailable right now."})
+            return jsonify({"ok": True, "coin_id": upper, "price": price,
+                            "source": source, "as_of": as_of})
+        if is_valid_address(coin_id):
+            try:
+                prices = fetch_prices_for_mints([coin_id])
+            except Exception:
+                prices = {}
+            if coin_id in prices:
+                return jsonify({"ok": True, "coin_id": coin_id,
+                                "price": float(prices[coin_id]),
+                                "source": "trenches feed",
+                                "as_of": _now()})
+            return jsonify({"ok": False, "coin_id": coin_id, "price": None,
+                            "source": "trenches feed", "as_of": _now(),
+                            "error": "Price unavailable right now."})
+        return jsonify({"ok": False, "coin_id": coin_id, "price": None,
+                        "source": None, "as_of": _now(),
+                        "error": "Unknown coin — no live price."})
 
     def _coin_result(heading: str, lines: list, ok: bool,
                      coin_id: str, mode_label: str):
@@ -2099,6 +2196,21 @@ def register_routes(app: Flask) -> None:
             trenches_error=trenches_error, mode=mode,
             mode_label=_mode_label(mode))
 
+    def _coin_return_to(value: str):
+        """The coin id behind a return_to of the form "coin:<id>",
+        or None. The id must be well-formed AND resolvable to a
+        real price (a known coin or a live mint) — anything else is
+        not a coin page, so the send falls back to the wallet. The
+        resolved id is returned (known coins come back upper-cased),
+        so the redirect always lands on a real coin detail page."""
+        if not value.startswith("coin:"):
+            return None
+        coin_id = value[5:]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_\-]{0,63}", coin_id):
+            return None
+        resolved, _price, _source = _resolve_coin_price(coin_id)
+        return resolved
+
     @app.route("/wallet/send", methods=["GET", "POST"])
     @login_required
     def wallet_send():
@@ -2147,12 +2259,19 @@ def register_routes(app: Flask) -> None:
             # Step 1 done: the user must confirm on the next screen.
             # return_to=coins (from the coin popup's Send) carries
             # through, so the completed send lands back on the coins
-            # screen instead of the wallet page.
+            # screen instead of the wallet page. return_to=coin:<id>
+            # (from a coin detail page's Send window) carries
+            # through to that coin's page instead.
             return_to = (request.form.get("return_to") or "").strip()
             if return_to == "coins":
                 return redirect(url_for("wallet_send_confirm",
                                         intent_id=cur.lastrowid,
                                         return_to="coins"))
+            coin_id = _coin_return_to(return_to)
+            if coin_id:
+                return redirect(url_for("wallet_send_confirm",
+                                        intent_id=cur.lastrowid,
+                                        return_to=f"coin:{coin_id}"))
             return redirect(url_for("wallet_send_confirm",
                                     intent_id=cur.lastrowid))
         return render_template("send.html")
@@ -2169,12 +2288,21 @@ def register_routes(app: Flask) -> None:
             abort(404)
         return_to = (request.args.get("return_to")
                      or request.form.get("return_to") or "").strip()
-        if return_to != "coins":
+        # "coins" goes back to the coins screen; "coin:<id>" goes
+        # back to that coin's detail page; anything else is not a
+        # real destination and falls back to the wallet page.
+        return_coin_id = _coin_return_to(return_to)
+        if return_to != "coins" and return_coin_id is None:
             return_to = ""
+        elif return_coin_id is not None:
+            return_to = f"coin:{return_coin_id}"
         if request.method == "POST":
             _csrf_check()
             if intent["status"] != "pending":
                 flash("This send was already handled.")
+                if return_coin_id:
+                    return redirect(url_for(
+                        "coin_detail", coin_id=return_coin_id))
                 return redirect(url_for("dashboard" if return_to else
                                         "wallet"))
             # Daily cap, re-checked at confirm time: the intent may
@@ -2235,10 +2363,14 @@ def register_routes(app: Flask) -> None:
                 _log(app, user["id"], "send_failed",
                      "Send failed: " + str(exc)[:120], "real")
                 flash("Send failed: " + str(exc)[:200])
+            if return_coin_id:
+                return redirect(url_for("coin_detail",
+                                        coin_id=return_coin_id))
             return redirect(url_for("dashboard" if return_to else
                                     "wallet"))
         return render_template("send_confirm.html", intent=intent,
-                               return_to=return_to)
+                               return_to=return_to,
+                               return_coin_id=return_coin_id)
 
     # ------------------------------------------------------------------
     # Platform wallets: one wallet per trading platform, per user.

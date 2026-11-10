@@ -5,7 +5,14 @@
   <p><a class="btn ghost small" href="{{ url_for('wallet') }}">← Wallet</a> <a class="btn ghost small" href="{{ url_for('dashboard') }}">Coins</a> <a class="btn small" href="{{ url_for('coin_detail', coin_id=coin.coin_id, range=range_key) }}">↻ Refresh</a></p>
   <h1>{{ coin.name }} <span class="muted">({{ coin.ticker }})</span></h1>
   <p class="muted small">{{ mode_label }}</p>
-  <p class="big-num">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>
+  <p class="big-num" id="live-price">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>
+  <div class="live-chart" id="live-chart" data-tick-url="{{ url_for('coin_tick', coin_id=coin.coin_id) }}">
+    <p class="muted small live-status">Live — updating every second · Last updated <span id="live-updated">—</span></p>
+    <svg id="live-chart-svg" viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Live price chart, last 2 minutes">
+      <polyline id="live-chart-line" fill="none" stroke="#ffd700" stroke-width="1.5" points="" />
+    </svg>
+    <p class="muted small" id="live-chart-note">Waiting for the first live tick…</p>
+  </div>
   <p class="muted small">{% if coin.change_24h is not none %}24h <span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}24h change unavailable{% endif %} · Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
 
   <div class="chart-ranges" role="group" aria-label="Chart range">
@@ -26,9 +33,14 @@
 
   <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ "%.4f"|format(coin.avg_price) }}{% endif %}{% if coin.pnl is not none %} · P&amp;L <strong>{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 
-  {% set trade_coin = coin %}
-  {% include "_trade_ticket.html" %}
+  <div class="coin-actions-row">
+    <button class="btn coin-action-btn" type="button" data-overlay-open="coin-send-overlay">↑ Send</button>
+    <button class="btn coin-action-btn" type="button" data-overlay-open="coin-receive-overlay">↓ Receive</button>
+    <button class="btn coin-action-btn" type="button" data-overlay-open="coin-buy-overlay">Buy</button>
+    <button class="btn coin-action-btn" type="button" data-overlay-open="coin-sell-overlay">Sell</button>
+  </div>
+  {% include "_coin_action_windows.html" %}
 
-  <p class="muted small">All amounts are in SOL. Every trade ends on a confirmation stating the result, then back to coins.</p>
+  <p class="muted small">All amounts are in SOL. Every action ends on a confirmation stating the result, with a way back to this coin.</p>
 </div>
 {% endblock %}

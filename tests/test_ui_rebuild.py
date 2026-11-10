@@ -315,15 +315,20 @@ class TestHomePage(UiBase):
         self.assertIn("(+150.00%)", html)
 
     def test_home_holdings_rows_link_to_detail(self):
+        # Home redo: holdings rows are fine print (name + ticker,
+        # amount held, value) — the 24h % and P&L columns live on
+        # the coins page and the coin detail page now.
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
-        self.assertIn("Your coins", html)
+        self.assertIn("HOLDINGS", html)
         self.assertIn("Solana", html)
         self.assertIn("SOL", html)
-        self.assertIn("+5.2%", html)
-        self.assertIn("coin-pnl", html)
-        self.assertIn("coin-change", html)
+        self.assertIn("holdings-row", html)
+        self.assertIn("1.0000 SOL", html)
+        self.assertIn("$10.00", html)
+        self.assertNotIn("coin-pnl", html)
+        self.assertNotIn("coin-change", html)
         self.assertIn("/coins/SOL/detail", html)
 
 

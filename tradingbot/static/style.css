@@ -302,3 +302,44 @@ body.trenches-theme .coin-list-panel { background: #000; border-color: #ffd700; 
 .se-version { color: #ffd700; font-weight: 700; font-size: 17px; }
 .se-version b { color: #ff2d20; }
 .se-sig { font-family: 'Brush Script MT', 'Segoe Script', 'Snell Roundhand', cursive; color: #ffd700; font-size: 38px; transform: rotate(-4deg); text-shadow: 0 0 10px rgba(255, 200, 0, .4); }
+
+/* ------------------------------------------------------------------ */
+/* Home redo: smaller, simpler home. Holdings live in a 1/4-screen  */
+/* scrollable window in fine print (real name + ticker, amount      */
+/* held, value); the rest of the home UI is enlarged to fill the    */
+/* freed space. The page still fits one phone screen — only the     */
+/* holdings window scrolls.                                         */
+/* ------------------------------------------------------------------ */
+body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
+.home-screen .fox-logo { width: clamp(56px, 10dvh, 96px); height: clamp(56px, 10dvh, 96px); }
+.home-wordmark { font-size: clamp(32px, 5dvh, 44px); }
+.home-total { padding: 10px 14px; }
+.home-total .portfolio-total { font-size: clamp(32px, 5dvh, 44px); }
+/* Narrower chart, same proportions (the SVG keeps its aspect, so
+   nothing is clipped — the full chart is one tap away via ›). */
+.home-total .portfolio-chart { max-width: 280px; margin: 10px auto 0; }
+.buy-btn, .sell-btn { padding: 12px; font-size: 20px; }
+.send-receive-row { margin: 0 0 8px; }
+.send-receive-btn { flex: 1; text-align: center; padding: 10px; font-size: 15px; }
+.home-screen .section-title { margin: 8px 0 6px; }
+.holdings-summary { margin: 2px 0 6px; }
+.holdings-panel { flex: 0 0 25dvh; height: 25dvh; max-height: 25dvh; overflow-y: auto; }
+.holdings-row { font-size: 12px; padding: 7px 8px; }
+.holdings-row .coin-ico { flex: 0 0 28px; width: 28px; height: 28px; font-size: 13px; }
+.holdings-name { display: block; font-size: 13px; }
+.holdings-amount { display: block; font-size: 11px; margin-top: 1px; }
+
+/* Coin detail page: four action buttons + the live chart. */
+.coin-actions-row { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+.coin-action-btn { flex: 1 1 0; padding: 12px 4px; font-size: 15px; }
+.live-chart { background: #000; border: 2px solid #ffb300; border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
+.live-chart svg { width: 100%; height: 90px; display: block; }
+.live-status { margin: 0 0 6px; }
+
+/* Very short screens: shrink the decorative logo and the home
+   chart further so the page still fits one screen. */
+@media (max-height: 740px) {
+  .home-screen .fox-logo { width: 48px; height: 48px; }
+  .home-wordmark { font-size: 30px; }
+  .home-total .portfolio-chart { max-width: 200px; }
+}
