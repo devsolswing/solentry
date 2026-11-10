@@ -54,8 +54,8 @@ from .pnl import portfolio_totals, record_snapshot
 from .prices import get_prices
 from .rules import load_rules
 from .scanner import (check_top10_rug, clear_watches, detect_regime,
-                      gain_3m_pct, next_ladder_rung, record_marks,
-                      top10_total)
+                      gain_3m_pct, next_ladder_rung,
+                      passes_buy_filter, record_marks, top10_total)
 from .signals import signal_for_coin
 from .solana import SolanaRpcClient, lamports_to_sol
 from .trenches import fetch_trenches_scan
@@ -184,7 +184,7 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                 return
             sell_amount = min(amount, held)
             usd = paper_sell(db, bot["user_id"], coin, sell_amount, price,
-                             _now())
+                             _now(), bot_id=bot["id"], exit_reason=reason)
             _close_position(db, bot, coin, sell_amount)
             if ladder_stage is not None:
                 db.execute("UPDATE bot_positions SET ladder_stage = ? "
@@ -234,8 +234,15 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
 
 def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
               price: float, prices_usd: dict, rpc_factory,
-              real_executor, actions: list) -> None:
-    """Buy `coin` for a bot within its limits, or skip with a reason."""
+              real_executor, actions: list,
+              signals: dict | None = None) -> None:
+    """Buy `coin` for a bot within its limits, or skip with a reason.
+
+    `signals` is the buy-time signal snapshot from the feed entry
+    (m5 gain %, 5-minute volume, buys/sells, regime) — recorded on
+    the paper trade so the losing-buy analysis can show how the coin
+    got bought. None for v1 bots and manual buys.
+    """
     if bot["mode"] == "paper":
         bankroll = paper_bankroll(db, bot["user_id"], prices_usd)
         buy_usd = bankroll * float(bot["buy_size_pct"]) / 100.0
@@ -251,7 +258,8 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             return
         try:
             amount, usd = paper_buy(db, bot["user_id"], coin, buy_usd,
-                                    price, _now())
+                                    price, _now(), bot_id=bot["id"],
+                                    signals=signals)
         except InsufficientCash:
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': buy of {coin} skipped — "
@@ -595,6 +603,10 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     bought = 0
     max_new = int(rules["max_new_positions_per_scan"])
     ranked = []
+    # Candidates that passed the buy threshold but failed the
+    # low-performer buy filter — kept so the scan logs one line about
+    # the strongest rejected coin instead of one line per candidate.
+    filtered = []
     if kind == "scanner":
         # The scanner ranks by the 3-minute gain from price marks the
         # loop records itself (scanner.py) — the feed only provides
@@ -610,6 +622,11 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                                entry["price_usd"], now_ts)
             if gain is None or gain < threshold:
                 continue
+            ok, why = passes_buy_filter(
+                entry, rules.get("buy_filter"), gain)
+            if not ok:
+                filtered.append((gain, entry, why))
+                continue
             ranked.append((gain, entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
     elif kind == "trenches":
@@ -622,9 +639,26 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 continue
             if entry["mint"] in held:
                 continue
+            ok, why = passes_buy_filter(
+                entry, rules.get("buy_filter"), float(change))
+            if not ok:
+                filtered.append((float(change), entry, why))
+                continue
             ranked.append((float(change), entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
     if kind in ("trenches", "scanner"):
+        if not ranked and filtered:
+            # Every threshold-passing candidate failed the filter —
+            # say so once, naming the strongest rejected coin.
+            filtered.sort(key=lambda item: item[0], reverse=True)
+            top = filtered[0][1]
+            _log(db, bot["user_id"], "silent_skip",
+                 f"Silent bot '{bot['name']}': strongest candidate "
+                 f"{top.get('symbol') or top['mint']} failed the buy "
+                 f"filter — {filtered[0][2]}. No buy this scan.",
+                 bot["mode"])
+            actions.append({"action": "skip", "coin": top["mint"],
+                            "reason": f"buy filter: {filtered[0][2]}"})
         for _change, entry in ranked:
             if bought >= max_new:
                 break
@@ -637,10 +671,18 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                                 "reason": "max open trades reached"})
                 break
             before = len(actions)
+            signals = {
+                "m5_pct": entry.get("change_5m_pct"),
+                "volume_5m_usd": entry.get("volume_m5_usd"),
+                "buys_5m": entry.get("txns_m5_buys"),
+                "sells_5m": entry.get("txns_m5_sells"),
+                "regime": detect_regime(entry, rules.get("regime")),
+            }
             _buy_coin(db, cfg, bot, entry["mint"], entry["price_usd"],
                       {c: e.get("price", 0.0)
                        for c, e in prices_data["prices"].items()},
-                      rpc_factory, real_executor, actions)
+                      rpc_factory, real_executor, actions,
+                      signals=signals)
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
     else:

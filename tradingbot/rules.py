@@ -95,7 +95,8 @@ from __future__ import annotations
 import copy
 import json
 
-from .scanner import REGIME_DEFAULT, SLOW_LADDER, TRENDING_LADDER
+from .scanner import (BUY_FILTER_DEFAULT, BUY_FILTER_KEYS, REGIME_DEFAULT,
+                      SLOW_LADDER, TRENDING_LADDER)
 
 RULE_VERSION = 1
 RULE_KINDS = ("trenches", "signals", "scanner")
@@ -123,7 +124,8 @@ LIMIT_FIELDS = (
 _TOP_LEVEL_KEYS = (
     "version", "kind", "scan_sources", "scan_interval_seconds", "buy",
     "sell_ladder", "trailing_stop_pct", "rug_sell", "top10_rug",
-    "trending_ladder", "regime", "max_new_positions_per_scan",
+    "trending_ladder", "regime", "buy_filter",
+    "max_new_positions_per_scan",
 )
 
 # Rug-sell defaults (see the module docstring): sell everything on a
@@ -163,6 +165,7 @@ TRENCHES_RULES = {
                     {"pct_of_position": 90, "profit_pct": 10}],
     "trailing_stop_pct": 7.0,
     "rug_sell": dict(RUG_SELL_DEFAULT),
+    "buy_filter": dict(BUY_FILTER_DEFAULT),
     "max_new_positions_per_scan": 1,
 }
 
@@ -221,6 +224,7 @@ SCANNER_RULES = {
     "top10_rug": {"drop_pct": SCANNER_TOP10_DROP_PCT},
     "trending_ladder": [dict(r) for r in TRENDING_LADDER],
     "regime": dict(REGIME_DEFAULT),
+    "buy_filter": dict(BUY_FILTER_DEFAULT),
     "max_new_positions_per_scan": SCANNER_MAX_NEW_PER_SCAN,
 }
 
@@ -454,6 +458,46 @@ def validate_ruleset(raw, bot=None):
             return _fail("The top-10 wallets drop must be between 1% "
                          "and 90%.")
         clean_top10 = {"drop_pct": float(top_drop)}
+    buy_filter = raw.get("buy_filter")
+    clean_filter = None
+    if buy_filter is not None:
+        if kind not in ("trenches", "scanner"):
+            return _fail("The buy filter is a trenches/scanner rule — "
+                         "it only applies to bots that scan the feed.")
+        if not isinstance(buy_filter, dict):
+            return _fail("The buy filter must be a set of settings "
+                         "(minimum 5-minute volume, buy dominance, "
+                         "minimum signal %).")
+        for key in buy_filter:
+            if key in LIMIT_FIELDS:
+                return _fail(f"'{key}' is a bot limit, not a rule.")
+            if key not in BUY_FILTER_KEYS:
+                return _fail(f"Unknown buy filter setting '{key}'.")
+        min_vol = buy_filter.get(
+            "min_volume_5m_usd",
+            BUY_FILTER_DEFAULT["min_volume_5m_usd"])
+        if not _is_number(min_vol) or not 0 <= float(min_vol) <= 1000000:
+            return _fail("The buy filter's minimum 5-minute volume must "
+                         "be between $0 and $1,000,000.")
+        if not isinstance(buy_filter.get("require_buy_dominance", True),
+                          bool):
+            return _fail("'require_buy_dominance' must be true or false.")
+        min_signal = buy_filter.get(
+            "min_signal_pct", BUY_FILTER_DEFAULT["min_signal_pct"])
+        if not _is_number(min_signal) or not 0.1 <= float(min_signal) <= 100:
+            return _fail("The buy filter's minimum signal must be "
+                         "between 0.1% and 100%.")
+        clean_filter = {
+            "min_volume_5m_usd": float(min_vol),
+            "require_buy_dominance": bool(
+                buy_filter.get("require_buy_dominance", True)),
+            "min_signal_pct": float(min_signal),
+        }
+    if kind in ("trenches", "scanner") and clean_filter is None:
+        # Stored rules from before the filter existed load as the new
+        # defaults on the next evaluation — the filter applies to the
+        # Scanner and Trenches bots already running.
+        clean_filter = dict(BUY_FILTER_DEFAULT)
     max_new = raw.get("max_new_positions_per_scan", 1)
     if not isinstance(max_new, int) or isinstance(max_new, bool) \
             or not 1 <= max_new <= 5:
@@ -475,6 +519,8 @@ def validate_ruleset(raw, bot=None):
     }
     if kind == "scanner" or clean_top10 is not None:
         cleaned["top10_rug"] = clean_top10
+    if kind in ("trenches", "scanner"):
+        cleaned["buy_filter"] = clean_filter
     if kind == "scanner":
         cleaned["trending_ladder"] = clean_trending
         cleaned["regime"] = clean_regime
@@ -586,6 +632,15 @@ def summarize_rules(rules) -> str:
             f"combined holdings drop {top10['drop_pct']:.0f}% from "
             f"the peak since holding — the big holders dumping. "
             f"The proceeds stay in SOL.")
+    buy_filter = rules.get("buy_filter")
+    if buy_filter and rules["kind"] in ("trenches", "scanner"):
+        lines.append(
+            f"Buy filter — only buy a real signal: at least "
+            f"${buy_filter['min_volume_5m_usd']:,.0f} of volume in the "
+            f"last 5 minutes"
+            f"{', buys outnumbering sells in the last 5 minutes' if buy_filter['require_buy_dominance'] else ''}, "
+            f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%. "
+            f"A coin missing any of that is skipped, never bought on a guess.")
     lines.append(
         f"At most {rules['max_new_positions_per_scan']} new position(s) "
         f"per scan.")

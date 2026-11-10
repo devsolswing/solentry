@@ -122,8 +122,8 @@ class TestModeSwitch(unittest.TestCase):
         self.assertEqual(mode, "paper")
         html = self._header()
         self.assertIn("Paper", html)
-        # Fresh account: $50 CAD paper cash, no holdings.
-        self.assertIn("$50.00 CAD", html)
+        # Fresh account: $100 CAD paper cash, no holdings.
+        self.assertIn("$100.00 CAD", html)
 
     def test_switch_persists_and_header_follows(self):
         self.client.post("/mode", data={
@@ -149,7 +149,7 @@ class TestModeSwitch(unittest.TestCase):
             "SELECT active_mode FROM users WHERE username = 'alice'"
             ).fetchone()["active_mode"]
         self.assertEqual(mode, "paper")
-        self.assertIn("$50.00 CAD", self._header())
+        self.assertIn("$100.00 CAD", self._header())
 
     def test_invalid_mode_changes_nothing(self):
         resp = self.client.post("/mode", data={

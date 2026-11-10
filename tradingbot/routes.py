@@ -36,6 +36,7 @@ from webauthn.helpers.structs import AuthenticatorTransport
 from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 
 from . import assistant as assistant_mod
+from . import analysis as analysis_mod
 from . import donations as donations_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
@@ -714,7 +715,11 @@ def register_routes(app: Flask) -> None:
 
     @app.route("/")
     def index():
-        return render_template("index.html")
+        # No landing page: the login screen is the front door.
+        # Logged-in users go straight to the wallet homepage.
+        if _current_user(app) is not None:
+            return redirect(url_for("wallet"))
+        return redirect(url_for("login"))
 
     # ------------------------------------------------------------------
     # Auth
@@ -848,7 +853,7 @@ def register_routes(app: Flask) -> None:
     @app.route("/logout")
     def logout():
         session.clear()
-        return redirect(url_for("index"))
+        return redirect(url_for("login"))
 
     # ------------------------------------------------------------------
     # Account settings: recovery question + passkeys
@@ -1269,7 +1274,8 @@ def register_routes(app: Flask) -> None:
         except (TypeError, ValueError):
             return None
 
-    def _dashboard_data(app, user, popup_coin=None, include_trenches=True):
+    def _dashboard_data(app, user, popup_coin=None, include_trenches=True,
+                        chart_range="all"):
         """Everything the coins page (dashboard) renders, for the
         ACTIVE mode only: paper shows the paper portfolio, paper
         bots and paper activity; real (devnet) shows the real wallet,
@@ -1277,7 +1283,9 @@ def register_routes(app: Flask) -> None:
         page. `popup_coin` is the coin row for the open coin popup,
         or None. The wallet homepage reuses this data (with
         include_trenches=False) for its coins list and portfolio
-        header."""
+        header. `chart_range` picks which recorded-snapshot range
+        the portfolio chart shows (pnl.RANGES keys; anything else
+        falls back to "all") — history is never invented."""
         db = _db(app)
         mode = _active_mode(db, user["id"])
         wallet = _wallet(app, user["id"])
@@ -1292,21 +1300,27 @@ def register_routes(app: Flask) -> None:
         # totals cash + holdings in USD; real totals the on-chain SOL
         # balance (with a USD approx. when SOL has a price).
         sol_price = prices["prices"].get("SOL", {}).get("price")
+        if chart_range not in pnl_mod.RANGES:
+            chart_range = "all"
         if mode == "devnet":
             portfolio_sol = real_sol
             portfolio_usd = (real_sol * sol_price
                              if real_sol is not None and sol_price
                              else None)
             _points, portfolio_has_data = pnl_mod.chart_points_real(
-                db, user["id"], "all")
+                db, user["id"], chart_range)
             portfolio_chart_svg = pnl_mod.chart_svg(
                 _points, unit="SOL ")
+            change_24h = pnl_mod.change_24h(
+                db, user["id"], portfolio_sol, real=True)
         else:
             portfolio_sol = None
             portfolio_usd = _paper(app, user["id"]) + holdings_value
             _points, portfolio_has_data = pnl_mod.chart_points(
-                db, user["id"], "all")
+                db, user["id"], chart_range)
             portfolio_chart_svg = pnl_mod.chart_svg(_points)
+            change_24h = pnl_mod.change_24h(
+                db, user["id"], portfolio_usd)
         bots = db.execute(
             "SELECT * FROM bots WHERE user_id = ? AND mode = ? "
             "ORDER BY id DESC",
@@ -1328,6 +1342,8 @@ def register_routes(app: Flask) -> None:
                 "portfolio_usd": portfolio_usd,
                 "portfolio_chart_svg": portfolio_chart_svg,
                 "portfolio_has_data": portfolio_has_data,
+                "change_24h": change_24h,
+                "chart_range": chart_range,
                 "support_id": signing_bot["support_id"]
                 if signing_bot else "",
                 "popup_coin": popup_coin,
@@ -1976,7 +1992,8 @@ def register_routes(app: Flask) -> None:
                 chart_svg=pnl_mod.chart_svg(points, unit="SOL "),
                 prices_source=prices["source"],
                 prices_as_of=prices["as_of"],
-                mode=mode, mode_label=_mode_label(mode))
+                mode=mode, mode_label=_mode_label(mode),
+                analysis=None)
         # Paper mode: the paper portfolio only. The real wallet is
         # never shown here — switch to Real trading to see it.
         held = db.execute(
@@ -1994,6 +2011,12 @@ def register_routes(app: Flask) -> None:
         totals = pnl_mod.portfolio_totals(db, user["id"], price_map)
         start_cash = _cfg(app).paper_start_cash
         points, has_data = pnl_mod.chart_points(db, user["id"], range_key)
+        # Losing-buy analysis (paper trades only): every paper trade
+        # paired FIFO per coin, with the buy-time signals and the exit
+        # reason — shown as a section on this page, not a separate
+        # page. Only recorded data; anything never recorded shows as
+        # unavailable, never guessed.
+        analysis = analysis_mod.analyze_paper_trades(db, user["id"])
         return render_template(
             "pnl.html", range_key=range_key,
             ranges=pnl_mod.RANGES, totals=totals,
@@ -2003,7 +2026,8 @@ def register_routes(app: Flask) -> None:
             points=points, has_data=has_data,
             chart_svg=pnl_mod.chart_svg(points),
             prices_source=prices["source"], prices_as_of=prices["as_of"],
-            mode=mode, mode_label=_mode_label(mode))
+            mode=mode, mode_label=_mode_label(mode),
+            analysis=analysis)
 
     # ------------------------------------------------------------------
     # Wallet: view / send (two-step) / deposit
@@ -2011,12 +2035,30 @@ def register_routes(app: Flask) -> None:
     @app.route("/wallet")
     @login_required
     def wallet():
-        """The homepage: the user's coins (ticker, position P&L, 24h
-        %) with the portfolio header, then the wallet itself —
-        deposit / send / withdraw / platform wallets in real mode,
-        the paper balance in paper mode. One screen: the coins list
+        """The homepage: the user's portfolio total, 24h change and
+        chart (recorded snapshots only), BUY/SELL, and the coins
+        held — in the fox layout. One screen: the holdings list
         lives in a fixed-height panel that scrolls internally; the
-        page itself never scrolls."""
+        page itself never scrolls. The wallet itself (deposit /
+        send / withdraw / platform wallets) lives on /wallet/details.
+        `?range=` picks the chart range (1h/1d/1w/1mo/1y/all);
+        anything else falls back to 24h."""
+        user = _current_user(app)
+        chart_range = (request.args.get("range") or "1d").strip()
+        if chart_range not in pnl_mod.RANGES:
+            chart_range = "1d"
+        data = _dashboard_data(app, user, include_trenches=False,
+                               chart_range=chart_range)
+        return render_template("wallet.html", **data)
+
+    @app.route("/wallet/details")
+    @login_required
+    def wallet_details():
+        """The wallet itself: deposit / send / withdraw / platform
+        wallets in real mode, the paper balance in paper mode. The
+        portfolio home lives on /wallet. One screen: the cards live
+        in a fixed-height panel that scrolls internally; the page
+        itself never scrolls."""
         user = _current_user(app)
         db = _db(app)
         data = _dashboard_data(app, user, include_trenches=False)
@@ -2026,7 +2068,7 @@ def register_routes(app: Flask) -> None:
             # send history and platform wallets live in Real trading
             # — switch mode in the HUD to see them.
             return render_template(
-                "wallet.html", **data, intents=[],
+                "wallet_detail.html", **data, intents=[],
                 pumpfun_wallet="", platform_wallets={})
         pumpfun_wallet = db.execute(
             "SELECT pumpfun_wallet FROM users WHERE id = ?",
@@ -2036,10 +2078,27 @@ def register_routes(app: Flask) -> None:
             "signature, created_at FROM send_intents WHERE user_id = ? "
             "ORDER BY id DESC LIMIT 20", (user["id"],)).fetchall()
         return render_template(
-            "wallet.html", **data, intents=intents,
+            "wallet_detail.html", **data, intents=intents,
             pumpfun_wallet=pumpfun_wallet,
             platform_wallets=platforms_mod.get_platform_wallets(
                 db, user["id"]))
+
+    @app.route("/trenches")
+    @login_required
+    def trenches():
+        """The trenches page (black + gold theme): the top 10 fresh
+        pump.fun / PumpSwap tokens by 1-hour gain, price + 1h gain
+        per row — tapping a token opens the same Buy / Sell / Sell
+        all popup as any other coin. A feed failure says the
+        trenches are unavailable, never fake rows."""
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        trenches_rows, trenches_error = _trenches_list()
+        return render_template(
+            "trenches.html", trenches_rows=trenches_rows,
+            trenches_error=trenches_error, mode=mode,
+            mode_label=_mode_label(mode))
 
     @app.route("/wallet/send", methods=["GET", "POST"])
     @login_required
@@ -2299,7 +2358,8 @@ def register_routes(app: Flask) -> None:
                     "message": "Price unavailable right now."}
         try:
             amount, usd = ledger_buy(db, user["id"], coin_id, usd, price,
-                                     _now())
+                                     _now(),
+                                     bot_id=bot["id"] if bot else None)
         except InsufficientCash:
             return {"ok": False, "message": "Not enough paper cash."}
         if bot is not None:
@@ -2338,7 +2398,7 @@ def register_routes(app: Flask) -> None:
                     "message": "Price unavailable right now."}
         try:
             usd = ledger_sell(db, user["id"], coin_id, amount, price,
-                              _now())
+                              _now(), exit_reason="manual sell")
         except InsufficientHolding:
             return {"ok": False,
                     "message": "You don't hold that much."}
@@ -2363,21 +2423,17 @@ def register_routes(app: Flask) -> None:
     @login_required
     def bots():
         user = _current_user(app)
-        db = _db(app)
-        mode = _active_mode(db, user["id"])
         # Only this mode's bots are shown — paper and real bots never
         # mix on a page. The Trenches preset is a paper bot, so its
-        # card only appears in paper mode.
-        bots = db.execute(
-            "SELECT * FROM bots WHERE user_id = ? AND mode = ? "
-            "ORDER BY id DESC",
-            (user["id"], "real" if mode == "devnet" else "paper")
-            ).fetchall()
+        # card only appears in paper mode. The portfolio totals come
+        # along for the balance header (paper total, or real SOL +
+        # USD approx) — the same data as the homepage, same mode.
+        data = _dashboard_data(app, user, include_trenches=False)
+        bots = data["bots"]
         memecoin_bots = [b for b in bots
                          if b["category"] == TRENCHES_CATEGORY]
-        return render_template("bots.html", bots=bots,
-                               memecoin_bots=memecoin_bots,
-                               mode=mode, mode_label=_mode_label(mode))
+        return render_template("bots.html", **data,
+                               memecoin_bots=memecoin_bots)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required
@@ -3256,6 +3312,56 @@ def register_routes(app: Flask) -> None:
             if err:
                 return jsonify({"reply":
                     f"I can't use that rug rule: {err} Nothing was "
+                    f"changed."})
+            summary = summarize_rules(cleaned)
+            session["pending_rules"] = {"bot_id": bot["id"],
+                                        "rules": cleaned}
+            return jsonify({"reply":
+                f"Here is what I understood for bot '{bot['name']}':\n"
+                f"{summary}\n\n"
+                f"The bot will only trade inside these rules, and never "
+                f"outside its limits (buy size {bot['buy_size_pct']}%, "
+                f"stop loss {bot['stop_loss_pct']}%, max "
+                f"{bot['max_open_trades']} open trades, never more than "
+                f"your balance). Reply \"yes\" to apply them, or \"no\" "
+                f"to leave the bot as it is."})
+
+        if intent == "rules_filter":
+            db = _db(app)
+            bot_name = parsed.get("bot_name")
+            if not bot_name:
+                return jsonify({"reply":
+                    "Which bot should get the buy filter? Say "
+                    "\"set the buy filter for <bot name>: min volume "
+                    "$1000, min signal 5%\" — or \"show my bots\" to "
+                    "see them."})
+            bot = _find_bot_by_name(db, user["id"], bot_name)
+            if not bot:
+                return jsonify({"reply":
+                    f"I couldn't find a bot called '{bot_name}'. "
+                    f"Say \"show my bots\" to see them."})
+            rules, rules_err = load_rules(bot)
+            if rules_err:
+                return jsonify({"reply":
+                    f"Bot '{bot['name']}' has stored rules I can't "
+                    f"read ({rules_err}) — it makes no trades until "
+                    f"they are fixed. Ask me to set new rules, or "
+                    f"remove them."})
+            if rules is None:
+                return jsonify({"reply":
+                    f"Bot '{bot['name']}' has no custom rules yet — "
+                    f"it uses the standard signals. Set its trading "
+                    f"rules first (for example: \"bot {bot['name']} "
+                    f"scan pump.fun, buy when a coin gains 5% in 5 "
+                    f"minutes\"), then set the buy filter. Nothing "
+                    f"was changed."})
+            merged = json.loads(json.dumps(rules))
+            merged.setdefault("buy_filter", {})
+            merged["buy_filter"].update(parsed.get("filter") or {})
+            cleaned, err = validate_ruleset(merged, bot=bot)
+            if err:
+                return jsonify({"reply":
+                    f"I can't use that buy filter: {err} Nothing was "
                     f"changed."})
             summary = summarize_rules(cleaned)
             session["pending_rules"] = {"bot_id": bot["id"],

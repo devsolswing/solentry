@@ -29,14 +29,17 @@ def _now(offset_seconds=0):
                 "%Y-%m-%dT%H:%M:%SZ")
 
 
-def _entry(mint, price, change_5m=None):
+def _entry(mint, price, change_5m=None, volume_m5=5000, volume_h1=12000,
+           buys=40, sells=10):
     return {"mint": mint, "symbol": mint[:6], "name": mint,
             "price_usd": price, "change_5m_pct": change_5m,
             "change_1h_pct": None, "change_6h_pct": None,
             "change_24h_pct": None, "liquidity_usd": 1000,
             "market_cap_usd": None,
             "dex_id": "pumpfun", "pair_address": "pair" + mint,
-            "pair_created_at": 0}
+            "pair_created_at": 0,
+            "volume_m5_usd": volume_m5, "volume_h1_usd": volume_h1,
+            "txns_m5_buys": buys, "txns_m5_sells": sells}
 
 
 class _FakeScan:
@@ -368,7 +371,7 @@ class TestRugEngine(RugEngineBase):
         """A buy opens the position with last_price set, so the rug
         check has a baseline on the next scan."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        outcomes = self._run([_entry("MINTA", 0.01, change_5m=3.5)])
+        outcomes = self._run([_entry("MINTA", 0.01, change_5m=6.0)])
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         pos = self._position(bot_id, "MINTA")
         self.assertIsNotNone(pos)

@@ -184,8 +184,74 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 #ticket-sellall:checked ~ .ticket-sellall-panel { display: block; }
 
 /* ------------------------------------------------------------------ */
-/* SolEntry login page — red/gold neon, from James's design.         */
+/* Fox-layout rebuild: home / bots / trenches, one screen each.      */
+/* The rebuilt pages get body class "fit-screen": the page itself    */
+/* never scrolls — lists scroll only inside their own fixed-height  */
+/* panels. Other pages (coins, P&L, settings) keep the scrolling    */
+/* content area they already had.                                    */
 /* ------------------------------------------------------------------ */
+body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-direction: column; }
+.home-screen { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.home-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 2px 0 6px; }
+.home-top-right { display: flex; gap: 8px; align-items: center; }
+.icon-btn { background: #1a0805; border: 2px solid #ffb300; color: #ffd700; border-radius: 10px; width: 38px; height: 38px; font-size: 18px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; flex: 0 0 auto; }
+.icon-btn:disabled { opacity: .4; cursor: not-allowed; }
+.home-logo { text-align: center; margin: 0 0 4px; }
+.fox-logo { width: 118px; height: 118px; object-fit: cover; border-radius: 50%; border: 3px solid #ffb300; box-shadow: 0 0 22px rgba(255, 120, 0, .45); display: block; margin: 0 auto; }
+.home-wordmark { font-size: clamp(40px, 12vw, 54px); margin: 2px 0 0; }
+.home-total { margin: 2px 0 6px; padding: 12px 14px; }
+.home-total .portfolio-total { font-size: 34px; }
+.change-24h { font-size: 15px; font-weight: 700; margin: 2px 0 0; }
+.chart-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.home-ranges { flex: 1; margin: 0; }
+.home-ranges .range-btn { padding: 6px 2px; font-size: 12px; }
+.chart-more { flex: 0 0 auto; font-size: 26px; font-weight: 900; color: #ffd700; text-decoration: none; padding: 0 10px; line-height: 1; }
+.buy-sell-row { display: flex; gap: 10px; margin: 4px 0 8px; }
+.buy-btn, .sell-btn { flex: 1; padding: 14px; font-size: 20px; font-weight: 900; border-radius: 12px; border: 2px solid #ffcf3d; cursor: pointer; }
+.buy-btn { background: linear-gradient(180deg, #ffd700 0%, #ffb300 100%); color: #1a0505; }
+.sell-btn { background: linear-gradient(180deg, #e62e1b 0%, #b91c1c 100%); color: #fff; border-color: #ff6b5e; }
+.section-link { float: right; font-size: 13px; }
+.holdings-panel { flex: 1 1 auto; min-height: 80px; max-height: none; }
+.coin-ico { flex: 0 0 34px; width: 34px; height: 34px; border-radius: 50%; background: #1a0805; border: 2px solid #ffb300; color: #ffd700; font-weight: 900; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; }
+.trenches-card { display: block; text-decoration: none; margin: 8px 0 0; padding: 12px 16px; }
+.trenches-card-title { display: block; color: #ffd700; font-weight: 800; font-size: 17px; }
+.page-scroll-panel { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 2px; }
+
+/* Bots page (fox layout): balance + eye, + / − / Edit, carousel. */
+.bots-balance { font-size: 30px; font-weight: 900; color: #ffd700; margin: 2px 0 0; display: flex; align-items: center; gap: 10px; }
+.bots-balance-usd { margin: 0 0 4px; }
+.eye-btn { width: 34px; height: 34px; font-size: 16px; }
+.bot-actions { display: flex; gap: 10px; margin: 6px 0 8px; }
+.square-btn { flex: 0 0 52px; padding: 10px 0; font-size: 24px; text-align: center; border-radius: 12px; }
+.edit-btn { flex: 1; padding: 12px; font-size: 17px; border-radius: 12px; }
+.edit-btn:disabled { opacity: .45; cursor: not-allowed; }
+.carousel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0 6px; }
+.carousel-head h2 { margin: 0; flex: 1; text-align: center; }
+.bot-carousel { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; padding: 2px 2px 8px; flex: 0 0 auto; }
+.bot-card { flex: 0 0 92%; scroll-snap-align: start; display: flex; align-items: center; gap: 12px; margin: 0; text-decoration: none; color: #e8ecf1; }
+.bot-card.active { border-color: #ffd700; box-shadow: 0 0 18px rgba(255, 200, 0, .45); }
+.bot-ico { flex: 0 0 52px; width: 52px; height: 52px; border-radius: 50%; background: #1a0805; border: 2px solid #ffb300; font-size: 26px; display: inline-flex; align-items: center; justify-content: center; }
+.bot-info { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.bot-name { font-size: 16px; }
+.bot-status { font-size: 12px; font-weight: 800; }
+.bot-status.on { color: #4ade80; }
+.bot-status.off { color: #b9a99a; }
+.bot-id { color: #ff2d20; font-weight: 800; font-size: 13px; }
+.bot-arrow { font-size: 24px; color: #b9a99a; flex: 0 0 auto; }
+.memecoin-card { margin: 8px 0 0; }
+.memecoin-card .inline { margin-right: 6px; }
+
+/* Trenches page: black + gold theme, distinct from the red/gold
+   main theme. Only the trenches page uses these colours. */
+body.trenches-theme { background: #000; }
+body.trenches-theme .topbar { background: #000; border-bottom-color: #ffd700; }
+body.trenches-theme .hud { background: #000; border-top-color: #ffd700; }
+body.trenches-theme .card, body.trenches-theme .coin-row { background: #0d0d0d; border-color: #ffd700; }
+body.trenches-theme .trenches-title { color: #ffd700; font-size: 30px; margin: 4px 0 2px; }
+body.trenches-theme .trenches-panel { border-color: #ffd700; background: #000; }
+body.trenches-theme .coin-list-panel { background: #000; border-color: #ffd700; }
+.trenches-panel { flex: 1 1 auto; min-height: 120px; max-height: none; }
+.hud-ico { font-size: 20px; line-height: 1; }
 .se-page { max-width: 480px; margin: 0 auto; padding: 10px 12px 28px; background: radial-gradient(120% 60% at 50% 0%, #2a0705 0%, #0a0505 55%, #050303 100%); border-radius: 0; }
 .se-hero img { width: 100%; display: block; border-radius: 14px; border: 2px solid rgba(255, 190, 0, .55); box-shadow: 0 0 28px rgba(255, 30, 0, .35); }
 .se-title { font-size: clamp(52px, 17vw, 76px); font-weight: 900; font-style: italic; letter-spacing: -3px; line-height: 1; text-align: center; margin: 14px 0 4px; color: #ff2d20; background: linear-gradient(100deg, #ff1e14 0%, #ff5e1f 35%, #ffb300 65%, #ffd700 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 10px rgba(255, 60, 0, .55)); position: relative; }

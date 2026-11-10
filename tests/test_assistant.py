@@ -104,7 +104,7 @@ class TestAssistantHttp(unittest.TestCase):
     def test_assistant_reports_balance(self):
         data = self._ask("what is my balance")
         self.assertIn("0.5000 SOL", data["reply"])
-        self.assertIn("$50.00 CAD", data["reply"])
+        self.assertIn("$100.00 CAD", data["reply"])
 
     def test_assistant_create_and_list_bots(self):
         data = self._ask("create bot named Luna bold")

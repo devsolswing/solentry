@@ -42,7 +42,7 @@ def _now(offset_seconds=0):
 
 
 def _entry(mint, price, change_5m=None, change_1h=None,
-           volume_m5=None, volume_h1=None, buys=None, sells=None):
+           volume_m5=5000, volume_h1=12000, buys=40, sells=10):
     return {"mint": mint, "symbol": mint[:6], "name": mint,
             "price_usd": price, "change_5m_pct": change_5m,
             "change_1h_pct": change_1h, "change_6h_pct": None,

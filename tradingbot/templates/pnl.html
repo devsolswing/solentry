@@ -57,4 +57,75 @@
   {% endif %}
   <p class="muted small">The chart is built only from recorded snapshots. No history is invented: a range with no snapshots says so plainly.</p>
 </div>
+
+{% if mode == 'paper' and analysis %}
+<div class="card">
+  <h2>🔍 Losing-buy analysis</h2>
+  <p class="muted small">How did the coins that ended in a loss get bought? Every completed paper trade, paired oldest-buy-first per coin. Buy-time signals (5-minute gain, 5-minute volume, buys vs sells, regime) are recorded from the buy-filter build onward — older trades show them as unavailable, never guessed. Exit reasons come from the trade itself, or from the activity log for older sells.</p>
+  <div class="cards">
+    <div class="card">
+      <h2>😞 Losing buys ({{ analysis.summary.losing.count }})</h2>
+      <p>Average P&amp;L: {% if analysis.summary.losing.avg_pnl_usd is not none %}${{ "%.2f"|format(analysis.summary.losing.avg_pnl_usd) }}{% else %}<span class="muted">—</span>{% endif %}</p>
+      <p>Average 5-min gain at buy: {% if analysis.summary.losing.avg_m5_pct is not none %}{{ "%.1f"|format(analysis.summary.losing.avg_m5_pct) }}%{% else %}<span class="muted">unavailable</span>{% endif %}</p>
+      <p>Average 5-min volume at buy: {% if analysis.summary.losing.avg_volume_5m_usd is not none %}${{ "{:,.0f}".format(analysis.summary.losing.avg_volume_5m_usd) }}{% else %}<span class="muted">unavailable</span>{% endif %}</p>
+      <p>Regime at buy: {{ analysis.summary.losing.regime.slow }} slow · {{ analysis.summary.losing.regime.trending }} trending · {{ analysis.summary.losing.regime.unavailable }} unknown</p>
+      <p>Average hold: {% if analysis.summary.losing.avg_hold_seconds is not none %}{{ "%.0f"|format(analysis.summary.losing.avg_hold_seconds / 60) }} min{% else %}<span class="muted">—</span>{% endif %}</p>
+      <p class="muted small">{{ analysis.summary.losing.with_signals }} of {{ analysis.summary.losing.count }} losing buys have recorded buy signals.</p>
+    </div>
+    <div class="card">
+      <h2>😊 Winning buys ({{ analysis.summary.winning.count }})</h2>
+      <p>Average P&amp;L: {% if analysis.summary.winning.avg_pnl_usd is not none %}+${{ "%.2f"|format(analysis.summary.winning.avg_pnl_usd) }}{% else %}<span class="muted">—</span>{% endif %}</p>
+      <p>Average 5-min gain at buy: {% if analysis.summary.winning.avg_m5_pct is not none %}{{ "%.1f"|format(analysis.summary.winning.avg_m5_pct) }}%{% else %}<span class="muted">unavailable</span>{% endif %}</p>
+      <p>Average 5-min volume at buy: {% if analysis.summary.winning.avg_volume_5m_usd is not none %}${{ "{:,.0f}".format(analysis.summary.winning.avg_volume_5m_usd) }}{% else %}<span class="muted">unavailable</span>{% endif %}</p>
+      <p>Regime at buy: {{ analysis.summary.winning.regime.slow }} slow · {{ analysis.summary.winning.regime.trending }} trending · {{ analysis.summary.winning.regime.unavailable }} unknown</p>
+      <p>Average hold: {% if analysis.summary.winning.avg_hold_seconds is not none %}{{ "%.0f"|format(analysis.summary.winning.avg_hold_seconds / 60) }} min{% else %}<span class="muted">—</span>{% endif %}</p>
+      <p class="muted small">{{ analysis.summary.winning.with_signals }} of {{ analysis.summary.winning.count }} winning buys have recorded buy signals.</p>
+    </div>
+  </div>
+  <p class="muted small">{{ analysis.summary.total }} completed buys ({{ analysis.summary.even }} even). The buy filter's thresholds are tuned from this section — compare the losing averages against the winning ones: a filter that only lets through buys that look like the winners (stronger gain, more volume, buyers in control) is what keeps the low performers out.</p>
+  <h2>Completed buys (newest first)</h2>
+  {% if analysis.pairs %}
+  <table>
+    <tr><th>Buy time</th><th>Coin</th><th>Bot</th><th>Buy price</th><th>Sell time</th><th>Sell price</th><th>P&amp;L</th><th>Hold</th><th>Exit</th><th>5-min gain</th><th>5-min vol</th><th>Buys / sells</th><th>Regime</th></tr>
+    {% for p in analysis.pairs %}
+    <tr>
+      <td>{{ p.buy_at }}</td>
+      <td>{{ p.coin }}</td>
+      <td>{{ p.bot }}</td>
+      <td>${{ "%.4f"|format(p.buy_price) }}</td>
+      <td>{{ p.sell_at }}</td>
+      <td>${{ "%.4f"|format(p.sell_price) }}</td>
+      <td class="{{ 'down' if p.pnl_usd < 0 else 'up' }}">{% if p.pnl_usd >= 0 %}+{% endif %}${{ "%.2f"|format(p.pnl_usd) }}</td>
+      <td>{% if p.hold_seconds is not none %}{{ "%.0f"|format(p.hold_seconds / 60) }} min{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{{ p.exit_reason }}</td>
+      <td>{% if p.m5_pct is not none %}{{ "%.1f"|format(p.m5_pct) }}%{% else %}<span class="muted">unavailable</span>{% endif %}</td>
+      <td>{% if p.volume_5m_usd is not none %}${{ "{:,.0f}".format(p.volume_5m_usd) }}{% else %}<span class="muted">unavailable</span>{% endif %}</td>
+      <td>{% if p.buys_5m is not none and p.sells_5m is not none %}{{ p.buys_5m }} / {{ p.sells_5m }}{% else %}<span class="muted">unavailable</span>{% endif %}</td>
+      <td>{{ p.regime if p.regime else "unavailable" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No completed paper trades yet — buy and sell a coin and the pair shows up here.</p>
+  {% endif %}
+  {% if analysis.open %}
+  <h2>Still holding</h2>
+  <table>
+    <tr><th>Buy time</th><th>Coin</th><th>Bot</th><th>Buy price</th><th>Amount</th><th>5-min gain</th><th>5-min vol</th><th>Regime</th></tr>
+    {% for b in analysis.open %}
+    <tr>
+      <td>{{ b.buy_at }}</td>
+      <td>{{ b.coin }}</td>
+      <td>{{ b.bot }}</td>
+      <td>${{ "%.4f"|format(b.buy_price) }}</td>
+      <td>{{ "%.4f"|format(b.amount) }}</td>
+      <td>{% if b.m5_pct is not none %}{{ "%.1f"|format(b.m5_pct) }}%{% else %}<span class="muted">unavailable</span>{% endif %}</td>
+      <td>{% if b.volume_5m_usd is not none %}${{ "{:,.0f}".format(b.volume_5m_usd) }}{% else %}<span class="muted">unavailable</span>{% endif %}</td>
+      <td>{{ b.regime if b.regime else "unavailable" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endif %}
 {% endblock %}

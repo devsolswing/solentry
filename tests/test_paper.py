@@ -59,7 +59,7 @@ class TestPaper(unittest.TestCase):
         db = self.app.config["DB"]
         cash = db.execute("SELECT cash_usd FROM paper_portfolio"
                           ).fetchone()["cash_usd"]
-        self.assertEqual(cash, 40.0)
+        self.assertEqual(cash, 90.0)
         holding = db.execute("SELECT amount, avg_price FROM paper_holdings "
                              "WHERE coin_id = 'SOL'").fetchone()
         self.assertEqual(holding["amount"], 0.1)
@@ -74,7 +74,7 @@ class TestPaper(unittest.TestCase):
         self.assertIn("Nothing was bought", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT cash_usd FROM paper_portfolio"
-                                    ).fetchone()["cash_usd"], 50.0)
+                                    ).fetchone()["cash_usd"], 100.0)
         self.assertEqual(db.execute("SELECT COUNT(*) c FROM paper_holdings"
                                     ).fetchone()["c"], 0)
 
@@ -85,7 +85,7 @@ class TestPaper(unittest.TestCase):
         self.assertIn("Sold", resp.get_data(as_text=True))
         db = self.app.config["DB"]
         self.assertEqual(db.execute("SELECT cash_usd FROM paper_portfolio"
-                                    ).fetchone()["cash_usd"], 44.0)
+                                    ).fetchone()["cash_usd"], 94.0)
         self.assertAlmostEqual(db.execute("SELECT amount FROM paper_holdings "
                                     "WHERE coin_id='SOL'").fetchone()["amount"],
                          0.06, places=9)

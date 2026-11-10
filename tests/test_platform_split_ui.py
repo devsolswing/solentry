@@ -215,9 +215,12 @@ class TestModeSeparation(SplitBase):
         self.assertNotIn("Send history", self._html("/wallet"))
         self._choose_mode("devnet")
         wallet = self._html("/wallet")
-        self.assertIn("Deposit", wallet)
-        self.assertIn("Platform wallets", wallet)
-        self.assertIn("Send history", wallet)
+        self.assertNotIn("Deposit", wallet)
+        self.assertNotIn("Send history", wallet)
+        details = self._html("/wallet/details")
+        self.assertIn("Deposit", details)
+        self.assertIn("Platform wallets", details)
+        self.assertIn("Send history", details)
 
     def test_mode_switch_in_hud_flips_dashboard(self):
         self.client.post("/mode", data={
@@ -522,7 +525,8 @@ class TestHud(SplitBase):
         for path in ("/dashboard", "/bots", "/wallet", "/pnl", "/settings"):
             html = self._html(path)
             self.assertIn("hud-item", html, path)
-            for label in ("Coins", "Bots", "Wallet", "P&amp;L", "Settings"):
+            # Four-button nav: Home / Bots / Wallet / Settings.
+            for label in ("Home", "Bots", "Wallet", "Settings"):
                 self.assertIn(label, html, f"{path} missing {label}")
             self.assertIn('action="/mode"', html, path)
 

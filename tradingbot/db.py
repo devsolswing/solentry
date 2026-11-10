@@ -363,6 +363,18 @@ _MIGRATIONS = (
     # column existed.
     ("activity", "ip", "TEXT NOT NULL DEFAULT ''"),
     ("activity", "device", "TEXT NOT NULL DEFAULT ''"),
+    # Paper-trade provenance (losing-buy analysis + buy filter):
+    # which bot bought the coin, the signal values at buy time, and
+    # why a sell exited. NULL for rows written before these columns
+    # existed — the analysis section on the P&L page shows those as unavailable, never
+    # guessed. Manual buys/sells have no bot and no signal.
+    ("paper_trades", "bot_id", "INTEGER"),
+    ("paper_trades", "buy_m5_pct", "REAL"),
+    ("paper_trades", "buy_volume_5m_usd", "REAL"),
+    ("paper_trades", "buy_buys_5m", "INTEGER"),
+    ("paper_trades", "buy_sells_5m", "INTEGER"),
+    ("paper_trades", "buy_regime", "TEXT"),
+    ("paper_trades", "exit_reason", "TEXT"),
 )
 
 
@@ -413,6 +425,34 @@ def _reset_paper_50_cad(conn: sqlite3.Connection) -> None:
         "VALUES ('paper_reset_50_cad', '2026-11-09')")
 
 
+def _reset_paper_100_cad(conn: sqlite3.Connection) -> None:
+    """One-time reset (2026-11-09): paper trading restarts at $100 CAD.
+
+    Same shape as the $50 reset above, new marker: every existing
+    paper account is reset to $100 cash and its paper positions are
+    cleared — the old balances (many traded down toward $0) do not
+    fit a $100 account. Runs once: a marker row in meta() records
+    it, so later restarts never touch paper balances again (a user
+    who trades down to $40 stays at $40). Paper trade history and
+    P&L snapshots are kept as records of what happened; only the
+    live balance and open positions are reset. Real SOL is never
+    touched.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'paper_reset_100_cad'"
+    ).fetchone()
+    if row:
+        return
+    conn.execute("UPDATE paper_portfolio SET cash_usd = 100")
+    conn.execute("DELETE FROM paper_holdings")
+    conn.execute(
+        "INSERT INTO meta (key, value) "
+        "VALUES ('paper_reset_100_cad', '2026-11-09')")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, column, ddl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(
@@ -429,5 +469,6 @@ def init_db(path: str) -> sqlite3.Connection:
     _backfill_pumpfun_wallets(conn)
     _backfill_signing_bots(conn)
     _reset_paper_50_cad(conn)
+    _reset_paper_100_cad(conn)
     conn.commit()
     return conn

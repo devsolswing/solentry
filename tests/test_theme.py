@@ -152,7 +152,7 @@ class TestPortfolioHeader(ThemeBase):
         self._set_prices({})
         html = self._html("/dashboard")
         self.assertIn("portfolio-head", html)
-        self.assertIn("$50.00 CAD", html)
+        self.assertIn("$100.00 CAD", html)
         self.assertIn("No chart data yet", html)
 
     def test_header_chart_draws_from_recorded_snapshots(self):

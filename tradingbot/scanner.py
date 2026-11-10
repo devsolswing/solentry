@@ -78,10 +78,91 @@ TRENDING_LADDER = [
 REGIME_DEFAULT = {"volume_surge_x": 2.0, "require_buy_dominance": True,
                   "require_h1_gain": True}
 
+# Buy filter defaults: a buy needs a REAL signal, not just a gain
+# number. A coin qualifies only when all three hold:
+#   * at least $1,000 of volume in the last 5 minutes — a real
+#     crowd is moving money, not a $50 blip that still "surges"
+#     2x against a dead hour;
+#   * more buys than sells in the last 5 minutes — buyers are
+#     actually in control, not sellers exiting into the pump;
+#   * the signal itself is at least 5% — the same 5% the scanner
+#     already treats as a real move (its buy trigger). The Trenches
+#     buy threshold is 3.4%, so the filter raises the effective bar
+#     to 5% unless the bot's rule keys tune it down.
+# These are rule keys, not constants: each Scanner / Trenches bot
+# carries its own buy_filter, tunable through the assistant
+# ("set the buy filter for bot X ..."), and the losing-buy analysis
+# page is where the numbers get tuned to what the trades show.
+BUY_FILTER_DEFAULT = {"min_volume_5m_usd": 1000.0,
+                      "require_buy_dominance": True,
+                      "min_signal_pct": 5.0}
+BUY_FILTER_KEYS = ("min_volume_5m_usd", "require_buy_dominance",
+                   "min_signal_pct")
+
 
 def _gte(a: float, b: float) -> bool:
     """a >= b with a 1e-9 relative tolerance — prices are floats."""
     return a >= b or abs(a - b) <= 1e-9 * max(1.0, abs(b))
+
+
+def passes_buy_filter(entry, filter_cfg=None,
+                      signal_pct=None) -> tuple[bool, str]:
+    """Does a feed entry pass the low-performer buy filter?
+
+    `signal_pct` is the gain that triggered the buy (3-minute gain
+    for the scanner, 5-minute gain for Trenches). Returns
+    (True, "") or (False, reason). Fail-closed: any missing or
+    unusable input rejects the buy — a coin with no volume data,
+    no buy/sell counts, or no signal is never bought on a guess.
+    """
+    cfg = filter_cfg or BUY_FILTER_DEFAULT
+    for key in cfg:
+        if key not in BUY_FILTER_KEYS:
+            return False, f"Unknown buy filter setting '{key}'"
+    try:
+        min_vol = float(cfg.get("min_volume_5m_usd",
+                                BUY_FILTER_DEFAULT["min_volume_5m_usd"]))
+        min_signal = float(cfg.get("min_signal_pct",
+                                   BUY_FILTER_DEFAULT["min_signal_pct"]))
+    except (TypeError, ValueError):
+        return False, "buy filter is misconfigured"
+    vol_m5 = entry.get("volume_m5_usd")
+    if vol_m5 is None:
+        return False, "no 5-minute volume data"
+    try:
+        vol_m5 = float(vol_m5)
+    except (TypeError, ValueError):
+        return False, "no 5-minute volume data"
+    if not _gte(vol_m5, min_vol):
+        return False, (f"5-minute volume ${vol_m5:,.0f} is below the "
+                       f"${min_vol:,.0f} minimum")
+    if cfg.get("require_buy_dominance", True):
+        buys = entry.get("txns_m5_buys")
+        sells = entry.get("txns_m5_sells")
+        if buys is None or sells is None:
+            return False, "no 5-minute buy/sell counts"
+        try:
+            if int(buys) <= int(sells):
+                return False, (f"buys ({int(buys)}) do not outnumber "
+                               f"sells ({int(sells)}) in 5 minutes")
+        except (TypeError, ValueError):
+            return False, "no 5-minute buy/sell counts"
+    if signal_pct is None:
+        # No explicit signal given (direct callers): fall back to
+        # the entry's 5-minute gain. The loop always passes the gain
+        # that triggered the buy (3-minute for the scanner, 5-minute
+        # for Trenches), so this only matters for standalone use.
+        signal_pct = entry.get("change_5m_pct")
+    if signal_pct is None:
+        return False, "no signal strength"
+    try:
+        signal_pct = float(signal_pct)
+    except (TypeError, ValueError):
+        return False, "no signal strength"
+    if not _gte(signal_pct, min_signal):
+        return False, (f"signal {signal_pct:.1f}% is below the "
+                       f"{min_signal:.1f}% minimum")
+    return True, ""
 
 
 def detect_regime(entry, regime=None) -> str:

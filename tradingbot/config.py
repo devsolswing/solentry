@@ -52,7 +52,7 @@ class Config:
         self.database_path: str = env.get("DATABASE_PATH", "tradingbot.db")
         self.railway_provisioning: bool = env.get("RAILWAY_PROVISIONING", "0") == "1"
         self.railway_token: str = env.get("RAILWAY_TOKEN", "")
-        self.paper_start_cash: float = float(env.get("PAPER_START_CASH", "50"))
+        self.paper_start_cash: float = float(env.get("PAPER_START_CASH", "100"))
         # Silent trading loop: runs as a daemon thread inside the web
         # process (the SQLite file lives on the web service's volume, so
         # a separate worker service could not see it). OFF by default —

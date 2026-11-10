@@ -1,0 +1,76 @@
+{# Quick Buy/Sell popup: full screen. Type a coin name and live
+   results appear as you type; pick one, enter an amount in $ or
+   tokens at the live price, and buy or sell through the same
+   coin endpoints as the popup and detail page. #}
+<div class="overlay overlay-fullscreen hidden" id="quick-trade-overlay" role="dialog" aria-label="Buy or sell a coin"
+     data-search-url="{{ url_for('coin_search') }}"
+     data-currency="{{ 'CAD $' if mode == 'paper' else '$' }}"
+     data-mode-label="{{ mode_label }}">
+  <div class="coin-popup quick-trade-popup">
+    <p class="popup-head"><button class="popup-close" type="button" id="quick-trade-close" aria-label="Close">✕</button></p>
+    <h2>Buy or Sell Coin</h2>
+    <p class="muted small">Type a coin name — live results appear as you type. Amounts in $ or tokens, at the live price.</p>
+    <label>Coin<input id="quick-trade-search" type="text" placeholder="Type a coin name…" autocomplete="off"></label>
+    <div id="quick-trade-results" class="search-results"></div>
+    <div id="quick-trade-selected" class="hidden">
+      <p><strong id="quick-trade-name">—</strong> <span class="muted small" id="quick-trade-symbol"></span></p>
+      <p class="big-num" id="quick-trade-price">—</p>
+      <p class="muted small" id="quick-trade-source"></p>
+      <p id="quick-trade-held"></p>
+      <div class="amount-kind" role="group" aria-label="Amount in dollars or tokens">
+        <label><input type="radio" name="quick-amount-kind" value="usd" checked> {{ 'CAD $' if mode == 'paper' else '$' }}</label>
+        <label><input type="radio" name="quick-amount-kind" value="tokens"> tokens</label>
+      </div>
+      <p class="muted small" id="quick-trade-equiv"></p>
+      <h3>Buy</h3>
+      <form id="quick-trade-buy-form" method="post" action="{{ url_for('coin_buy', coin_id='SOL') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Amount ({{ 'CAD $' if mode == 'paper' else '$' }}) <input id="quick-trade-buy-amount" type="number" name="usd" step="any" min="0" placeholder="0" required></label>
+        {% if mode == 'paper' %}
+        <label>Bot to look after this coin (optional)
+          <select name="bot_id">
+            <option value="">No bot — just buy it</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
+          </select>
+        </label>
+        {% else %}
+        <label>Real bot to manage this buy (required — its buy-size limit is the cap)
+          <select name="bot_id" required>
+            <option value="">Choose a real bot…</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button class="btn big" type="submit" id="quick-trade-buy-btn" disabled>Buy</button>
+      </form>
+      <h3>Sell</h3>
+      <form id="quick-trade-sell-form" method="post" action="{{ url_for('coin_sell', coin_id='SOL') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Amount ({{ 'CAD $' if mode == 'paper' else '$' }}) <input id="quick-trade-sell-amount" type="number" name="amount_usd" step="any" min="0" placeholder="0" required></label>
+        {% if mode != 'paper' %}
+        <label>Real bot to manage this sell (required)
+          <select name="bot_id" required>
+            <option value="">Choose a real bot…</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button class="btn big" type="submit" id="quick-trade-sell-btn" disabled>Sell</button>
+      </form>
+      <form id="quick-trade-sellall-form" method="post" action="{{ url_for('coin_sell', coin_id='SOL') }}" class="hidden">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="sell_all" value="1">
+        {% if mode != 'paper' %}
+        <label>Real bot to manage this sell (required)
+          <select name="bot_id" required>
+            <option value="">Choose a real bot…</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button class="btn big" type="submit">Sell all</button>
+      </form>
+    </div>
+    <p><button class="btn ghost big" type="button" id="quick-trade-back">← Back to coins</button></p>
+  </div>
+</div>

@@ -44,8 +44,17 @@ def paper_bankroll(db: sqlite3.Connection, user_id: int,
 
 
 def paper_buy(db: sqlite3.Connection, user_id: int, coin: str, usd: float,
-              price: float, now: str) -> tuple[float, float]:
-    """Buy `usd` worth of `coin` at `price`. Returns (amount, usd)."""
+              price: float, now: str, bot_id: int | None = None,
+              signals: dict | None = None) -> tuple[float, float]:
+    """Buy `usd` worth of `coin` at `price`. Returns (amount, usd).
+
+    `bot_id` is the bot that bought (None for a manual buy).
+    `signals` is the buy-time signal snapshot from the feed entry
+    (m5 gain %, 5-minute volume USD, 5-minute buys/sells, regime) —
+    recorded so the losing-buy analysis can show how the coin got
+    bought. Both are None for manual buys and for buys that predate
+    the filter; the analysis section on the P&L page shows those as unavailable.
+    """
     if usd <= 0:
         raise ValueError("Amount must be more than 0.")
     cash = paper_cash(db, user_id)
@@ -69,16 +78,31 @@ def paper_buy(db: sqlite3.Connection, user_id: int, coin: str, usd: float,
         db.execute("INSERT INTO paper_holdings (user_id, coin_id, amount, "
                    "avg_price) VALUES (?, ?, ?, ?)",
                    (user_id, coin, amount, price))
+    signals = signals or {}
     db.execute("INSERT INTO paper_trades (user_id, coin_id, side, amount, "
-               "price, total_usd, created_at) VALUES (?, ?, 'buy', ?, ?, ?, ?)",
-               (user_id, coin, amount, price, usd, now))
+               "price, total_usd, created_at, bot_id, buy_m5_pct, "
+               "buy_volume_5m_usd, buy_buys_5m, buy_sells_5m, buy_regime) "
+               "VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               (user_id, coin, amount, price, usd, now, bot_id,
+                signals.get("m5_pct"), signals.get("volume_5m_usd"),
+                signals.get("buys_5m"), signals.get("sells_5m"),
+                signals.get("regime")))
     db.commit()
     return amount, usd
 
 
 def paper_sell(db: sqlite3.Connection, user_id: int, coin: str,
-               amount: float, price: float, now: str) -> float:
-    """Sell `amount` of `coin` at `price`. Returns the USD received."""
+               amount: float, price: float, now: str,
+               bot_id: int | None = None,
+               exit_reason: str | None = None) -> float:
+    """Sell `amount` of `coin` at `price`. Returns the USD received.
+
+    `bot_id` is the bot that sold (None for a manual sell);
+    `exit_reason` is why the position exited (sell ladder, trailing
+    stop, stop loss, rug sell, top-10 dump, manual sell) — recorded
+    so the losing-buy analysis can show it. Both are None for manual
+    sells and for sells that predate the recording.
+    """
     if amount <= 0:
         raise ValueError("Amount must be more than 0.")
     row = db.execute(
@@ -99,7 +123,9 @@ def paper_sell(db: sqlite3.Connection, user_id: int, coin: str,
                "updated_at = ? WHERE user_id = ?",
                (usd, now, user_id))
     db.execute("INSERT INTO paper_trades (user_id, coin_id, side, amount, "
-               "price, total_usd, created_at) VALUES (?, ?, 'sell', ?, ?, ?, ?)",
-               (user_id, coin, amount, price, usd, now))
+               "price, total_usd, created_at, bot_id, exit_reason) "
+               "VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?)",
+               (user_id, coin, amount, price, usd, now, bot_id,
+                exit_reason))
     db.commit()
     return usd

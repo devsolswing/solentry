@@ -182,9 +182,14 @@ class TestWalletIsHomepage(HomeBase):
     def test_wallet_has_dogewifhat_art_and_canadian_flag(self):
         self._choose_mode("paper")
         html = self._html("/wallet")
+        # Home is the fox layout now; the door art lives on /wallet/details.
         self.assertIn("data:image/jpeg;base64,", html)
-        self.assertIn("Dogewifhat walking through a door", html)
+        self.assertIn("SolEntry fox logo", html)
         self.assertIn("🇨🇦", html)
+        details = self._html("/wallet/details")
+        self.assertIn("data:image/jpeg;base64,", details)
+        self.assertIn("Dogewifhat walking through a door", details)
+        self.assertIn("🇨🇦", details)
 
     def test_wallet_paper_and_real_branches(self):
         self._choose_mode("paper")
@@ -192,9 +197,12 @@ class TestWalletIsHomepage(HomeBase):
         self.assertNotIn("Send history", self._html("/wallet"))
         self._choose_mode("devnet")
         wallet = self._html("/wallet")
-        self.assertIn("Deposit", wallet)
-        self.assertIn("Platform wallets", wallet)
-        self.assertIn("Send history", wallet)
+        self.assertNotIn("Deposit", wallet)
+        self.assertNotIn("Send history", wallet)
+        details = self._html("/wallet/details")
+        self.assertIn("Deposit", details)
+        self.assertIn("Platform wallets", details)
+        self.assertIn("Send history", details)
 
     def test_brand_link_goes_to_wallet(self):
         html = self._html("/wallet")
@@ -296,7 +304,7 @@ class TestDetailTradingSol(HomeBase):
         self.assertAlmostEqual(holding["amount"], 1.0)
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        self.assertAlmostEqual(cash, 50.0 - 10.0)
+        self.assertAlmostEqual(cash, 100.0 - 10.0)
 
     def test_paper_sell_in_sol_converts_at_prices(self):
         self._buy_sol()  # 1 SOL at $10
@@ -322,7 +330,7 @@ class TestDetailTradingSol(HomeBase):
         ).fetchone())
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        self.assertAlmostEqual(cash, 50.0)
+        self.assertAlmostEqual(cash, 100.0)
 
     def test_sell_all_with_nothing_held_refuses_plainly(self):
         resp = self.client.post("/coins/SOL/sell", data={
@@ -368,6 +376,7 @@ class TestDetailTradingSol(HomeBase):
 
 class TestTrenchesList(HomeBase):
     def test_trenches_list_under_coins_with_price_and_1h_gain(self):
+        # The trenches list moved off the home page onto its own page.
         mint = generate_keypair()[1]
         self.trenches_patch.stop()
         self.trenches_patch = mock.patch.object(
@@ -383,7 +392,7 @@ class TestTrenchesList(HomeBase):
                 "error": None})
         self.trenches_patch.start()
         self._reset_trenches_cache()
-        html = self._html("/dashboard")
+        html = self._html("/trenches")
         self.assertIn("Trenches", html)
         self.assertIn("Moon Coin", html)
         self.assertIn("MOON", html)
@@ -430,7 +439,7 @@ class TestTrenchesList(HomeBase):
                           "error": "feed down"})
         self.trenches_patch.start()
         self._reset_trenches_cache()
-        html = self._html("/dashboard")
+        html = self._html("/trenches")
         self.assertIn("Trenches unavailable right now", html)
 
 

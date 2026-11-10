@@ -1,12 +1,11 @@
-"""Paper trading is $50 CAD: default, display, and the one-time reset.
+"""Paper trading is $100 CAD: default, display, and the one-time reset.
 
-The old default was $10,000 fake USD. New accounts start at $50 CAD
-and every paper amount on screen says CAD. Existing paper accounts
-are reset once, on the next app start after this lands: $50 cash and
-no open positions (the old $10,000-scale holdings do not fit a $50
-account). Paper trade history and P&L snapshots are kept as records;
-only the live balance and open positions are reset. Real SOL is
-never touched.
+New accounts start at $100 CAD and every paper amount on screen
+says CAD. Existing paper accounts are reset once, on the next app
+start after this lands: $100 cash and no open positions (the old
+$50-scale holdings do not carry over). Paper trade history and P&L
+snapshots are kept as records; only the live balance and open
+positions are reset. Real SOL is never touched.
 """
 
 import os
@@ -32,8 +31,8 @@ def make_default_config(tmpdir: str) -> Config:
 
 
 class TestPaperDefault(unittest.TestCase):
-    def test_default_start_cash_is_50(self):
-        self.assertEqual(make_default_config("/tmp").paper_start_cash, 50.0)
+    def test_default_start_cash_is_100(self):
+        self.assertEqual(make_default_config("/tmp").paper_start_cash, 100.0)
 
     def test_env_override_still_respected(self):
         env = {
@@ -62,20 +61,20 @@ class TestPaperReset(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_new_signup_starts_at_50_cad(self):
+    def test_new_signup_starts_at_100_cad(self):
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio WHERE user_id = ?",
             (self.user_id,)).fetchone()["cash_usd"]
-        self.assertEqual(cash, 50.0)
+        self.assertEqual(cash, 100.0)
         html = self.client.get("/dashboard").get_data(as_text=True)
-        self.assertIn("$50.00 CAD", html)
+        self.assertIn("$100.00 CAD", html)
         self.assertNotIn("$10,000", html)
 
     def test_reset_migration_resets_old_accounts_once(self):
-        # Simulate a pre-reset database: $10,000 cash, an open
-        # position and a trade, with no reset marker yet.
+        # Simulate a pre-reset database: $50 cash (the old default),
+        # an open position and a trade, with no $100 reset marker yet.
         self.db.execute(
-            "UPDATE paper_portfolio SET cash_usd = 10000 WHERE user_id = ?",
+            "UPDATE paper_portfolio SET cash_usd = 50 WHERE user_id = ?",
             (self.user_id,))
         self.db.execute(
             "INSERT INTO paper_holdings (user_id, coin_id, amount, "
@@ -87,14 +86,14 @@ class TestPaperReset(unittest.TestCase):
             "100.0, 1000.0, datetime('now'))",
             (self.user_id,))
         self.db.execute(
-            "DELETE FROM meta WHERE key = 'paper_reset_50_cad'")
+            "DELETE FROM meta WHERE key = 'paper_reset_100_cad'")
         self.db.commit()
         init_db(self.db_path)
         db = self.app.config["DB"]
         cash = db.execute(
             "SELECT cash_usd FROM paper_portfolio WHERE user_id = ?",
             (self.user_id,)).fetchone()["cash_usd"]
-        self.assertEqual(cash, 50.0)
+        self.assertEqual(cash, 100.0)
         self.assertEqual(db.execute(
             "SELECT COUNT(*) c FROM paper_holdings WHERE user_id = ?",
             (self.user_id,)).fetchone()["c"], 0)

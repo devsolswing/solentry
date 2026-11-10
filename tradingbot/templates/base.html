@@ -6,13 +6,21 @@
 <title>{% block title %}SolEntry{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body{% if current_user %} class="app-shell"{% endif %}>
+<body{% if current_user %} class="app-shell {% block body_class %}{% endblock %}"{% endif %}>
 {% block header %}
 <header class="topbar">
-  <a class="brand" href="{% if current_user %}{{ url_for('wallet') }}{% else %}{{ url_for('index') }}{% endif %}">SolEntry</a>
-  {% if current_user and header_balance %}
+  <a class="brand" href="{% if current_user %}{{ url_for('wallet') }}{% else %}{{ url_for('login') }}{% endif %}">SolEntry</a>
+  {% if current_user %}
   <div class="top-actions">
-    <span class="balance-chip" title="{{ header_balance.label }} balance — switch it in the HUD below"><strong>{{ header_balance.label }}</strong> {{ header_balance.text }}</span>
+    {# Paper/Devnet switch lives in the topbar now — same form,
+       same endpoint, works from every page. #}
+    <form method="post" action="{{ url_for('mode_switch') }}" class="hud-mode">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="mode" value="{{ 'devnet' if header_mode == 'paper' else 'paper' }}">
+      <button class="mode-switch hud-switch" type="submit" aria-label="Switch to {{ 'Real trading (devnet)' if header_mode == 'paper' else 'Demo trading (paper)' }}">
+        <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">Devnet</span>
+      </button>
+    </form>
   </div>
   {% endif %}
 </header>
@@ -26,21 +34,16 @@
   {% block content %}{% endblock %}
 </main>
 {% if current_user %}
-{# The HUD: one bar, always on screen, to change the page — plus the
-   Paper/Devnet switch, so the mode can be flipped from anywhere. #}
+{# Bottom navigation: four buttons — Home, Bots, Wallet, Settings —
+   each to its page, with the active one highlighted. The Paper /
+   Devnet switch lives in the topbar. P&amp;L is one tap away from the
+   home chart (the ">" arrow); the Coins page is one tap away from
+   the home holdings panel and the Logs button. #}
 <nav class="hud" aria-label="Pages">
-  <a class="hud-item{{ ' active' if request.path in ['/dashboard'] or request.path.startswith('/coins') else '' }}" href="{{ url_for('dashboard') }}">🪙<span>Coins</span></a>
-  <a class="hud-item{{ ' active' if request.path.startswith('/bots') else '' }}" href="{{ url_for('bots') }}">🤖<span>Bots</span></a>
-  <a class="hud-item{{ ' active' if request.path.startswith('/wallet') else '' }}" href="{{ url_for('wallet') }}">💰<span>Wallet</span></a>
-  <a class="hud-item{{ ' active' if request.path.startswith('/pnl') else '' }}" href="{{ url_for('pnl') }}">📈<span>P&amp;L</span></a>
-  <a class="hud-item{{ ' active' if request.path.startswith('/settings') else '' }}" href="{{ url_for('settings') }}">⚙️<span>Settings</span></a>
-  <form method="post" action="{{ url_for('mode_switch') }}" class="hud-mode">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="mode" value="{{ 'devnet' if header_mode == 'paper' else 'paper' }}">
-    <button class="mode-switch hud-switch" type="submit" aria-label="Switch to {{ 'Real trading (devnet)' if header_mode == 'paper' else 'Demo trading (paper)' }}">
-      <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">Devnet</span>
-    </button>
-  </form>
+  <a class="hud-item{{ ' active' if request.path == '/wallet' else '' }}" href="{{ url_for('wallet') }}"><span class="hud-ico" aria-hidden="true">⌂</span><span>Home</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/bots') else '' }}" href="{{ url_for('bots') }}"><span class="hud-ico" aria-hidden="true">🤖</span><span>Bots</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/wallet/') else '' }}" href="{{ url_for('wallet_details') }}"><span class="hud-ico" aria-hidden="true">💰</span><span>Wallet</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/settings') else '' }}" href="{{ url_for('settings') }}"><span class="hud-ico" aria-hidden="true">⚙️</span><span>Settings</span></a>
 </nav>
 {% endif %}
 {% if show_mode_chooser %}
@@ -58,7 +61,7 @@
       <input type="hidden" name="mode" value="paper">
       <button class="btn big chooser-btn" type="submit">Demo trading</button>
     </form>
-    <p class="muted small">Practice with fake money ($50 CAD paper).</p>
+    <p class="muted small">Practice with fake money ($100 CAD paper).</p>
     <form method="post" action="{{ url_for('choose_mode') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="mode" value="devnet">
@@ -76,5 +79,7 @@
 {% endif %}
 {% endblock %}
 <script src="{{ url_for('static', filename='copy.js') }}"></script>
+<script src="{{ url_for('static', filename='ui.js') }}"></script>
+<script src="{{ url_for('static', filename='quick_trade.js') }}"></script>
 </body>
 </html>

@@ -145,9 +145,9 @@ class TestHoldingsPnl(PnlBase):
     def test_portfolio_totals(self):
         self._add_holding("SOL", 1.0, 90.0)
         totals = portfolio_totals(self.db, self.user_id, {"SOL": 100.0})
-        self.assertAlmostEqual(totals["cash_usd"], 50.0)
+        self.assertAlmostEqual(totals["cash_usd"], 100.0)
         self.assertAlmostEqual(totals["holdings_value_usd"], 100.0)
-        self.assertAlmostEqual(totals["total_value_usd"], 150.0)
+        self.assertAlmostEqual(totals["total_value_usd"], 200.0)
 
 
 class TestPnlPage(PnlBase):
@@ -166,7 +166,7 @@ class TestPnlPage(PnlBase):
         self.assertIn("No data yet", html)
         self.assertIn("All-time", html)
         self.assertIn("1 hour", html)
-        self.assertIn("$50.00 CAD", html)  # paper portfolio value
+        self.assertIn("$100.00 CAD", html)  # paper portfolio value
         self.assertNotIn("2.0000 SOL", html)
         # Real mode shows the on-chain balance only — no paper value.
         self.client.post("/mode", data={
@@ -174,7 +174,7 @@ class TestPnlPage(PnlBase):
         html = self.client.get("/pnl").get_data(as_text=True)
         self.assertIn("2.0000 SOL", html)  # mocked on-chain balance
         self.assertIn("No data yet", html)
-        self.assertNotIn("$50.00 CAD", html)
+        self.assertNotIn("$100.00 CAD", html)
 
     def test_unknown_range_falls_back_to_all(self):
         resp = self.client.get("/pnl?range=bogus")
@@ -193,7 +193,7 @@ class TestPnlPage(PnlBase):
             "SELECT * FROM portfolio_snapshots WHERE user_id = ?",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1)
-        self.assertAlmostEqual(rows[0]["total_value_usd"], 50.0, places=1)
+        self.assertAlmostEqual(rows[0]["total_value_usd"], 100.0, places=1)
         resp = self.client.get("/pnl?range=all")
         html = resp.get_data(as_text=True)
         self.assertIn("SOL", html)
@@ -253,13 +253,14 @@ class TestPumpfunWallet(PnlBase):
 
     def test_wallet_page_shows_pumpfun_wallet(self):
         # The pump.fun wallet lives in Real trading — paper mode shows
-        # the paper summary instead.
+        # the paper summary instead. The wallet itself moved to
+        # /wallet/details in the fox-layout rebuild.
         self.assertNotIn(
             "Pump.fun trading wallet",
             self.client.get("/wallet").get_data(as_text=True))
         self.client.post("/mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
-        resp = self.client.get("/wallet")
+        resp = self.client.get("/wallet/details")
         html = resp.get_data(as_text=True)
         wallet = self.db.execute(
             "SELECT pubkey FROM wallets WHERE user_id = ?",

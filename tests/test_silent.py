@@ -195,17 +195,17 @@ class TestSilentLoop(SilentBase):
         self.assertEqual(len(outcomes[0]["actions"]), 1)
         act = outcomes[0]["actions"][0]
         self.assertEqual(act["action"], "buy")
-        self.assertEqual(act["usd"], 10.0)  # 20% of $50 bankroll
-        self.assertEqual(act["amount"], 0.1)
+        self.assertEqual(act["usd"], 20.0)  # 20% of $100 bankroll
+        self.assertEqual(act["amount"], 0.2)
         pos = self.db.execute(
             "SELECT * FROM bot_positions WHERE bot_id = ?",
             (bot_id,)).fetchone()
         self.assertIsNotNone(pos)
-        self.assertEqual(pos["amount"], 0.1)
+        self.assertEqual(pos["amount"], 0.2)
         self.assertEqual(pos["avg_price"], 100.0)
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        self.assertEqual(cash, 40.0)
+        self.assertEqual(cash, 80.0)
         self.assertEqual(len(self._activity("silent_buy")), 1)
         trade = self.db.execute(
             "SELECT * FROM paper_trades").fetchone()

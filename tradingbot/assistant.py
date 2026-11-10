@@ -67,6 +67,10 @@ CAPABILITIES = (
     "dev selling. I show it back and ask you to confirm first\n"
     "- \"sell if the price drops 15% in a minute\" — set the rug sell "
     "drop and window yourself\n"
+    "- \"set the buy filter for bot <name>: min volume $1000, min "
+    "signal 5%\" — only buy a real signal (5-minute volume, buys "
+    "outnumbering sells, minimum signal %). I show it back and ask "
+    "you to confirm first\n"
     "- \"turn on silent trading for <bot>\" — the bot trades on its own "
     "within your limits (I ask first); \"turn it off\" stops it at once\n"
     "- \"is silent trading on\" — which bots are silent right now\n"
@@ -77,7 +81,7 @@ CAPABILITIES = (
 )
 
 PAPER_HELP = (
-    "Paper trading is practice with fake money — you start with $50 CAD. "
+    "Paper trading is practice with fake money — you start with $100 CAD. "
     "Buy and sell coins at the current price and your portfolio tracks "
     "gains and losses, but no real money ever moves. It is the safe way to "
     "try a strategy before using real SOL. Switch to Real mode on your "
@@ -112,7 +116,7 @@ def _extract_bot_name(raw: str):
     "for <name>"."""
     nm = re.search(
         r"\bbot\s+(?:named\s+)?([A-Za-z0-9_\- ]+?)"
-        r"(?:\s+(?:scan|set|rules|buy|sell|hold|take|,\s)|$)", raw, re.IGNORECASE)
+        r"(?:\s+(?:scan|set|rules|buy|sell|hold|take|,\s)|:|$)", raw, re.IGNORECASE)
     if nm:
         return nm.group(1).strip()
     fm = re.search(r"\bfor\s+(?:bot\s+)?([A-Za-z0-9_\- ]+?)\s*$",
@@ -185,6 +189,71 @@ def _parse_top10(msg: str):
     return {"drop_pct": float(dm.group(1)) if dm else 10.0}
 
 
+def _parse_buy_filter(msg: str, raw: str):
+    """Parse a buy-filter instruction into (filter, bot_name, error).
+
+    Returns (None, None, None) when the message carries no buy-filter
+    instruction; (filter, bot_name, None) when it does; (None, None,
+    error) when it names the filter but no number I can use. A
+    buy-filter instruction is one of:
+      * a minimum 5-minute volume: "only buy coins with at least
+        $5000 volume in 5 minutes" / "min volume 2000";
+      * buy dominance: "require buys to outnumber sells" / "only buy
+        when buyers outnumber sellers";
+      * a minimum signal: "only buy if the signal is at least 6%" /
+        "min signal 6%".
+    The filter only applies to bots that scan the feed (Trenches /
+    scanner); the route says so plainly when it does not.
+    """
+    mentioned = "buy filter" in msg
+    vol = None
+    vm = re.search(r"\$([\d,]+(?:\.\d+)?)[^.]{0,30}?volume", msg)
+    if not vm:
+        vm = re.search(
+            r"(?:min|minimum)\s*volume[^.]{0,15}?\$?([\d,]+(?:\.\d+)?)",
+            msg)
+    if not vm:
+        vm = re.search(r"volume\s*[:=]\s*\$?([\d,]+(?:\.\d+)?)", msg)
+    if vm:
+        vol = float(vm.group(1).replace(",", ""))
+    dominance = None
+    if re.search(
+            r"\b(buys?|buyers?)\b[^.]{0,25}?\b(outnumber|outnumbering|"
+            r"exceed|more than)\b[^.]{0,15}?\b(sells?|sellers?)\b",
+            msg):
+        dominance = True
+    if re.search(
+            r"\b(no|don'?t|never|not)\b[^.]{0,20}?\b(require|need)\b"
+            r"[^.]{0,25}?\b(buys?|buyers?)\b[^.]{0,20}?\b(outnumber|"
+            r"exceed)\b", msg):
+        dominance = False
+    signal = None
+    sm = re.search(
+        r"(?:min|minimum)\s*signal[^.]{0,15}?([\d.]+)\s*%", msg)
+    if not sm:
+        sm = re.search(
+            r"signal[^.]{0,30}?(?:at least|min|minimum|of|>=?)\s*"
+            r"([\d.]+)\s*%", msg)
+    if sm:
+        signal = float(sm.group(1))
+    if vol is None and dominance is None and signal is None:
+        if mentioned:
+            return (None, None,
+                    "Tell me the numbers for the buy filter — for "
+                    "example: \"set the buy filter for bot Luna: min "
+                    "volume $1000, min signal 5%\". Nothing was "
+                    "changed.")
+        return (None, None, None)
+    filt = {}
+    if vol is not None:
+        filt["min_volume_5m_usd"] = vol
+    if dominance is not None:
+        filt["require_buy_dominance"] = dominance
+    if signal is not None:
+        filt["min_signal_pct"] = signal
+    return (filt, _extract_bot_name(raw), None)
+
+
 def _parse_rules_command(msg: str, raw: str):
     """Parse a plain-language rules instruction into a partial rule set.
 
@@ -201,6 +270,15 @@ def _parse_rules_command(msg: str, raw: str):
     rug, rug_bot, rug_err = _parse_rug(msg, raw)
     if rug_err:
         return ("unsupported", rug_err)
+    # A buy-filter instruction on its own ("only buy coins with at
+    # least $5000 volume in 5 minutes") carries no buy signal: it is
+    # a change to a bot's existing rules, handled by the rules_filter
+    # intent — not a fresh rule set.
+    buy_filter, filter_bot, filter_err = _parse_buy_filter(msg, raw)
+    if filter_err:
+        return ("unsupported", filter_err)
+    if buy_filter is not None:
+        return ("filter_only", filter_bot, buy_filter)
     # Scanner profit rules: "scanner take profit at 3% when the
     # market is slow" / "hold the runners" — the scanner's profit
     # ladders (slow ladder + trending runner ladder). No buy signal
@@ -434,6 +512,10 @@ def parse_message(text: str) -> dict:
             and parsed_rules[0] == "rug_only":
         return {"intent": "rules_rug", "bot_name": parsed_rules[1],
                 "rug": parsed_rules[2], "reply": ""}
+    if isinstance(parsed_rules, tuple) and len(parsed_rules) == 3 \
+            and parsed_rules[0] == "filter_only":
+        return {"intent": "rules_filter", "bot_name": parsed_rules[1],
+                "filter": parsed_rules[2], "reply": ""}
     if isinstance(parsed_rules, tuple) and len(parsed_rules) == 2 \
             and parsed_rules[0] == "unsupported":
         return {"intent": "rules_unsupported",

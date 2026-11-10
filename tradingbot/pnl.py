@@ -158,6 +158,32 @@ def chart_points_real(db: sqlite3.Connection, user_id: int,
     return points, len(points) > 0
 
 
+def change_24h(db: sqlite3.Connection, user_id: int,
+               current_total: float | None,
+               real: bool = False) -> dict | None:
+    """Change over the last 24 hours from recorded snapshots only.
+
+    Compares the live `current_total` against the oldest snapshot
+    recorded in the last 24 hours. Returns {"delta": ..., "pct": ...}
+    or None when there is no usable baseline (no snapshot in the
+    window, a zero baseline, or no current total). Never invents a
+    figure — a missing baseline means the page shows "—".
+    """
+    if current_total is None:
+        return None
+    if real:
+        points, _has = chart_points_real(db, user_id, "1d")
+    else:
+        points, _has = chart_points(db, user_id, "1d")
+    if not points:
+        return None
+    baseline = float(points[0]["total_value_usd"])
+    if baseline == 0:
+        return None
+    delta = float(current_total) - baseline
+    return {"delta": delta, "pct": delta / baseline * 100.0}
+
+
 def chart_svg(points: list, width: int = 640, height: int = 200,
               unit: str = "$") -> str:
     """A plain SVG line chart from recorded points. Empty string when
