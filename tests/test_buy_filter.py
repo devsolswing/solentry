@@ -55,6 +55,9 @@ class TestBuyFilterUnit(unittest.TestCase):
             "min_volume_5m_usd": 1000.0,
             "require_buy_dominance": True,
             "min_signal_pct": 5.0,
+            # Market-cap minimum, 0 = any size (builderBot sets it
+            # when the user asks for one).
+            "min_market_cap_usd": 0.0,
         })
 
     def test_strong_signal_passes(self):
@@ -385,7 +388,7 @@ class TestBuyFilterLoop(unittest.TestCase):
 
     def test_trenches_sellers_in_control_filtered(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        outcomes = run_once(
+        run_once(
             self.db, self.cfg, price_fetcher=_empty_prices,
             trenches_fetcher=_FakeScan(
                 [_entry(change_5m=8.0, buys=5, sells=50)]))

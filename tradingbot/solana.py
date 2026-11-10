@@ -442,6 +442,14 @@ class SolanaRpcClient:
             raise RpcError("bad getTokenLargestAccounts result")
         return result["value"]
 
+    def get_token_supply(self, mint: str) -> int:
+        """Total token supply for a mint, in base units (public RPC,
+        no key). Raises RpcError on any bad response."""
+        result = self._call("getTokenSupply", [mint])
+        if not result or "value" not in result:
+            raise RpcError("bad getTokenSupply result")
+        return int(result["value"]["amount"])
+
     def get_latest_blockhash(self) -> str:
         result = self._call("getLatestBlockhash", [])
         blockhash = (result or {}).get("value", {}).get("blockhash")

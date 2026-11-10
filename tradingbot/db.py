@@ -299,6 +299,62 @@ CREATE TABLE IF NOT EXISTS scanner_top10 (
     PRIMARY KEY (bot_id, mint),
     FOREIGN KEY (bot_id) REFERENCES bots (id)
 );
+
+CREATE TABLE IF NOT EXISTS trade_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    bot_id INTEGER,
+    coin TEXT NOT NULL,
+    side TEXT NOT NULL,
+    amount REAL NOT NULL,
+    price REAL NOT NULL,
+    total_usd REAL NOT NULL,
+    pnl_usd REAL,
+    win INTEGER,
+    exit_reason TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'paper',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
+
+-- builderBot's identity: one per user, unique immutable 8-digit ID
+-- (same pattern as the signing bot's support ID — only INSERT
+-- exists, no update path anywhere).
+CREATE TABLE IF NOT EXISTS builderbots (
+    user_id INTEGER PRIMARY KEY,
+    builder_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- builderBot's working memory for one in-progress conversation:
+-- the whole state (step, answers, message history) is encrypted
+-- with AES-256-GCM (ENCRYPTION_KEY) and wiped the moment the bot
+-- is created or the conversation is cancelled. Only one active
+-- conversation per user.
+CREATE TABLE IF NOT EXISTS builderbot_chats (
+    user_id INTEGER PRIMARY KEY,
+    encrypted_state TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Every rule adjustment builderBot makes to a losing bot: what
+-- changed, from what to what, and which trades triggered it.
+CREATE TABLE IF NOT EXISTS builderbot_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    field TEXT NOT NULL,
+    old_value REAL NOT NULL,
+    new_value REAL NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (bot_id) REFERENCES bots (id),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
 """
 
 
@@ -375,6 +431,12 @@ _MIGRATIONS = (
     ("paper_trades", "buy_sells_5m", "INTEGER"),
     ("paper_trades", "buy_regime", "TEXT"),
     ("paper_trades", "exit_reason", "TEXT"),
+    # Top-10 concentration watch (builderBot): the top-10 share of
+    # total supply at the last check, how many consecutive checks it
+    # has risen, and when the check ran (15-second cadence gating).
+    ("scanner_top10", "share_pct", "REAL"),
+    ("scanner_top10", "rise_streak", "INTEGER NOT NULL DEFAULT 0"),
+    ("scanner_top10", "last_checked_at", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -386,6 +448,17 @@ def _backfill_pumpfun_wallets(conn: sqlite3.Connection) -> None:
         "(SELECT pubkey FROM wallets WHERE wallets.user_id = users.id) "
         "WHERE pumpfun_wallet = '' AND EXISTS "
         "(SELECT 1 FROM wallets WHERE wallets.user_id = users.id)")
+
+
+def _backfill_builderbots(conn: sqlite3.Connection) -> None:
+    """One-time, idempotent backfill: users created before builderBot
+    existed get one (with a fresh 8-digit ID)."""
+    from .builderbot import ensure_builderbot
+
+    user_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM users").fetchall()]
+    for user_id in user_ids:
+        ensure_builderbot(conn, user_id)
 
 
 def _backfill_signing_bots(conn: sqlite3.Connection) -> None:
@@ -468,6 +541,7 @@ def init_db(path: str) -> sqlite3.Connection:
     _migrate(conn)
     _backfill_pumpfun_wallets(conn)
     _backfill_signing_bots(conn)
+    _backfill_builderbots(conn)
     _reset_paper_50_cad(conn)
     _reset_paper_100_cad(conn)
     conn.commit()

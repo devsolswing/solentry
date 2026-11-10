@@ -679,16 +679,18 @@ class TestRulesRoutes(unittest.TestCase):
         self.assertIn("3.4%", html)
         self.assertIn("Sell ladder", html)
 
-    def test_bot_create_category(self):
+    def test_bot_create_category_ignored(self):
+        # The category picker is gone (builderBot builds bots now):
+        # a category posted to /bots/create is ignored - every bot
+        # created this way carries no category. The Trenches and
+        # Scanner presets live on their own routes.
         token = csrf(self.client, "/bots/create")
         self.client.post("/bots/create", data={
             "csrf_token": token, "name": "Meme1", "strategy": "bold",
             "coins": "SOL", "buy_size_pct": "20", "stop_loss_pct": "7",
             "max_open_trades": "3", "mode": "paper",
             "category": "Memecoin build"})
-        bot = self._bot("Meme1")
-        self.assertEqual(bot["category"], TRENCHES_CATEGORY)
-        # Unknown category is stored as none.
+        self.assertEqual(self._bot("Meme1")["category"], "")
         token = csrf(self.client, "/bots/create")
         self.client.post("/bots/create", data={
             "csrf_token": token, "name": "Meme2", "strategy": "bold",

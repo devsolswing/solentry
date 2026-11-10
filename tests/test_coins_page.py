@@ -421,6 +421,10 @@ class TestRefreshLive(unittest.TestCase):
 
 
 class TestScannerInEditBots(CoinsPageBase):
+    """The scanner is built from its preset route (or by builderBot /
+    the assistant) — the category/strategy pickers on the bot forms
+    are gone, so the forms can no longer set a category at all."""
+
     def _create_bot(self, name="Luna", category=""):
         token = csrf(self.client, "/bots/create")
         resp = self.client.post("/bots/create", data={
@@ -434,26 +438,26 @@ class TestScannerInEditBots(CoinsPageBase):
             "SELECT * FROM bots WHERE user_id = ? AND name = ?",
             (self.user_id, name)).fetchone()
 
-    def test_edit_to_scanner_applies_scanner_rules(self):
-        bot = self._create_bot()
-        self.assertEqual(bot["category"], "")
-        token = csrf(self.client, f"/bots/{bot['id']}/edit")
-        resp = self.client.post(f"/bots/{bot['id']}/edit", data={
-            "csrf_token": token, "name": "Luna", "strategy": "bold",
-            "platform": "pump.fun", "category": "scanner",
-            "buy_size_pct": "20", "stop_loss_pct": "7",
-            "max_open_trades": "3", "mode": "paper", "coins": "SOL"},
-            follow_redirects=False)
-        self.assertEqual(resp.status_code, 302)
-        edited = self.db.execute("SELECT * FROM bots WHERE id = ?",
-                                 (bot["id"],)).fetchone()
-        self.assertEqual(edited["category"], "scanner")
-        rules, err = load_rules(edited)
+    def _create_scanner(self):
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/scanner",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302, resp.status_code)
+        return self.db.execute(
+            "SELECT * FROM bots WHERE user_id = ? AND category = ?",
+            (self.user_id, "scanner")).fetchone()
+
+    def test_preset_scanner_applies_scanner_rules(self):
+        bot = self._create_scanner()
+        self.assertIsNotNone(bot)
+        self.assertEqual(bot["category"], "scanner")
+        rules, err = load_rules(bot)
         self.assertIsNone(err)
         self.assertEqual(rules, scanner_ruleset())
 
-    def test_edit_to_scanner_keeps_existing_scanner_rules(self):
-        bot = self._create_bot(category="scanner")
+    def test_edit_keeps_existing_scanner_rules(self):
+        bot = self._create_scanner()
         rules, err = load_rules(bot)
         self.assertIsNone(err)
         self.assertEqual(rules["kind"], "scanner")
@@ -474,34 +478,39 @@ class TestScannerInEditBots(CoinsPageBase):
         self.assertEqual(resp.status_code, 302)
         edited = self.db.execute("SELECT * FROM bots WHERE id = ?",
                                  (bot["id"],)).fetchone()
+        self.assertEqual(edited["category"], "scanner")
         rules, err = load_rules(edited)
         self.assertIsNone(err)
-        self.assertEqual(rules["top10_rug"], {"drop_pct": 12.0})
+        # The custom 12% drop survives; validation fills the
+        # concentration defaults around it.
+        self.assertEqual(rules["top10_rug"]["drop_pct"], 12.0)
+        self.assertEqual(rules["top10_rug"]["concentration_pct"], 21.0)
 
-    def test_create_with_scanner_category_applies_rules(self):
+    def test_create_with_scanner_category_ignored(self):
+        # A category posted to /bots/create is ignored now — the
+        # scanner only comes from its preset route.
         bot = self._create_bot(name="Snipe", category="scanner")
-        self.assertEqual(bot["category"], "scanner")
+        self.assertEqual(bot["category"], "")
         rules, err = load_rules(bot)
-        self.assertIsNone(err)
-        self.assertEqual(rules, scanner_ruleset())
+        # No rules at all — a plain bot has no kind until one is set.
+        self.assertIsNone(rules)
 
-    def test_create_scanner_twice_goes_to_existing(self):
-        self._create_bot(name="Snipe", category="scanner")
-        token = csrf(self.client, "/bots/create")
-        resp = self.client.post("/bots/create", data={
-            "csrf_token": token, "name": "Snipe2", "strategy": "bold",
-            "platform": "pump.fun", "category": "scanner",
-            "buy_size_pct": "20", "stop_loss_pct": "7",
-            "max_open_trades": "3", "mode": "paper", "coins": "SOL"},
-            follow_redirects=False)
+    def test_preset_scanner_twice_goes_to_existing(self):
+        first = self._create_scanner()
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/scanner",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
+        self.assertIn(f"/bots/{first['id']}",
+                      resp.headers["Location"])
         count = self.db.execute(
             "SELECT COUNT(*) c FROM bots WHERE user_id = ? "
             "AND category = 'scanner'", (self.user_id,)).fetchone()["c"]
         self.assertEqual(count, 1)
 
-    def test_edit_to_scanner_blocked_when_one_exists(self):
-        first = self._create_bot(name="Snipe", category="scanner")
+    def test_edit_cannot_turn_bot_into_scanner(self):
+        first = self._create_scanner()
         second = self._create_bot(name="Other")
         token = csrf(self.client, f"/bots/{second['id']}/edit")
         resp = self.client.post(f"/bots/{second['id']}/edit", data={
@@ -511,10 +520,13 @@ class TestScannerInEditBots(CoinsPageBase):
             "max_open_trades": "3", "mode": "paper", "coins": "SOL"},
             follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
-        self.assertIn(f"/bots/{first['id']}", resp.headers["Location"])
         untouched = self.db.execute("SELECT * FROM bots WHERE id = ?",
                                     (second["id"],)).fetchone()
         self.assertEqual(untouched["category"], "")
+        self.assertEqual(first["id"], self.db.execute(
+            "SELECT id FROM bots WHERE user_id = ? "
+            "AND category = 'scanner'",
+            (self.user_id,)).fetchone()["id"])
 
 
 if __name__ == "__main__":

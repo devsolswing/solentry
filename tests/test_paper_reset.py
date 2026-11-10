@@ -15,8 +15,7 @@ import unittest
 from tradingbot import create_app
 from tradingbot.config import Config
 from tradingbot.db import init_db
-from helpers import (TEST_ENCRYPTION_KEY, TEST_SESSION_SECRET, csrf,
-                     make_client, signup)
+from helpers import (TEST_ENCRYPTION_KEY, TEST_SESSION_SECRET, signup)
 
 
 def make_default_config(tmpdir: str) -> Config:

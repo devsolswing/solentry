@@ -276,8 +276,11 @@ class TestPlatformWallets(SplitBase):
         resp2 = self._platform_create("phantom")
         self.assertEqual(resp2.status_code, 302)
         self.assertNotIn(private_key, resp2.get_data(as_text=True))
+        # /bots/create is the builderBot chatbox now: the key is
+        # never in it, and the flash names the wallet address only.
         bot_form = self._html("/bots/create")
-        self.assertIn("Wallet ready.", bot_form)
+        self.assertNotIn(private_key, bot_form)
+        self.assertIn("You already have a Phantom wallet:", bot_form)
         self.assertNotIn(private_key, bot_form)
         self.assertNotIn(private_key, self._html("/wallet"))
 
@@ -309,13 +312,14 @@ class TestPlatformWallets(SplitBase):
         self.assertEqual(self.db.execute(
             "SELECT COUNT(*) c FROM platform_wallets").fetchone()["c"], 0)
 
-    def test_bot_form_has_platform_selector_not_coins_to_watch(self):
+    def test_bot_create_is_builderbot_chatbox(self):
+        # /bots/create is now the builderBot chatbox: it asks the
+        # platform as a question, so there is no platform selector
+        # (and no "Coins to watch") on the page itself.
         html = self._html("/bots/create")
-        self.assertIn('name="platform"', html)
-        self.assertIn("pump.fun", html)
-        self.assertIn("Phantom", html)
-        self.assertIn("pumpSwap", html)
-        self.assertIn("Create", html)
+        self.assertIn("builderBot", html)
+        self.assertIn("Create a bot", html)
+        self.assertNotIn('name="platform"', html)
         self.assertNotIn("Coins to watch", html)
 
     def test_create_bot_stores_platform(self):

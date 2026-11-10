@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Create a bot — builderBot{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>🤖 builderBot <span class="muted small">ID {{ builder_id }}</span></h1>
+  <p class="muted small">builderBot asks simple questions one at a time and turns your answers into the bot's rules — and those rules are the code the bot runs. It is a deterministic builder, not a general AI: it only understands the questions here, and it shows the whole bot back for a yes before creating anything. Never paste a wallet key, seed phrase or password here — builderBot deletes anything that looks like a secret, and it never has access to keys (only the signing bot does).</p>
+  <div id="chat-log" class="chat-log">
+    {% for m in messages %}
+    <p><strong>{{ "builderBot:" if m.role == "builderbot" else "You:" }}</strong> {{ m.text }}</p>
+    {% endfor %}
+  </div>
+  <div id="suggestions">
+    {% for s in suggestions %}
+    <button class="btn ghost small suggestion" type="button">{{ s }}</button>
+    {% endfor %}
+  </div>
+  <form id="chat-form" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input id="chat-input" type="text" name="message" placeholder="Type your answer…" autocomplete="off" required>
+    <button class="btn" type="submit">Send</button>
+  </form>
+  <p><a href="{{ url_for('bots') }}">← Back to bots</a></p>
+</div>
+<script nonce="{{ csp_nonce }}">
+const log = document.getElementById('chat-log');
+const suggBox = document.getElementById('suggestions');
+const input = document.getElementById('chat-input');
+function esc(text) { return text.replace(/</g, '&lt;').replace(/\n/g, '<br>'); }
+function showSuggestions(list) {
+  suggBox.innerHTML = '';
+  (list || []).forEach(function (s) {
+    const b = document.createElement('button');
+    b.className = 'btn ghost small suggestion';
+    b.type = 'button';
+    b.textContent = s;
+    b.addEventListener('click', function () { send(s); });
+    suggBox.appendChild(b);
+  });
+}
+async function send(text) {
+  text = (text || '').trim();
+  if (!text) return;
+  input.value = '';
+  const res = await fetch('{{ url_for('api_builderbot') }}', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text, csrf_token: '{{ csrf_token }}'})
+  });
+  const data = await res.json();
+  // The reply carries the whole history; render only what is new
+  // since the last turn (your message and builderBot's answer both
+  // come back in it — that is what avoids showing either twice).
+  const seen = parseInt(log.dataset.seen || '0', 10);
+  (data.messages || []).slice(seen).forEach(function (m) {
+    log.innerHTML += '<p><strong>' + (m.role === 'builderbot' ? 'builderBot:' : 'You:') + '</strong> ' + esc(m.text) + '</p>';
+  });
+  log.dataset.seen = (data.messages || []).length;
+  showSuggestions(data.suggestions || []);
+  if (data.created) {
+    log.innerHTML += '<p><a class="btn big" href="/bots/' + data.created.bot_id + '">See your new bot →</a></p>';
+    input.disabled = true;
+  }
+  if (data.cancelled) input.disabled = true;
+  log.scrollTop = log.scrollHeight;
+}
+document.getElementById('chat-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await send(input.value);
+});
+suggBox.addEventListener('click', function (e) {
+  if (e.target && e.target.classList.contains('suggestion')) send(e.target.textContent);
+});
+log.dataset.seen = {{ messages|length }};
+log.scrollTop = log.scrollHeight;
+</script>
+{% endblock %}

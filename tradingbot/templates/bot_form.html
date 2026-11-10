@@ -1,48 +1,34 @@
 {% extends "base.html" %}
-{% block title %}{{ "Edit bot" if bot else "Create a bot" }} — Trading Bot{% endblock %}
+{% block title %}Edit bot — Trading Bot{% endblock %}
 {% block content %}
 <div class="card narrow">
-  <h1>{{ "Edit bot" if bot else "Create a bot" }}</h1>
-  <form method="post" action="{{ url_for('bot_edit', bot_id=bot.id) if bot else url_for('bot_create') }}">
+  <h1>Edit bot</h1>
+  <p class="muted small">Bots are built by builderBot — it asks simple questions one at a time and turns your answers into the bot's rules. To build a new bot, press Create Bot on the Bots page. This page only changes the limits below; the trading rules themselves are set through builderBot or the assistant, which always shows them back and asks you to confirm.</p>
+  <form method="post" action="{{ url_for('bot_edit', bot_id=bot.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>Name<input name="name" value="{{ bot.name if bot else '' }}" placeholder="My Bot"></label>
-    <label>Strategy
-      <select name="strategy">
-        {% for s in ['careful', 'balanced', 'bold'] %}
-        <option value="{{ s }}" {{ 'selected' if bot and bot.strategy == s else '' }}>{{ s }}</option>
-        {% endfor %}
-      </select>
-    </label>
+    <label>Name<input name="name" value="{{ bot.name }}" placeholder="My Bot"></label>
     <label>Platform
       <select name="platform" id="platform-select">
         {% for p in platforms %}
-        <option value="{{ p }}" {{ 'selected' if (bot and bot.platform == p) or (not bot and p == 'pump.fun') else '' }}>{{ platform_labels[p] }}</option>
+        <option value="{{ p }}" {{ 'selected' if bot.platform == p else '' }}>{{ platform_labels[p] }}</option>
         {% endfor %}
       </select>
     </label>
-    <label>Category
-      <select name="category">
-        <option value="" {{ 'selected' if not bot or not bot.category else '' }}>None</option>
-        <option value="Memecoin build" {{ 'selected' if bot and bot.category == 'Memecoin build' else '' }}>Memecoin build</option>
-        <option value="scanner" {{ 'selected' if bot and bot.category == 'scanner' else '' }}>∆scanner∆</option>
-      </select>
-    </label>
-    <p class="muted small">Memecoin build bots scan pump.fun and PumpSwap for new tokens. ∆scanner∆ bots snipe coins gaining 5% in 3 minutes, scanning every 30 seconds, and sell everything if the top 10 wallets dump 10% — picking ∆scanner∆ gives the bot those sniper rules. Their trading rules are set through the assistant, which shows them back and asks you to confirm.</p>
-    <label>Buy size (% of bankroll per trade)<input type="number" name="buy_size_pct" step="any" min="1" max="100" value="{{ bot.buy_size_pct if bot else 20 }}"></label>
-    <label>Stop loss (%)<input type="number" name="stop_loss_pct" step="any" min="1" max="50" value="{{ bot.stop_loss_pct if bot else 7 }}"></label>
-    <label>Max open trades (1–5)<input type="number" name="max_open_trades" step="1" min="1" max="5" value="{{ bot.max_open_trades if bot else 3 }}"></label>
+    <label>Buy size (% of bankroll per trade)<input type="number" name="buy_size_pct" step="any" min="1" max="100" value="{{ bot.buy_size_pct }}"></label>
+    <label>Stop loss (%)<input type="number" name="stop_loss_pct" step="any" min="1" max="50" value="{{ bot.stop_loss_pct }}"></label>
+    <label>Max open trades (1–5)<input type="number" name="max_open_trades" step="1" min="1" max="5" value="{{ bot.max_open_trades }}"></label>
     <label>Mode
       <select name="mode">
-        <option value="paper" {{ 'selected' if not bot or bot.mode == 'paper' else '' }}>Paper — fake money, practice</option>
-        <option value="real" {{ 'selected' if bot and bot.mode == 'real' else '' }}>Real — your app wallet, real SOL</option>
+        <option value="paper" {{ 'selected' if bot.mode == 'paper' else '' }}>Paper — fake money, practice</option>
+        <option value="real" {{ 'selected' if bot.mode == 'real' else '' }}>Real — your app wallet, real SOL</option>
       </select>
     </label>
     <div class="silent-box">
-      <label><input type="checkbox" name="silent" {{ 'checked' if bot and bot.silent else '' }}>
+      <label><input type="checkbox" name="silent" {{ 'checked' if bot.silent else '' }}>
       Silent trading — the bot trades on its own, in the background, with no per-trade approval.</label>
-      <p class="muted small">Silent is off by default. When it is on, the bot only trades within your limits (buy size, stop loss, max open trades) and never more than your balance. Every trade is logged on your dashboard, and you can turn it off any time. {% if bot %}Changing this asks you to confirm first.{% else %}New bots always start with silent off — you can turn it on after creating it.{% endif %}</p>
+      <p class="muted small">Silent is off by default. When it is on, the bot only trades within your limits (buy size, stop loss, max open trades) and never more than your balance. Every trade is logged on your dashboard, and you can turn it off any time. Changing this asks you to confirm first.</p>
     </div>
-    <button class="btn big" type="submit">{{ "Save changes" if bot else "Create bot" }}</button>
+    <button class="btn big" type="submit">Save changes</button>
   </form>
   <div class="card">
     <h2>Platform wallets</h2>
@@ -63,9 +49,7 @@
     </div>
     {% endfor %}
   </div>
-  {% if bot %}
   <p><a class="btn danger" href="{{ url_for('bot_delete_confirm', bot_id=bot.id) }}">Delete bot</a></p>
-  {% endif %}
   <p><a href="{{ url_for('bots') }}">← Back to bots</a></p>
 </div>
 {% endblock %}

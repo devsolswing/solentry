@@ -30,7 +30,9 @@ class TestBots(unittest.TestCase):
         db = self.app.config["DB"]
         bot = db.execute("SELECT * FROM bots WHERE name = 'Luna'").fetchone()
         self.assertIsNotNone(bot)
-        self.assertEqual(bot["strategy"], "bold")
+        # Strategy is no longer picked on the form (builderBot builds
+        # bots now): the value posted is ignored, always "balanced".
+        self.assertEqual(bot["strategy"], "balanced")
         self.assertEqual(bot["buy_size_pct"], 25)
         self.assertEqual(bot["stop_loss_pct"], 5)
         # Token shown once on the page; only its hash is stored.
@@ -69,7 +71,9 @@ class TestBots(unittest.TestCase):
         bot = db.execute("SELECT * FROM bots WHERE id = ?",
                          (bot_id,)).fetchone()
         self.assertEqual(bot["name"], "Luna2")
-        self.assertEqual(bot["strategy"], "careful")
+        # The edit form has no strategy picker any more: the stored
+        # strategy is kept, never overwritten from the form.
+        self.assertEqual(bot["strategy"], "balanced")
         self.assertEqual(bot["coins"], '["ETH"]')
 
     def test_delete_removes_bot(self):

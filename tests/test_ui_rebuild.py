@@ -348,7 +348,9 @@ class TestBotsPage(UiBase):
         self.assertIn("Luna", html)
         self.assertIn(f"ID: {bot['id']}", html)
         self.assertIn("Created:", html)
-        self.assertIn("bold", html)
+        # Strategy is no longer picked on the form (builderBot builds
+        # bots now): every bot created through the form is "balanced".
+        self.assertIn("balanced", html)
         self.assertIn("Buy 25.0%", html)
         self.assertIn("Stop 5.0%", html)
         # No per-bot 24H PNL: the app cannot compute it.

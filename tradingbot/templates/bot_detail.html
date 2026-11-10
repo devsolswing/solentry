@@ -31,6 +31,43 @@
 <p class="muted small">{% if bot.silent %}Silent trading is ON: this bot trades on its own within your limits (buy size, stop loss, max open trades, never more than your balance). Every trade is logged below and on your dashboard. Turn it off any time.{% else %}Approval-gated: suggestions wait for you. Approving a buy/sell suggestion records your decision — on-chain swaps are not executed in v1. Approved SOL transfers go through the normal two-step send confirm. Turn silent trading on if you want this bot to trade on its own within your limits.{% endif %}</p>
 
 <div class="card">
+  <h2>Win / loss record</h2>
+  {% if wl_summary.trades %}
+  <p><strong>{{ wl_summary.wins }} wins · {{ wl_summary.losses }} losses</strong>{% if wl_summary.win_rate is not none %} · win rate {{ (wl_summary.win_rate * 100)|round(0) }}%{% endif %} · net P&amp;L ${{ "%.2f"|format(wl_summary.net_pnl_usd) }}</p>
+  <p class="muted small">From closed sells only — a buy has no P&amp;L yet, and a break-even sell counts as neither a win nor a loss. builderBot reviews this record and, when the bot is losing, tightens its rules one small step (never wider) — see the adjustments below.</p>
+  {% else %}
+  <p class="muted">No closed trades yet — nothing to win or lose on.</p>
+  {% endif %}
+  {% if trades %}
+  <table>
+    <tr><th>Trade ID</th><th>When</th><th>Coin</th><th>Side</th><th>Amount</th><th>Price</th><th>P&amp;L</th><th>W/L</th></tr>
+    {% for t in trades %}
+    <tr>
+      <td>{{ t.trade_id }}</td><td>{{ t.created_at }}</td><td>{{ t.coin }}</td><td>{{ t.side }}</td><td>{{ "%.4f"|format(t.amount) }}</td><td>${{ "%.4f"|format(t.price) }}</td><td>{% if t.pnl_usd is not none %}${{ "%.2f"|format(t.pnl_usd) }}{% else %}—{% endif %}</td><td>{% if t.win == 1 %}Win{% elif t.win == 0 %}Loss{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Rule adjustments by builderBot</h2>
+  {% if adjustments %}
+  <table>
+    <tr><th>When</th><th>Changed</th><th>From</th><th>To</th><th>Why</th></tr>
+    {% for a in adjustments %}
+    <tr>
+      <td>{{ a.created_at }}</td><td>{{ a.field }}</td><td>{{ a.old_value }}</td><td>{{ a.new_value }}</td><td>{{ a.reason }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted small">Adjustments only ever tighten — a smaller stop loss, a higher buy threshold, or a smaller buy size. You can reverse any of them by editing the bot.</p>
+  {% else %}
+  <p class="muted">No adjustments yet. builderBot only adjusts a bot that is losing (5 or more closed trades, win rate 40% or less), one small step at most once a day.</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2>Proposals</h2>
   {% if proposals %}
   <table>

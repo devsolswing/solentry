@@ -138,11 +138,20 @@ RUG_SELL_DEFAULT = {"drop_pct": 15.0, "window_seconds": 60,
 RUG_SELL_KEYS = ("drop_pct", "window_seconds", "drop_5m_pct")
 RUG_WINDOWS = (60, 300)
 
-# Top-10 wallets rug sense (scanner only): sell everything when the
-# top 10 holders' combined holdings drop this far from the peak since
-# holding. The default 10% is James's number.
-TOP10_RUG_DEFAULT = {"drop_pct": 10.0}
-TOP10_RUG_KEYS = ("drop_pct",)
+# Top-10 wallets rug sense (scanner and trenches — the memecoin
+# kinds): sell everything when the top 10 holders' combined holdings
+# drop this far from the peak since holding (default 10%, James's
+# number); sell everything when their combined share of TOTAL token
+# supply reaches concentration_pct (default 21%); sell
+# slow_climb_sell_pct (default 50%) when that share keeps rising
+# toward the concentration level over consecutive 15-second checks
+# (the slow-climb early rug warning). The check runs every
+# check_interval_seconds (default 15) per held coin.
+TOP10_RUG_DEFAULT = {"drop_pct": 10.0, "concentration_pct": 21.0,
+                     "slow_climb_sell_pct": 50.0,
+                     "check_interval_seconds": 15.0}
+TOP10_RUG_KEYS = ("drop_pct", "concentration_pct", "slow_climb_sell_pct",
+                  "check_interval_seconds")
 
 TRENCHES_CATEGORY = "Memecoin build"
 TRENCHES_PRESET_NAME = "Trenches"
@@ -221,7 +230,10 @@ SCANNER_RULES = {
     "sell_ladder": [dict(r) for r in SLOW_LADDER],
     "trailing_stop_pct": SCANNER_TRAILING_STOP_PCT,
     "rug_sell": dict(RUG_SELL_DEFAULT),
-    "top10_rug": {"drop_pct": SCANNER_TOP10_DROP_PCT},
+    "top10_rug": {"drop_pct": SCANNER_TOP10_DROP_PCT,
+                  "concentration_pct": 21.0,
+                  "slow_climb_sell_pct": 50.0,
+                  "check_interval_seconds": 15.0},
     "trending_ladder": [dict(r) for r in TRENDING_LADDER],
     "regime": dict(REGIME_DEFAULT),
     "buy_filter": dict(BUY_FILTER_DEFAULT),
@@ -442,9 +454,9 @@ def validate_ruleset(raw, bot=None):
     top10 = raw.get("top10_rug")
     clean_top10 = None
     if top10 is not None:
-        if kind != "scanner":
-            return _fail("The top-10 wallets watch is a scanner rule — "
-                         "it only applies to scanner bots.")
+        if kind not in ("scanner", "trenches"):
+            return _fail("The top-10 wallets watch is a memecoin rule — "
+                         "it only applies to scanner and trenches bots.")
         if not isinstance(top10, dict):
             return _fail("The top-10 wallets watch must be a set of "
                          "settings (drop %).")
@@ -457,7 +469,29 @@ def validate_ruleset(raw, bot=None):
         if not _is_number(top_drop) or not 1 <= float(top_drop) <= 90:
             return _fail("The top-10 wallets drop must be between 1% "
                          "and 90%.")
-        clean_top10 = {"drop_pct": float(top_drop)}
+        concentration = top10.get(
+            "concentration_pct", TOP10_RUG_DEFAULT["concentration_pct"])
+        if not _is_number(concentration) \
+                or not 1 <= float(concentration) <= 100:
+            return _fail("The top-10 concentration level must be "
+                         "between 1% and 100% of supply.")
+        slow_climb = top10.get(
+            "slow_climb_sell_pct",
+            TOP10_RUG_DEFAULT["slow_climb_sell_pct"])
+        if not _is_number(slow_climb) or not 0 <= float(slow_climb) <= 100:
+            return _fail("The top-10 slow-climb sell must be between "
+                         "0% (off) and 100% of the position.")
+        check_interval = top10.get(
+            "check_interval_seconds",
+            TOP10_RUG_DEFAULT["check_interval_seconds"])
+        if not _is_number(check_interval) \
+                or not 10 <= float(check_interval) <= 300:
+            return _fail("The top-10 check interval must be between "
+                         "10 and 300 seconds.")
+        clean_top10 = {"drop_pct": float(top_drop),
+                       "concentration_pct": float(concentration),
+                       "slow_climb_sell_pct": float(slow_climb),
+                       "check_interval_seconds": float(check_interval)}
     buy_filter = raw.get("buy_filter")
     clean_filter = None
     if buy_filter is not None:
@@ -487,11 +521,18 @@ def validate_ruleset(raw, bot=None):
         if not _is_number(min_signal) or not 0.1 <= float(min_signal) <= 100:
             return _fail("The buy filter's minimum signal must be "
                          "between 0.1% and 100%.")
+        min_mcap = buy_filter.get(
+            "min_market_cap_usd", BUY_FILTER_DEFAULT["min_market_cap_usd"])
+        if not _is_number(min_mcap) \
+                or not 0 <= float(min_mcap) <= 1000000000000:
+            return _fail("The buy filter's minimum market cap must be "
+                         "between $0 and $1,000,000,000,000.")
         clean_filter = {
             "min_volume_5m_usd": float(min_vol),
             "require_buy_dominance": bool(
                 buy_filter.get("require_buy_dominance", True)),
             "min_signal_pct": float(min_signal),
+            "min_market_cap_usd": float(min_mcap),
         }
     if kind in ("trenches", "scanner") and clean_filter is None:
         # Stored rules from before the filter existed load as the new
@@ -627,19 +668,33 @@ def summarize_rules(rules) -> str:
             f"selling.")
     top10 = rules.get("top10_rug")
     if top10:
+        slow = top10.get("slow_climb_sell_pct", 50)
+        concentration = top10.get("concentration_pct", 21)
+        check_every = top10.get("check_interval_seconds", 15)
+        slow_word = ""
+        if slow:
+            slow_word = (
+                f" If that share keeps climbing slowly toward "
+                f"{concentration:.0f}% (rising for 3 checks in a row), "
+                f"sell {slow:.0f}% to lock profit as an early rug "
+                f"warning.")
         lines.append(
-            f"Top-10 wallets: sell everything if the top 10 holders' "
-            f"combined holdings drop {top10['drop_pct']:.0f}% from "
-            f"the peak since holding — the big holders dumping. "
+            f"Top-10 wallets, checked every {check_every:.0f} seconds: "
+            f"sell everything if the top 10 holders' combined holdings "
+            f"drop {top10['drop_pct']:.0f}% from the peak since holding "
+            f"— the big holders dumping — or if their share of all "
+            f"tokens reaches {concentration:.0f}%.{slow_word} "
             f"The proceeds stay in SOL.")
     buy_filter = rules.get("buy_filter")
     if buy_filter and rules["kind"] in ("trenches", "scanner"):
+        mcap = buy_filter.get("min_market_cap_usd", 0.0)
         lines.append(
             f"Buy filter — only buy a real signal: at least "
             f"${buy_filter['min_volume_5m_usd']:,.0f} of volume in the "
             f"last 5 minutes"
             f"{', buys outnumbering sells in the last 5 minutes' if buy_filter['require_buy_dominance'] else ''}, "
-            f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%. "
+            f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%"
+            f"{f', and a market cap of at least ${mcap:,.0f}' if mcap else ''}. "
             f"A coin missing any of that is skipped, never bought on a guess.")
     lines.append(
         f"At most {rules['max_new_positions_per_scan']} new position(s) "

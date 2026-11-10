@@ -95,9 +95,10 @@ REGIME_DEFAULT = {"volume_surge_x": 2.0, "require_buy_dominance": True,
 # page is where the numbers get tuned to what the trades show.
 BUY_FILTER_DEFAULT = {"min_volume_5m_usd": 1000.0,
                       "require_buy_dominance": True,
-                      "min_signal_pct": 5.0}
+                      "min_signal_pct": 5.0,
+                      "min_market_cap_usd": 0.0}
 BUY_FILTER_KEYS = ("min_volume_5m_usd", "require_buy_dominance",
-                   "min_signal_pct")
+                   "min_signal_pct", "min_market_cap_usd")
 
 
 def _gte(a: float, b: float) -> bool:
@@ -162,6 +163,25 @@ def passes_buy_filter(entry, filter_cfg=None,
     if not _gte(signal_pct, min_signal):
         return False, (f"signal {signal_pct:.1f}% is below the "
                        f"{min_signal:.1f}% minimum")
+    try:
+        min_mcap = float(cfg.get("min_market_cap_usd",
+                                 BUY_FILTER_DEFAULT["min_market_cap_usd"]))
+    except (TypeError, ValueError):
+        return False, "buy filter is misconfigured"
+    if min_mcap > 0:
+        # A market-cap minimum is set: the coin must report a market
+        # cap at or above it. No market-cap data means no buy —
+        # fail-closed, never a guess at the coin's size.
+        mcap = entry.get("market_cap_usd")
+        if mcap is None:
+            return False, "no market cap data"
+        try:
+            mcap = float(mcap)
+        except (TypeError, ValueError):
+            return False, "no market cap data"
+        if not _gte(mcap, min_mcap):
+            return False, (f"market cap ${mcap:,.0f} is below the "
+                           f"${min_mcap:,.0f} minimum")
     return True, ""
 
 
@@ -317,6 +337,95 @@ def top10_total(client, mint: str):
         except (TypeError, ValueError):
             return None
     return total if total > 0 else None
+
+
+def top10_share(client, mint: str):
+    """Top-10 share of total supply for a mint: (top10_total,
+    total_supply, share_pct). (None, None, None) when the RPC cannot
+    serve the mint or the supply — the caller skips the check for
+    that round, never guesses."""
+    total = top10_total(client, mint)
+    if total is None:
+        return None, None, None
+    try:
+        supply = int(client.get_token_supply(mint))
+    except Exception:
+        return None, None, None
+    if supply <= 0:
+        return None, None, None
+    return total, supply, total / supply * 100.0
+
+
+def check_top10_concentration(db, bot_id: int, mint: str,
+                              top10_total_units: int, total_supply: int,
+                              concentration_pct: float,
+                              slow_climb_sell_pct: float,
+                              now_str: str):
+    """Top-10 concentration watch: (action, reason).
+
+    `action` is None, "sell_all" or "sell_half". Exact definitions:
+      * share = top-10 combined holdings / total token supply * 100.
+      * SELL ALL when share reaches concentration_pct (default 21%):
+        a small group holding a fifth of the supply can dump on
+        everyone, so the position exits immediately.
+      * SLOW CLIMB: share RISING over 3 CONSECUTIVE checks — each
+        check higher than the previous one — while share is at least
+        10% (a real concentration, not noise) and still below
+        concentration_pct: SELL HALF (slow_climb_sell_pct of the
+        position, default 50%) as an early rug warning, to lock
+        profit while there is still a market to sell into. It fires
+        once per climb: the streak resets to 0 after it fires, so it
+        cannot sell the same position down repeatedly on one climb.
+      * Any check where share does NOT rise resets the streak to 0.
+      * total_supply None or <= 0 means the share cannot be
+        computed — (None, None), never a guess.
+    """
+    if total_supply is None or int(total_supply) <= 0:
+        return None, None
+    share = int(top10_total_units) / int(total_supply) * 100.0
+    row = db.execute(
+        "SELECT top10_total, share_pct, rise_streak FROM scanner_top10 "
+        "WHERE bot_id = ? AND mint = ?", (bot_id, mint)).fetchone()
+    if row is None:
+        db.execute(
+            "INSERT INTO scanner_top10 (bot_id, mint, top10_total, "
+            "recorded_at, share_pct, rise_streak, last_checked_at) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?)",
+            (bot_id, mint, int(top10_total_units), now_str, share,
+             now_str))
+        db.commit()
+        return None, None
+    prev_share = row["share_pct"]
+    streak = int(row["rise_streak"] or 0)
+    if prev_share is not None and share > float(prev_share):
+        streak += 1
+    else:
+        streak = 0
+    db.execute(
+        "UPDATE scanner_top10 SET top10_total = ?, recorded_at = ?, "
+        "share_pct = ?, rise_streak = ?, last_checked_at = ? "
+        "WHERE bot_id = ? AND mint = ?",
+        (int(top10_total_units), now_str, share, streak, now_str,
+         bot_id, mint))
+    db.commit()
+    if share >= float(concentration_pct):
+        return "sell_all", (f"top-10 wallets hold {share:.1f}% of "
+                            f"supply (at or above "
+                            f"{float(concentration_pct):.0f}%) — "
+                            f"selling everything")
+    if float(slow_climb_sell_pct) > 0 and share >= 10.0 and streak >= 3:
+        # Fire once per climb: reset the streak so the same slow
+        # climb cannot sell the position down check after check.
+        db.execute(
+            "UPDATE scanner_top10 SET rise_streak = 0 "
+            "WHERE bot_id = ? AND mint = ?", (bot_id, mint))
+        db.commit()
+        return "sell_half", (f"top-10 share climbing slowly: "
+                             f"{share:.1f}% of supply and rising for "
+                             f"3 checks — selling "
+                             f"{float(slow_climb_sell_pct):.0f}% to lock "
+                             f"profit")
+    return None, None
 
 
 def check_top10_rug(db, bot_id: int, mint: str, current_total: int,

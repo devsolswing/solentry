@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from .ledger import record_trade
+
 
 class InsufficientCash(ValueError):
     pass
@@ -87,6 +89,10 @@ def paper_buy(db: sqlite3.Connection, user_id: int, coin: str, usd: float,
                 signals.get("m5_pct"), signals.get("volume_5m_usd"),
                 signals.get("buys_5m"), signals.get("sells_5m"),
                 signals.get("regime")))
+    # Trade ledger (builderBot): every fill gets its own 8-digit
+    # trade ID, so a bot's win/loss record can be reviewed.
+    record_trade(db, user_id, bot_id, coin, "buy", amount, price, usd,
+                 mode="paper", now=now)
     db.commit()
     return amount, usd
 
@@ -106,11 +112,14 @@ def paper_sell(db: sqlite3.Connection, user_id: int, coin: str,
     if amount <= 0:
         raise ValueError("Amount must be more than 0.")
     row = db.execute(
-        "SELECT amount FROM paper_holdings WHERE user_id = ? AND coin_id = ?",
+        "SELECT amount, avg_price FROM paper_holdings "
+        "WHERE user_id = ? AND coin_id = ?",
         (user_id, coin)).fetchone()
     if not row or row["amount"] < amount:
         raise InsufficientHolding("You don't hold that much.")
+    avg_price = float(row["avg_price"]) if row["avg_price"] else 0.0
     usd = amount * price
+    pnl_usd = usd - amount * avg_price
     remaining = row["amount"] - amount
     if remaining <= 0:
         db.execute("DELETE FROM paper_holdings WHERE user_id = ? "
@@ -127,5 +136,10 @@ def paper_sell(db: sqlite3.Connection, user_id: int, coin: str,
                "VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?)",
                (user_id, coin, amount, price, usd, now, bot_id,
                 exit_reason))
+    # Trade ledger (builderBot): the sell's P&L vs its average cost
+    # is what decides win vs loss for the bot.
+    record_trade(db, user_id, bot_id, coin, "sell", amount, price, usd,
+                 pnl_usd=pnl_usd, exit_reason=exit_reason,
+                 mode="paper", now=now)
     db.commit()
     return usd

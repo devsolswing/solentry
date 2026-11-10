@@ -47,15 +47,17 @@ from datetime import datetime, timezone
 from .config import Config
 from .db import init_db
 from .executor import execute_real_trade
+from .ledger import record_trade
 from .platforms import REAL_TRADEABLE_PLATFORMS
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
 from .pnl import portfolio_totals, record_snapshot
 from .prices import get_prices
 from .rules import load_rules
-from .scanner import (check_top10_rug, clear_watches, detect_regime,
-                      gain_3m_pct, next_ladder_rung,
-                      passes_buy_filter, record_marks, top10_total)
+from .scanner import (check_top10_concentration, check_top10_rug,
+                      clear_watches, detect_regime, gain_3m_pct,
+                      next_ladder_rung, passes_buy_filter, record_marks,
+                      top10_total)
 from .signals import signal_for_coin
 from .solana import SolanaRpcClient, lamports_to_sol
 from .trenches import fetch_trenches_scan
@@ -212,6 +214,15 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                            db, cfg)
     if result.get("status") == "executed":
         _close_position(db, bot, coin, amount)
+        # Trade ledger (builderBot): the sell's P&L vs the position's
+        # average cost decides win vs loss. USD figures use the price
+        # the loop saw; the on-chain SOL proceeds are in the signed
+        # transaction the activity log records.
+        record_trade(db, bot["user_id"], bot["id"], coin, "sell", amount,
+                     price, amount * price,
+                     pnl_usd=amount * price
+                     - amount * float(pos["avg_price"]),
+                     exit_reason=reason, mode="real", now=_now())
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
                        "WHERE bot_id = ? AND coin_id = ?",
@@ -312,6 +323,11 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         coin_amount = float(result.get("coin_amount") or 0)
         if coin_amount > 0:
             _open_position(db, bot, coin, coin_amount, price)
+            # Trade ledger (builderBot): every fill gets its own
+            # 8-digit trade ID.
+            record_trade(db, bot["user_id"], bot["id"], coin, "buy",
+                         coin_amount, price, coin_amount * price,
+                         mode="real", now=_now())
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {coin} for "
              f"{amount_sol:.4f} SOL. Signature: "
@@ -495,16 +511,17 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                        "last_price_at = ? WHERE bot_id = ? AND coin_id = ?",
                        (price, _now(), bot["id"], coin))
             db.commit()
-        # 0b. Top-10 wallets watch (scanner only): the top 10 holders
-        # dumping sells everything. It runs alongside the fast-drop
-        # rug sell — either one fires the exit. The baseline is the
-        # top-10 total the first time the position is watched,
-        # tracked upward to the peak since holding; a 10% drop from
-        # that peak is the dump. If the RPC cannot serve the mint,
-        # the watch is skipped for this scan — logged once per bot,
-        # never faked, and the other exits still apply.
+        # 0b. Top-10 wallets watch (scanner and trenches — the
+        # memecoin kinds): the top 10 holders dumping sells
+        # everything. It runs alongside the fast-drop rug sell —
+        # either one fires the exit. The baseline is the top-10 total
+        # the first time the position is watched, tracked upward to
+        # the peak since holding; a 10% drop from that peak is the
+        # dump. If the RPC cannot serve the mint, the watch is
+        # skipped for this scan — logged once per bot, never faked,
+        # and the other exits still apply.
         top10 = rules.get("top10_rug")
-        if kind == "scanner" and top10:
+        if kind in ("scanner", "trenches") and top10:
             if top10_client is None and not top10_failed:
                 try:
                     top10_client = rpc_factory(cfg.rpc_url)
@@ -784,6 +801,166 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
     return actions
 
 
+def _held_price(price_fetcher, coin: str):
+    """Current USD price for one held mint, from the trenches feed,
+    or None when the feed cannot serve it. The watcher only needs a
+    price when a top-10 trigger has already fired — a missing price
+    means the sell waits for the next check, never a guess."""
+    try:
+        prices = price_fetcher([coin])
+    except Exception:
+        return None
+    if not isinstance(prices, dict):
+        return None
+    entry = prices.get(coin) or {}
+    price = entry.get("price_usd")
+    try:
+        return float(price) if price is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _default_price_fetcher(mints):
+    from .trenches import fetch_trenches_scan
+    data = fetch_trenches_scan(mints=mints) or {}
+    return data.get("prices", {}) or {}
+
+
+def top10_watch_once(db: sqlite3.Connection, cfg: Config,
+                     rpc_factory, price_fetcher=None) -> list:
+    """One pass of the top-10 concentration watch, every 15 seconds
+    per held coin (the per-coin cadence is gated on
+    scanner_top10.last_checked_at, so a pass that runs early skips
+    coins already checked).
+
+    For every silent scanner or trenches bot with a top10_rug rule
+    and an open position, one RPC round fetches the top-10 total AND
+    the total supply, and BOTH top-10 exits run on that data:
+      * the 10% dump from peak (existing rule), and
+      * the concentration triggers (builderBot): share of total
+        supply at or above concentration_pct (default 21%) sells
+        everything immediately; a slow climb toward it (rising for
+        3 consecutive checks) sells slow_climb_sell_pct (default
+        50%) as an early rug warning.
+    An RPC failure, an unserved mint, or a missing price when a
+    trigger has fired skips that coin for this pass — logged once,
+    never faked — and the next pass retries it. Returns the actions
+    taken.
+    """
+    price_fetcher = price_fetcher or _default_price_fetcher
+    actions: list = []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    bots = db.execute("SELECT * FROM bots WHERE silent = 1").fetchall()
+    for bot in bots:
+        rules, error = load_rules(bot)
+        if rules is None or error is not None:
+            continue
+        if rules["kind"] not in ("scanner", "trenches"):
+            continue
+        top10 = rules.get("top10_rug")
+        if not top10:
+            continue
+        interval = float(top10.get("check_interval_seconds", 15.0))
+        positions = _positions(db, bot["id"])
+        if not positions:
+            continue
+        try:
+            client = rpc_factory(cfg.rpc_url)
+        except Exception:
+            _log(db, bot["user_id"], "silent_skip",
+                 f"Silent bot '{bot['name']}': top-10 watch unavailable "
+                 f"— no top-10 check this round.", bot["mode"])
+            continue
+        for coin, pos in list(positions.items()):
+            row = db.execute(
+                "SELECT last_checked_at FROM scanner_top10 "
+                "WHERE bot_id = ? AND mint = ?",
+                (bot["id"], coin)).fetchone()
+            if row and row["last_checked_at"]:
+                last_ts = _parse_scan_time(row["last_checked_at"])
+                if last_ts is not None and now_ts - last_ts < interval:
+                    continue
+            total = top10_total(client, coin)
+            if total is None:
+                _log(db, bot["user_id"], "silent_skip",
+                     f"Silent bot '{bot['name']}': top-10 watch "
+                     f"unavailable for {coin} — position left alone "
+                     f"this round.", bot["mode"])
+                continue
+            try:
+                supply = int(client.get_token_supply(coin))
+            except Exception:
+                supply = None
+            # 1. The dump-from-peak exit.
+            fired, reason = check_top10_rug(
+                db, bot["id"], coin, total, float(top10["drop_pct"]),
+                _now())
+            if fired:
+                price = _held_price(price_fetcher, coin)
+                if price is None:
+                    _log(db, bot["user_id"], "silent_skip",
+                         f"Silent bot '{bot['name']}': {reason} for "
+                         f"{coin} but no price data — sell waits for "
+                         f"the next check.", bot["mode"])
+                    continue
+                sell_reason = reason
+                if bot["mode"] == "real":
+                    sell_reason += " — proceeds in SOL"
+                _sell_position(db, cfg, bot, coin, price, sell_reason,
+                               rpc_factory, default_real_executor, actions)
+                continue
+            # 2. The concentration triggers (21% / slow climb).
+            action, reason = check_top10_concentration(
+                db, bot["id"], coin, total, supply,
+                float(top10.get("concentration_pct", 21.0)),
+                float(top10.get("slow_climb_sell_pct", 50.0)), _now())
+            if action is None:
+                continue
+            price = _held_price(price_fetcher, coin)
+            if price is None:
+                _log(db, bot["user_id"], "silent_skip",
+                     f"Silent bot '{bot['name']}': {reason} for {coin} "
+                     f"but no price data — sell waits for the next "
+                     f"check.", bot["mode"])
+                continue
+            sell_reason = reason
+            if bot["mode"] == "real":
+                sell_reason += " — proceeds in SOL"
+            if action == "sell_all":
+                _sell_position(db, cfg, bot, coin, price, sell_reason,
+                               rpc_factory, default_real_executor, actions)
+            else:
+                amount = (float(pos["amount"])
+                          * float(top10.get("slow_climb_sell_pct", 50.0))
+                          / 100.0)
+                _sell_position(db, cfg, bot, coin, price, sell_reason,
+                               rpc_factory, default_real_executor, actions,
+                               amount=amount)
+    return actions
+
+
+_WATCH_STARTED = False
+_WATCH_LOCK = threading.Lock()
+
+
+def top10_watch_loop(db_path: str, cfg: Config,
+                     rpc_factory=None, price_fetcher=None) -> None:
+    """The 15-second watch, forever: one pass, then sleep 15 seconds.
+    Opens a fresh DB connection per pass. A failed pass is logged and
+    the next one still runs."""
+    rpc_factory = rpc_factory or SolanaRpcClient
+    while True:
+        db = init_db(db_path)
+        try:
+            top10_watch_once(db, cfg, rpc_factory,
+                             price_fetcher=price_fetcher)
+        except Exception as exc:
+            print(f"[top10-watch] pass failed: {exc}", flush=True)
+        finally:
+            db.close()
+        time.sleep(15)
+
+
 def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
              rpc_factory=None, real_executor=None,
              trenches_fetcher=None) -> list:
@@ -854,6 +1031,18 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
                              "actions": [], "error": str(exc)[:200]})
     _record_snapshots(db, cfg, prices_data, trenches_data, rpc_factory,
                       {o["user_id"] for o in outcomes})
+    # builderBot reviews each evaluated bot's trade ledger: a losing
+    # bot's rules tighten one small step (never widen). A review
+    # failure never breaks the loop.
+    from .builderbot import review_bot
+    for outcome in outcomes:
+        try:
+            bot = db.execute("SELECT * FROM bots WHERE id = ?",
+                             (outcome["bot_id"],)).fetchone()
+            if bot is not None:
+                review_bot(db, bot, cfg.encryption_key)
+        except Exception:
+            pass
     return outcomes
 
 
@@ -901,9 +1090,34 @@ def loop_forever(db_path: str, cfg: Config, interval: int | None = None,
                  trenches_fetcher=None) -> None:
     """Run iterations forever (or once with once=True). Opens a fresh
     DB connection per iteration so the web process's connection is
-    never shared across threads."""
+    never shared across threads. The 15-second top-10 watch starts
+    alongside (once per process, not in once mode) — it runs on its
+    own thread so its cadence does not depend on the loop interval."""
     interval = interval if interval is not None \
         else cfg.silent_loop_interval_seconds
+    if not once:
+        global _WATCH_STARTED
+        with _WATCH_LOCK:
+            if not _WATCH_STARTED:
+                _WATCH_STARTED = True
+                # The watcher's prices come from the same trenches
+                # feed the loop uses when one is injected (tests do
+                # this); otherwise it fetches the live feed itself.
+                def _injected_prices(mints, _tf=trenches_fetcher):
+                    data = _tf(mints=mints) or {}
+                    return data.get("prices", {}) or {}
+
+                watch_price_fetcher = (_injected_prices
+                                       if trenches_fetcher is not None
+                                       else None)
+                threading.Thread(
+                    target=top10_watch_loop,
+                    args=(db_path, cfg),
+                    kwargs={"rpc_factory": rpc_factory,
+                            "price_fetcher": watch_price_fetcher},
+                    daemon=True, name="top10-watch").start()
+                print("[top10-watch] background watch started "
+                      "(every 15s)", flush=True)
     while True:
         db = init_db(db_path)
         try:

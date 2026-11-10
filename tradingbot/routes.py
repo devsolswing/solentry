@@ -36,6 +36,7 @@ from webauthn.helpers.structs import AuthenticatorTransport
 from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 
 from . import assistant as assistant_mod
+from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
 from . import donations as donations_mod
 from . import passkey as passkey_mod
@@ -50,13 +51,16 @@ from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, clear_price_cache, get_prices
+from .builderbot import list_adjustments
+from .ledger import bot_wl_summary, recent_trades
 from .rules import (RUG_SELL_DEFAULT, SCANNER_CATEGORY, SCANNER_DISPLAY,
                     SCANNER_PRESET_NAME, TRENCHES_CATEGORY,
                     TRENCHES_PRESET_NAME, load_rules, scanner_ruleset,
                     summarize_rules, trenches_ruleset, validate_ruleset)
-from .security import (encrypt_secret, hash_password, hash_token,
-                       new_csrf_token, new_token, temporary_secret,
-                       verify_password, verify_turnstile, wipe_secret)
+from .security import (decrypt_secret, encrypt_secret, hash_password,
+                       hash_token, new_csrf_token, new_token,
+                       temporary_secret, verify_password, verify_turnstile,
+                       wipe_secret)
 from .signals import signal_for_coin
 from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
@@ -285,11 +289,6 @@ def _find_bot_by_name(db, user_id: int, name: str):
     return db.execute(
         "SELECT * FROM bots WHERE user_id = ? AND name LIKE ?",
         (user_id, "%" + name + "%")).fetchone()
-
-
-def _valid_category(value: str) -> str:
-    """Bot categories are a closed list — anything else is no category."""
-    return value if value in (TRENCHES_CATEGORY, SCANNER_CATEGORY) else ""
 
 
 def _wallet(app, user_id: int):
@@ -2449,9 +2448,13 @@ def register_routes(app: Flask) -> None:
                       "again later.")
                 return redirect(url_for("bots"))
             name = (request.form.get("name") or "").strip() or "My Bot"
-            strategy = (request.form.get("strategy") or "balanced").lower()
-            if strategy not in assistant_mod.STRATEGIES:
-                strategy = "balanced"
+            # The category and strategy pickers are gone — bots are
+            # built by builderBot's chatbox (GET, below), which
+            # writes validated rules. This POST stays as a plain
+            # creation endpoint: strategy is always "balanced" and
+            # the bot carries no category; the Trenches/Scanner
+            # presets live on their own routes.
+            strategy = "balanced"
             mode = (request.form.get("mode") or "paper").lower()
             if mode not in ("paper", "real"):
                 mode = "paper"
@@ -2463,8 +2466,7 @@ def register_routes(app: Flask) -> None:
                 flash("That platform is not valid — pick pump.fun, "
                       "Phantom, or pumpSwap.")
                 return redirect(url_for("bot_create"))
-            category = _valid_category(
-                (request.form.get("category") or "").strip())
+            category = ""
             coins = [c.strip().upper() for c in
                      (request.form.get("coins") or "SOL").split(",")]
             coins = [c for c in coins if c in COINS] or ["SOL"]
@@ -2481,22 +2483,7 @@ def register_routes(app: Flask) -> None:
             max_open = min(max(max_open, 1), 5)
             token = new_token()
             db = _db(app)
-            # Picking ∆scanner∆ in the form gives the bot the scanner
-            # sniper rules (one per user, like the preset route). Any
-            # other category is a label only — its rules come from the
-            # assistant or the preset, as before.
             rules_json = ""
-            if category == SCANNER_CATEGORY:
-                existing_scanner = db.execute(
-                    "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-                    "AND rules_json LIKE ?",
-                    (user["id"], SCANNER_CATEGORY,
-                     '%"kind": "scanner"%')).fetchone()
-                if existing_scanner:
-                    flash("You already have a Scanner bot.")
-                    return redirect(url_for(
-                        "bot_detail", bot_id=existing_scanner["id"]))
-                rules_json = json.dumps(scanner_ruleset())
             # Silent is NEVER on at creation — the user enables it
             # afterwards through the confirm flow. Any silent value in
             # the form is ignored on purpose.
@@ -2511,19 +2498,49 @@ def register_routes(app: Flask) -> None:
                  category, platform, rules_json))
             db.commit()
             _log(app, user["id"], "bot_create",
-                 f"Created bot '{name}' ({strategy}, {mode}, "
+                 f"Created bot '{name}' ({mode}, "
                  f"{platform}). "
                  f"Silent trading is off.", mode)
             # Token shown exactly once, on this page only.
             return render_template("bot_created.html", bot_id=cur.lastrowid,
                                    name=name, token=token)
+        # GET: the builderBot chatbox. It asks simple questions one
+        # at a time and builds the bot from the answers — the
+        # category/strategy pickers are gone.
+        identity = builderbot_mod.ensure_builderbot(
+            _db(app), user["id"])
+        state = builderbot_mod.start_conversation(
+            _db(app), user["id"], _cfg(app).encryption_key)
         return render_template(
-            "bot_form.html", bot=None,
-            platforms=platforms_mod.PLATFORMS,
-            platform_labels=platforms_mod.PLATFORM_LABELS,
-            platform_notes=platforms_mod.PLATFORM_NOTES,
-            platform_wallets=platforms_mod.get_platform_wallets(
-                _db(app), user["id"]))
+            "builderbot.html", builder_id=identity["builder_id"],
+            messages=state["messages"],
+            suggestions=state["suggestions"])
+
+    @app.route("/api/builderbot", methods=["POST"])
+    @login_required
+    def api_builderbot():
+        """One builderBot chatbox turn: {"message": "..."} (JSON, with
+        the session CSRF token, same as /api/assistant). The answer
+        is scrubbed before storage, parsed deterministically, and
+        shown back for a yes before any bot is created."""
+        if not request.is_json:
+            return jsonify({"error": "json required"}), 400
+        body = request.get_json()
+        if body.get("csrf_token") != session.get("csrf_token"):
+            return jsonify({"error": "bad csrf token"}), 400
+        user = _current_user(app)
+        db = _db(app)
+        enc_key = _cfg(app).encryption_key
+        if body.get("action") == "start":
+            state = builderbot_mod.start_conversation(db, user["id"],
+                                                      enc_key)
+            return jsonify(state)
+        result = builderbot_mod.answer(
+            db, user["id"], enc_key, body.get("message", ""))
+        if result.get("created"):
+            _log(app, user["id"], "bot_create",
+                 "Created a bot with builderBot.", "")
+        return jsonify(result)
 
     @app.route("/bots/preset/trenches", methods=["POST"])
     @login_required
@@ -2614,10 +2631,28 @@ def register_routes(app: Flask) -> None:
             "ORDER BY id DESC", (bot_id, user["id"])).fetchall()
         prices = get_prices()
         rules, rules_error = load_rules(bot)
+        # builderBot's trade ledger: wins, losses, win rate and net
+        # P&L for this bot, its recent fills, and every rule
+        # adjustment it made (with the reason it gave).
+        wl_summary = bot_wl_summary(_db(app), bot_id)
+        trades = recent_trades(_db(app), bot_id)
+        adjustments = list_adjustments(_db(app), bot_id)
+        # The adjustment reason is stored encrypted; only this page
+        # (the display layer) decrypts it for the owner. builderBot
+        # itself never decrypts anything but its own chat state.
+        enc_key = _cfg(app).encryption_key
+        for adjustment in adjustments:
+            try:
+                adjustment["reason"] = decrypt_secret(
+                    adjustment["reason"], enc_key).decode("utf-8")
+            except Exception:
+                adjustment["reason"] = "(could not read this note)"
         return render_template("bot_detail.html", bot=bot,
                                proposals=proposals, prices=prices,
                                rules_summary=summarize_rules(rules),
-                               rules_error=rules_error)
+                               rules_error=rules_error,
+                               wl_summary=wl_summary, trades=trades,
+                               adjustments=adjustments)
 
     @app.route("/bots/<int:bot_id>/edit", methods=["GET", "POST"])
     @login_required
@@ -2632,9 +2667,11 @@ def register_routes(app: Flask) -> None:
         if request.method == "POST":
             _csrf_check()
             name = (request.form.get("name") or "").strip() or bot["name"]
-            strategy = (request.form.get("strategy") or bot["strategy"]).lower()
-            if strategy not in assistant_mod.STRATEGIES:
-                strategy = bot["strategy"]
+            # Strategy and category are no longer editable — the
+            # pickers are gone (bots are built by builderBot, and
+            # the Trenches/Scanner categories come from their
+            # presets). The stored values stay exactly as they are.
+            strategy = bot["strategy"]
             mode = (request.form.get("mode") or bot["mode"]).lower()
             if mode not in ("paper", "real"):
                 mode = bot["mode"]
@@ -2644,30 +2681,8 @@ def register_routes(app: Flask) -> None:
                 flash("That platform is not valid — pick pump.fun, "
                       "Phantom, or pumpSwap.")
                 return redirect(url_for("bot_edit", bot_id=bot_id))
-            category = _valid_category(
-                (request.form.get("category")
-                 if request.form.get("category") is not None
-                 else bot["category"] or "").strip())
-            # Picking ∆scanner∆ gives the bot the scanner sniper
-            # rules — unless it already follows scanner rules
-            # (possibly customised through the assistant), which are
-            # left alone. One scanner bot per user: if another one
-            # already exists, go to it instead of making a second.
+            category = bot["category"] or ""
             rules_json = bot["rules_json"]
-            if category == SCANNER_CATEGORY:
-                current_rules, _rules_err = load_rules(bot)
-                if (current_rules is None
-                        or current_rules.get("kind") != "scanner"):
-                    other_scanner = db.execute(
-                        "SELECT id FROM bots WHERE user_id = ? AND id != ? "
-                        "AND category = ? AND rules_json LIKE ?",
-                        (user["id"], bot_id, SCANNER_CATEGORY,
-                         '%"kind": "scanner"%')).fetchone()
-                    if other_scanner:
-                        flash("You already have a Scanner bot.")
-                        return redirect(url_for(
-                            "bot_detail", bot_id=other_scanner["id"]))
-                    rules_json = json.dumps(scanner_ruleset())
             coins = [c.strip().upper() for c in
                      (request.form.get("coins") or "").split(",")]
             coins = [c for c in coins if c in COINS] or json.loads(bot["coins"])
@@ -2808,7 +2823,11 @@ def register_routes(app: Flask) -> None:
         hash and rules live on the bots row itself, so they go with
         it. Paper holdings the bot managed are NOT sold — the coins
         stay in the user's paper holdings, only the bot's management
-        record goes."""
+        record goes. builderBot's stored data for the bot (its
+        adjustment log and trade-ledger rows) is purged at the same
+        moment — deleting a bot spoofs it from builderBot's memory
+        too."""
+        builderbot_mod.purge_bot_data(db, bot_id, user_id)
         db.execute("DELETE FROM scanner_marks WHERE bot_id = ?",
                    (bot_id,))
         db.execute("DELETE FROM scanner_top10 WHERE bot_id = ?",

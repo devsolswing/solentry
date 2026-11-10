@@ -123,7 +123,9 @@ class TestScannerValidation(unittest.TestCase):
         self.assertEqual(rules["regime"], {
             "volume_surge_x": 2.0, "require_buy_dominance": True,
             "require_h1_gain": True})
-        self.assertEqual(rules["top10_rug"], {"drop_pct": 10.0})
+        self.assertEqual(rules["top10_rug"], {
+            "drop_pct": 10.0, "concentration_pct": 21.0,
+            "slow_climb_sell_pct": 50.0, "check_interval_seconds": 15.0})
         self.assertEqual(rules["max_new_positions_per_scan"], 1)
         cleaned, err = validate_ruleset(rules)
         self.assertIsNone(err)
@@ -233,11 +235,29 @@ class TestScannerValidation(unittest.TestCase):
             self.assertIsNotNone(err, f"window {window} accepted")
 
     def test_rejects_top10_on_non_scanner(self):
-        rules = trenches_ruleset()
-        rules["top10_rug"] = {"drop_pct": 10.0}
+        # The top-10 watch is a memecoin rule (scanner and trenches
+        # only) — a signals bot watching its own coin list gets none.
+        rules = {"version": 1, "kind": "signals", "scan_sources": [],
+                 "scan_interval_seconds": 60,
+                 "buy": {"metric": "gain_24h_pct", "window_seconds": 86400,
+                         "threshold_pct": 2.0, "pick": "strongest"},
+                 "sell_ladder": [{"pct_of_position": 100,
+                                  "profit_pct": 10}],
+                 "trailing_stop_pct": 7.0,
+                 "top10_rug": {"drop_pct": 10.0}}
         _cleaned, err = validate_ruleset(rules)
         self.assertIsNotNone(err)
-        self.assertIn("scanner", err)
+        self.assertIn("memecoin", err)
+
+    def test_top10_allowed_on_trenches(self):
+        rules = trenches_ruleset()
+        rules["top10_rug"] = {"drop_pct": 10.0,
+                              "concentration_pct": 21.0,
+                              "slow_climb_sell_pct": 50.0,
+                              "check_interval_seconds": 15.0}
+        cleaned, err = validate_ruleset(rules)
+        self.assertIsNone(err, err)
+        self.assertEqual(cleaned["top10_rug"]["concentration_pct"], 21.0)
 
     def test_rejects_bad_top10_drop(self):
         for bad in (0, 0.5, 91, "10"):
@@ -1141,20 +1161,25 @@ class TestScannerRoutes(unittest.TestCase):
         # The scanner bot itself still lists with the other bots.
         self.assertIn("Scanner", html)
 
-    def test_edit_form_offers_scanner_category(self):
+    def test_edit_form_has_no_category_picker(self):
+        # The category/strategy pickers are gone (builderBot builds
+        # bots now). A scanner bot is still editable - name and
+        # limits - and its category still shows on its detail page.
         token = csrf(self.client, "/bots")
         self.client.post("/bots/preset/scanner",
                          data={"csrf_token": token}, follow_redirects=False)
         bot = self._bots()[0]
-        # Consume the creation flash so only the form can put the
-        # scanner name on the edit page.
         self.client.get("/bots")
         resp = self.client.get(f"/bots/{bot['id']}/edit")
         html = resp.get_data(as_text=True)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn('value="scanner"', html)
-        self.assertIn(SCANNER_DISPLAY, html)
-        self.assertIn("Memecoin build", html)
+        self.assertNotIn('name="category"', html)
+        self.assertNotIn('name="strategy"', html)
+        self.assertNotIn('value="scanner"', html)
+        detail = self.client.get(f"/bots/{bot['id']}").get_data(
+            as_text=True)
+        # The detail page still shows the bot's category badge.
+        self.assertIn('<span class="badge">scanner</span>', detail)
 
     def test_agent_create_scanner_needs_yes(self):
         data = self._ask("create a scanner bot")
@@ -1215,7 +1240,10 @@ class TestScannerRoutes(unittest.TestCase):
         rules, err = load_rules(bot)
         self.assertIsNone(err)
         self.assertEqual(rules["kind"], "scanner")
-        self.assertEqual(rules["top10_rug"], {"drop_pct": 10.0})
+        # Validation fills the concentration defaults.
+        self.assertEqual(rules["top10_rug"], {
+            "drop_pct": 10.0, "concentration_pct": 21.0,
+            "slow_climb_sell_pct": 50.0, "check_interval_seconds": 15.0})
 
     def test_agent_scanner_profit_slow_needs_yes(self):
         data = self._ask(
