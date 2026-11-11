@@ -21,7 +21,14 @@ from .solana import is_valid_address
 # Native chain of each known price-list coin. USDC is deliberately
 # absent: it exists on many chains (Solana, Ethereum, and others),
 # so no single network can be named for it — it is refused with the
-# multi-network reason instead.
+# multi-network reason instead (see MULTI_CHAIN_NETWORKS below for
+# the verified list, used by search).
+#
+# Chains verified 2026-11-11: the native L1s are the coin itself,
+# the ERC-20s are Ethereum tokens (PEPE, LINK, UNI, AAVE, ONDO),
+# the Solana natives are Solana tokens (BONK, JUP, WIF, POPCAT),
+# and RENDER is Ethereum — its CoinGecko asset_platform_id is
+# "ethereum" (checked live; WIF/POPCAT returned "solana").
 COIN_NETWORKS = {
     "BTC": "Bitcoin",
     "ETH": "Ethereum",
@@ -30,9 +37,53 @@ COIN_NETWORKS = {
     "PEPE": "Ethereum",
     "BONK": "Solana",
     "JUP": "Solana",
+    "ZEC": "Zcash",
+    "XRP": "XRP Ledger",
+    "ADA": "Cardano",
+    "LTC": "Litecoin",
+    "DOT": "Polkadot",
+    "LINK": "Ethereum",
+    "AVAX": "Avalanche",
+    "ATOM": "Cosmos",
+    "XLM": "Stellar",
+    "ALGO": "Algorand",
+    "NEAR": "NEAR Protocol",
+    "UNI": "Ethereum",
+    "AAVE": "Ethereum",
+    "XTZ": "Tezos",
+    "ETC": "Ethereum Classic",
+    "BCH": "Bitcoin Cash",
+    "FIL": "Filecoin",
+    "HBAR": "Hedera",
+    "SUI": "Sui",
+    "APT": "Aptos",
+    "SEI": "Sei",
+    "INJ": "Injective",
+    "TIA": "Celestia",
+    "ONDO": "Ethereum",
+    "RENDER": "Ethereum",
+    "TAO": "Bittensor",
+    "WIF": "Solana",
+    "POPCAT": "Solana",
 }
 
 MULTI_CHAIN_COINS = {"USDC"}
+
+# Every network a multi-chain coin REALLY exists on — only networks
+# verified for that coin, never guessed. USDC: CoinGecko's USDC
+# platforms list returned 36 chains on 2026-11-11; the list below
+# is the major networks with real native/canonical USDC presence
+# (all 21 appear in that verified list). Obscure/new chains from
+# the full list where the app cannot verify real USDC presence
+# are left out rather than listed on a guess. Solana first (the
+# app's home chain), then alphabetical.
+MULTI_CHAIN_NETWORKS = {
+    "USDC": ["Solana", "Algorand", "Aptos", "Arbitrum", "Avalanche",
+             "Base", "Celo", "Cronos", "Ethereum", "Hedera",
+             "Injective", "NEAR Protocol", "Optimism", "Polkadot",
+             "Polygon", "Sei", "Starknet", "Stellar", "Sui",
+             "XRP Ledger", "zkSync"],
+}
 
 
 def network_label(network: str) -> str:
@@ -64,6 +115,75 @@ def coin_network(coin_id: str) -> dict:
                 "multi_chain": False, "known": True}
     return {"network": None, "is_solana": False,
             "multi_chain": False, "known": False}
+
+
+def coin_networks(coin_id: str) -> list:
+    """Every verified network a coin exists on, as a list.
+
+    A single-chain coin returns its one native chain; a
+    multi-chain coin returns every verified network from
+    MULTI_CHAIN_NETWORKS; a pump.fun mint returns ["Solana"];
+    an unknown coin returns [] — never guessed.
+    """
+    if not coin_id:
+        return []
+    upper = coin_id.upper()
+    if upper in MULTI_CHAIN_NETWORKS:
+        return list(MULTI_CHAIN_NETWORKS[upper])
+    info = coin_network(coin_id)
+    if info["network"] is not None:
+        return [info["network"]]
+    return []
+
+
+# Common wrapped-token symbol prefixes on Solana: wBTC, wETH, wZEC,
+# wXRP (Portal/Wormhole style) and soBTC / soETH (old Wormhole
+# style). A "$" prefix (e.g. "$WIF") is stripped first.
+_WRAPPED_SYMBOL_PREFIXES = ("W", "SO")
+
+
+def _symbol_names_foreign_coin(symbol: str | None) -> bool:
+    """True when a Solana token's symbol names a coin whose native
+    chain is NOT Solana — the bare symbol or with a wrapped prefix.
+
+    Such a token is a stand-in for that coin on Solana, never the
+    native coin itself, so search labels it Wrapped. A symbol
+    naming a Solana-native coin (BONK, WIF, SOL, ...) is not
+    foreign and returns False; an unknown symbol returns False —
+    the token is shown as a plain Solana token, not mislabeled.
+    """
+    if not symbol:
+        return False
+    s = symbol.upper().strip()
+    if s.startswith("$"):
+        s = s[1:]
+    candidates = {s}
+    for prefix in _WRAPPED_SYMBOL_PREFIXES:
+        if s.startswith(prefix) and len(s) > len(prefix):
+            candidates.add(s[len(prefix):])
+    for cand in candidates:
+        net = COIN_NETWORKS.get(cand)
+        if net is not None and net != "Solana":
+            return True
+    return False
+
+
+def search_result_network(coin_id: str, is_mint: bool,
+                          symbol: str | None = None) -> dict:
+    """Network info for one search result row.
+
+    Returns {"networks": [...], "wrapped": bool}. A known coin
+    lists its native chain — every verified chain for a
+    multi-chain coin. A mint lists Solana, and is marked wrapped
+    when its symbol names a coin whose native chain is elsewhere
+    (a Solana stand-in for that coin, never the native coin).
+    An unknown coin lists nothing: the row says "Network unknown"
+    rather than inventing a network.
+    """
+    if is_mint:
+        return {"networks": ["Solana"],
+                "wrapped": _symbol_names_foreign_coin(symbol)}
+    return {"networks": coin_networks(coin_id), "wrapped": False}
 
 
 def coin_display_name(coin_id: str) -> str:

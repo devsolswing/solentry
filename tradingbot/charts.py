@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from .networks import search_result_network
 from .prices import COINS, get_prices
 from .solana import is_valid_address
 from .trenches import (DEXSCREENER_BASE, TOKENS_URL, _best_pair,
@@ -111,7 +112,8 @@ def _search_by_address(mint: str, http_get=None) -> dict:
         symbol = mint[:4] + "…"
     result = {"coin_id": mint, "name": name,
               "symbol": (symbol or mint[:8]).upper(),
-              "price_usd": price, "change_24h": None, "is_mint": True}
+              "price_usd": price, "change_24h": None, "is_mint": True,
+              **search_result_network(mint, True, symbol)}
     _search_cache[mint] = {"at": now, "results": [dict(result)],
                            "error": None, "source": "live"}
     return {"results": [dict(result)], "error": None, "source": "live"}
@@ -160,7 +162,8 @@ def search_coins(query: str, http_get=None, prices_fn=None) -> dict:
                     "symbol": symbol,
                     "price_usd": entry.get("price"),
                     "change_24h": entry.get("change_24h"),
-                    "is_mint": False})
+                    "is_mint": False,
+                    **search_result_network(symbol, False)})
     except Exception:
         error = "price feed unavailable right now"
     seen_symbols = {r["symbol"].upper() for r in results}
@@ -190,12 +193,14 @@ def search_coins(query: str, http_get=None, prices_fn=None) -> dict:
                 liq = 0.0
             prev = by_mint.get(mint)
             if prev is None or liq > prev[0]:
+                sym = (base.get("symbol") or mint[:8]).upper()
                 by_mint[mint] = (liq, {
                     "coin_id": mint,
                     "name": base.get("name") or base.get("symbol") or mint,
-                    "symbol": (base.get("symbol") or mint[:8]).upper(),
+                    "symbol": sym,
                     "price_usd": price, "change_24h": None,
-                    "is_mint": True})
+                    "is_mint": True,
+                    **search_result_network(mint, True, sym)})
         ranked = sorted(by_mint.values(), key=lambda item: -item[0])
         for _liq, entry in ranked:
             if entry["symbol"] in seen_symbols:

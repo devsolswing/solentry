@@ -166,6 +166,11 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .refresh-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
 .search-results { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
 .search-result { text-align: left; background: #1a0805; border: 1px solid #ffb300; border-radius: 10px; color: #e8ecf1; padding: 10px; font-weight: 700; cursor: pointer; }
+/* Network tags on a search result row: one small gold pill per
+   verified network (a multi-chain coin shows each one), plus a
+   Wrapped pill for a wrapped token. Small and neat beside the
+   coin name — the row stays readable even with many tags. */
+.search-result-network { display: inline-block; font-size: 11px; font-weight: 600; line-height: 1.4; padding: 1px 7px; margin: 2px 4px 2px 0; border: 1px solid #ffb300; border-radius: 999px; color: #ffd700; white-space: nowrap; }
 .amount-kind { display: flex; gap: 16px; margin: 8px 0; }
 .amount-kind label { display: inline-flex; align-items: center; gap: 6px; }
 

@@ -95,6 +95,29 @@
     qtAmountKind();
   }
 
+  /* One small tag per verified network the coin exists on
+     (a multi-chain coin shows each one); a wrapped token gets a
+     Wrapped tag after its network. No network the app verified
+     means a "Network unknown" tag — never a guessed network. */
+  function qtNetworkTags(r) {
+    var tags = [];
+    var networks = (r.networks && r.networks.length)
+      ? r.networks : [null];
+    networks.forEach(function (net) {
+      var t = document.createElement('span');
+      t.className = 'search-result-network';
+      t.textContent = net || 'Network unknown';
+      tags.push(t);
+    });
+    if (r.wrapped) {
+      var w = document.createElement('span');
+      w.className = 'search-result-network';
+      w.textContent = 'Wrapped';
+      tags.push(w);
+    }
+    return tags;
+  }
+
   document.querySelectorAll('[data-quick-trade-open]').forEach(function (btn) {
     btn.addEventListener('click', function () { qtOpen(btn.dataset.trade || null); });
   });
@@ -120,7 +143,16 @@
             var b = document.createElement('button');
             b.type = 'button';
             b.className = 'search-result';
-            b.textContent = r.name + ' (' + r.symbol + ')' + (r.price_usd != null ? ' — $' + r.price_usd : ' — price unavailable');
+            var main = document.createElement('span');
+            main.textContent = r.name + ' (' + r.symbol + ')';
+            b.appendChild(main);
+            b.appendChild(document.createTextNode(' '));
+            qtNetworkTags(r).forEach(function (t) {
+              b.appendChild(t);
+            });
+            var pr = document.createElement('span');
+            pr.textContent = r.price_usd != null ? ' — $' + r.price_usd : ' — price unavailable';
+            b.appendChild(pr);
             b.addEventListener('click', function () { qtSelect(r); });
             qtResults.appendChild(b);
           });
