@@ -46,14 +46,27 @@
      to the app, with the live SOL price beside the total. The fee
      total starts at zero — trades that predate the fee are never
      charged. The dropdown stays closed by default so the home page
-     still fits on one screen. #}
-  <details class="card fees-card" id="fees">
-    <summary><span class="fees-total">Fees paid to SolEntry: <b><span data-fees-user-total>{{ "%.4f"|format(fees_total_sol) }} SOL</span></b></span> <span class="muted small">· SOL <span data-live-price="SOL">{% if sol_price_usd is not none %}${{ "%.4f"|format(sol_price_usd) }}{% else %}—{% endif %}</span></span></summary>
+     still fits on one screen. The fees view shows TWO balances —
+     the SolEntry fee balance (the treasury's 1.7% share) and the
+     pump.fun fee balance (the actual program fee) — with a
+     dropdown switcher to flip between them (James, 2026-11-11);
+     the burned amount stays visible underneath, not part of the
+     dropdown. #}
+  <details class="card fees-card" id="fees" data-fee-view="solentry">
+    <summary><span class="fees-total" data-fee-view-solentry>Fees paid to SolEntry: <b><span data-fees-user-total>{{ "%.4f"|format(fees_total_sol) }} SOL</span></b></span><span class="fees-total" data-fee-view-pumpfun>Pump.fun fees: <b><span data-fees-user-pump-total>{{ "%.4f"|format(fees_pump_total_sol) }} SOL</span></b></span> <span class="muted small">· SOL <span data-live-price="SOL">{% if sol_price_usd is not none %}${{ "%.4f"|format(sol_price_usd) }}{% else %}—{% endif %}</span></span></summary>
     <p class="muted small">Every trade pays a 3.65% fee in SOL. Fees are in SOL.</p>
+    <div class="fees-switcher">
+      <button type="button" class="fees-switcher-btn" data-fee-switcher-toggle aria-haspopup="listbox" aria-expanded="false"><span data-fee-switcher-current>SolEntry fee balance</span><span class="fees-switcher-chevron" aria-hidden="true">▾</span></button>
+      <ul class="fees-switcher-menu" role="listbox" aria-label="Fee balance">
+        <li><button type="button" class="fees-switcher-option" role="option" aria-selected="true" data-fee-switch="solentry">SolEntry fee balance</button></li>
+        <li><button type="button" class="fees-switcher-option" role="option" aria-selected="false" data-fee-switch="pumpfun">Pump.fun fee balance</button></li>
+      </ul>
+    </div>
+    <p class="muted small">Burned: <span data-fees-user-burn-total>{{ "%.4f"|format(fees_burn_total_sol) }} SOL</span></p>
     {% if fees_rows %}
     <ul class="fees-list">
       {% for fee in fees_rows %}
-      <li><span class="fees-coin">{{ fee.coin }} · {{ fee.side }} · {{ fee.mode }}</span> <span class="fees-amount">{% if fee.fee_sol_display is not none %}{{ "%.6f"|format(fee.fee_sol_display) }} SOL{% else %}—{% endif %}</span><br><span class="muted small">{{ fee.created_at }}{% if fee.signature %} · <span class="addr">{{ fee.signature[:12] }}…</span>{% else %} · paper{% endif %}</span></li>
+      <li><span class="fees-coin">{{ fee.coin }} · {{ fee.side }} · {{ fee.mode }}</span> <span class="fees-amount"><span data-fee-view-solentry>{% if fee.fee_sol_display is not none %}{{ "%.6f"|format(fee.fee_sol_display) }} SOL{% else %}—{% endif %}</span><span data-fee-view-pumpfun>{% if fee.pump_fee_sol_display is not none %}{{ "%.6f"|format(fee.pump_fee_sol_display) }} SOL{% else %}—{% endif %}</span></span><br><span class="muted small">{{ fee.created_at }}{% if fee.signature %} · <span class="addr">{{ fee.signature[:12] }}…</span>{% else %} · paper{% endif %}{% if fee.burn_sol_display is not none and fee.burn_sol_display > 0 %} · burned {{ "%.6f"|format(fee.burn_sol_display) }} SOL{% endif %}</span></li>
       {% endfor %}
     </ul>
     {% else %}

@@ -635,9 +635,11 @@ from the DexScreener feed when it names them, and the honest
 
 ## Trading fees (3.65% of every trade)
 
-Every trade — paper and real — pays a **3.65% fee** to one
-wallet only: the recipient in the `FEE_RECIPIENT_PUBKEY` env var
-(James's own wallet, set in Railway). The fee is charged going
+Every trade — paper and real — pays a **3.65% fee**. On devnet a
+real trade's fee is split in the same transaction: **1.7% of the
+trade to the treasury** (the recipient in the `FEE_RECIPIENT_PUBKEY`
+env var — James's own wallet, set in Railway) and **1.95% burned**
+to the Solana incinerator. The fee is charged going
 forward only: trades that happened before the fee landed are
 never charged, and every user's fee total starts at zero.
 
@@ -660,18 +662,28 @@ never charged, and every user's fee total starts at zero.
   equivalent at the trade-time SOL price. The fee is shown in the
   buy/sell confirmation and the trade log.
 - **Real (devnet) trades:** the fee is taken in SOL in the **same
-  transaction** as the trade itself — one System-program transfer
-  of exactly the computed fee to the fee recipient, appended
-  after the pump.fun buy/sell instruction. Either the whole
-  transaction confirms (trade + fee) or neither happens, so a fee
-  is never taken from a trade that did not execute, and never
-  twice for one trade (fee rows are unique per trade signature).
-  The signing bot's destination restriction keeps exactly one
-  exception for this: a System-program instruction is allowed only
-  when it is the fee transfer — one instruction, to the fee
-  recipient, for exactly the computed fee. Any other transfer,
+  transaction** as the trade itself — TWO System-program transfers,
+  appended after the pump.fun buy/sell instruction: **1.7% of the
+  trade to the fee recipient (the treasury — James's own wallet)**
+  and **the rest, 1.95% of the trade, burned** to the Solana
+  incinerator (`1nc1nerator11111111111111111111111111111111`), a
+  well-known unspendable address. Exact integer math (treasury =
+  amount x 170 // 10000, fee = amount x 365 // 10000, burn = fee -
+  treasury). Either the whole transaction confirms (trade + both
+  transfers) or neither happens, so a fee is never taken from a
+  trade that did not execute, and never twice for one trade (fee
+  rows are unique per trade signature). **The burn is devnet-only:**
+  it is gated on the app network being devnet, so this build can
+  never burn on mainnet. The signing bot's destination restriction
+  keeps exactly two exceptions for this: a System-program
+  instruction is allowed only when it is one of the two fee
+  transfers — treasury to the fee recipient for exactly the
+  treasury lamports, or burn to the incinerator for exactly the
+  burn lamports, each appearing exactly once. Any other transfer,
   destination, or amount is still refused (see
-  `executor._check_instructions_only_allowed`).
+  `executor._check_instructions_only_allowed`). The 3.65% is a
+  MOCK for the real mainnet total: pump.fun's fee (~1.9%) +
+  SolEntry's fee (1.7% of the trade).
 - **Home page:** the fees section shows the logged-in user's OWN
   total fees paid in SOL as a clickable dropdown listing their fee
   payments (coin, fee in SOL, date, signature where it is a real
@@ -684,11 +696,28 @@ never charged, and every user's fee total starts at zero.
   fetch shows "—", never a guessed number. Deleting a bot does not
   erase its fees: the fee rows stay (detached from the deleted
   bot) so the user's total still counts what was actually paid.
+  The fees display shows THREE numbers, per user and app-wide
+  (`/api/fees` carries all six): the **SolEntry fee** (1.7% of the
+  trade), the **pump.fun fee** (the actual program fee paid on
+  each trade, derived from the trade's amounts and the live
+  global fee_bps — never the ~1.9% estimate), and the **burned**
+  amount (1.95% of the trade). A dropdown switcher in the fees
+  card flips the view between the SolEntry fee balance and the
+  pump.fun fee balance (the closed control shows the current
+  selection + a chevron; pressing it drops down the 2 options);
+  the burned amount stays visible alongside, not part of the
+  dropdown.
 - **Mainnet rule:** when the app launches on mainnet, after
   selling a coin the proceeds are converted to SOL and held as
   SOL — never cash, never USDC. On devnet this is already how
   sells settle: pump.fun pays SOL to the seller's wallet, so there
-  is no cash leg to convert.
+  is no cash leg to convert. **Mainnet fee model (James,
+  2026-11-11 — for the record, a launch-time change, not this
+  build): on mainnet the app fee is 1.9% of the trade, ALL of it
+  to the Treasury dev wallet (FEE_RECIPIENT_PUBKEY — the address
+  James already supplied; no new wallet). Pump.fun's fee is
+  separate (taken by pump.fun via the program, accurately
+  accounted in the display). No burn on mainnet.**
 
 ## Security rules (do not weaken)
 

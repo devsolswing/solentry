@@ -1458,18 +1458,24 @@ def register_routes(app: Flask) -> None:
         activity = _activity_for_mode(db, user["id"], mode)
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
         # Trading fees (3.65% of every trade, fees.py): this user's
-        # total paid in SOL and their fee payments (newest first),
-        # plus the live SOL price for display. The fee total starts
-        # at zero for everyone — trades that predate the fee are
-        # never charged. The home page shows ONLY the user's own
+        # total REAL fees paid in SOL and their real fee payments
+        # (newest first), plus the live SOL price for display. The
+        # fee total starts at zero for everyone — trades that
+        # predate the fee are never charged. Paper fees are never
+        # shown here: they are play money, not SOL paid (James,
+        # 2026-11-10). The home page shows ONLY the user's own
         # fees: no app-wide total, and the fee recipient address
         # is never shown here (James, 2026-11-10).
-        fees_rows = fees_mod.user_fees(db, user["id"], limit=20)
+        fees_rows = fees_mod.user_fees(db, user["id"], limit=20,
+                                       mode="real")
         for _row in fees_rows:
-            _row["fee_sol_display"] = fees_mod.fee_row_sol(
-                _row, sol_price)
-        fees_total_sol = fees_mod.user_fee_total_sol(
+            _split = fees_mod.fee_row_split(_row, sol_price)
+            _row["fee_sol_display"] = _split["treasury_sol"]
+            _row["burn_sol_display"] = _split["burn_sol"]
+            _row["pump_fee_sol_display"] = _split["pump_fee_sol"]
+        fees_totals = fees_mod.user_fee_totals(
             db, user["id"], sol_price_usd=sol_price)
+        fees_total_sol = fees_totals["treasury_sol"]
         trenches_rows, trenches_error = (
             _trenches_list() if include_trenches else ([], None))
         return {"wallet": wallet if mode == "devnet" else None,
@@ -1494,6 +1500,8 @@ def register_routes(app: Flask) -> None:
                 "support_id": signing_bot["support_id"]
                 if signing_bot else "",
                 "fees_total_sol": fees_total_sol,
+                "fees_pump_total_sol": fees_totals["pump_fee_sol"],
+                "fees_burn_total_sol": fees_totals["burn_sol"],
                 "fees_rows": fees_rows,
                 "sol_price_usd": sol_price,
                 "popup_coin": popup_coin,
@@ -1834,18 +1842,29 @@ def register_routes(app: Flask) -> None:
     @login_required
     def fees_snapshot():
         """Live fee totals for the homepage 5-second poll: the
-        app-wide total of all 3.65% fees collected (every user) and
-        this user's own total, both in SOL, plus the live SOL price.
-        One lightweight request per tick covers both figures — the
-        totals are sums of recorded fee rows only, never guessed."""
+        app-wide totals and this user's own totals, both in SOL,
+        for each of the three displayed numbers — the SolEntry
+        (treasury) fee, the pump.fun program fee, and the burned
+        amount — plus the live SOL price. One lightweight request
+        per tick covers all six figures. The totals are sums of
+        recorded fee rows only, never guessed. The home page shows
+        only the user's own figures; the app-wide figures are in
+        this response for any surface that shows them."""
         db = _db(app)
         user = _current_user(app)
         sol_price = _sol_price_usd()
+        user_totals = fees_mod.user_fee_totals(
+            db, user["id"], sol_price_usd=sol_price)
+        app_totals = fees_mod.app_fee_totals(db, sol_price_usd=sol_price)
         return jsonify({"ok": True,
-                        "app_total_sol": fees_mod.app_fee_total_sol(
-                            db, sol_price_usd=sol_price),
-                        "user_total_sol": fees_mod.user_fee_total_sol(
-                            db, user["id"], sol_price_usd=sol_price),
+                        "app_total_sol": app_totals["treasury_sol"],
+                        "user_total_sol": user_totals["treasury_sol"],
+                        "app_treasury_sol": app_totals["treasury_sol"],
+                        "user_treasury_sol": user_totals["treasury_sol"],
+                        "app_pump_sol": app_totals["pump_fee_sol"],
+                        "user_pump_sol": user_totals["pump_fee_sol"],
+                        "app_burn_sol": app_totals["burn_sol"],
+                        "user_burn_sol": user_totals["burn_sol"],
                         "sol_price_usd": sol_price})
 
     sock = app.config["SOCK"]
@@ -2118,6 +2137,14 @@ def register_routes(app: Flask) -> None:
             fees_mod.record_fee(db, user["id"], bot["id"],
                                 coin_id_resolved, "buy", "real", fee_sol,
                                 fee_lamports=result.get("fee_lamports"),
+                                treasury_sol=result.get("treasury_sol"),
+                                burn_sol=result.get("burn_sol"),
+                                pump_fee_sol=result.get("pump_fee_sol"),
+                                treasury_lamports=result.get(
+                                    "treasury_lamports"),
+                                burn_lamports=result.get("burn_lamports"),
+                                pump_fee_lamports=result.get(
+                                    "pump_fee_lamports"),
                                 signature=result.get("signature"))
         fee_sentence = (
             f" Fee (3.65%): {fee_sol:.4f} SOL."
@@ -2301,6 +2328,14 @@ def register_routes(app: Flask) -> None:
             fees_mod.record_fee(db, user["id"], bot["id"],
                                 coin_id_resolved, "sell", "real", fee_sol,
                                 fee_lamports=result.get("fee_lamports"),
+                                treasury_sol=result.get("treasury_sol"),
+                                burn_sol=result.get("burn_sol"),
+                                pump_fee_sol=result.get("pump_fee_sol"),
+                                treasury_lamports=result.get(
+                                    "treasury_lamports"),
+                                burn_lamports=result.get("burn_lamports"),
+                                pump_fee_lamports=result.get(
+                                    "pump_fee_lamports"),
                                 signature=result.get("signature"))
         fee_sentence = (
             f" Fee (3.65%): {fee_sol:.4f} SOL."

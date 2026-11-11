@@ -353,6 +353,12 @@ CREATE TABLE IF NOT EXISTS trade_fees (
     fee_lamports INTEGER,
     signature TEXT UNIQUE,
     trade_id TEXT,
+    treasury_sol REAL,
+    burn_sol REAL,
+    pump_fee_sol REAL,
+    treasury_lamports INTEGER,
+    burn_lamports INTEGER,
+    pump_fee_lamports INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id),
     FOREIGN KEY (bot_id) REFERENCES bots (id)
@@ -484,6 +490,18 @@ _MIGRATIONS = (
     # make the chooser reappear mid-session — the user can still
     # switch modes any time from the HUD.
     ("users", "mode_chosen_at", "TEXT NOT NULL DEFAULT ''"),
+    # Fee split (James, 2026-11-10/11): the per-trade treasury /
+    # burned / pump.fun-program-fee shares, in SOL and in
+    # lamports. NULL for paper trades and for rows recorded before
+    # the split existed — the display derives the treasury share
+    # and treats the burn as 0 for those rows, and leaves the
+    # pump fee unknown rather than guessing it.
+    ("trade_fees", "treasury_sol", "REAL"),
+    ("trade_fees", "burn_sol", "REAL"),
+    ("trade_fees", "pump_fee_sol", "REAL"),
+    ("trade_fees", "treasury_lamports", "INTEGER"),
+    ("trade_fees", "burn_lamports", "INTEGER"),
+    ("trade_fees", "pump_fee_lamports", "INTEGER"),
 )
 
 

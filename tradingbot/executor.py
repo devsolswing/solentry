@@ -13,20 +13,23 @@ within the rules that already govern it:
     verify: buy size % and balance, plus a small fee reserve.
   * The executor builds ONLY pump.fun buy/sell instructions (plus a
     create-ATA instruction for the user's own token account when the
-    buy needs one) — and, since the 3.65% trading fee (fees.py), ONE
-    extra instruction per trade: a System-program transfer of
-    exactly the computed fee to the fee recipient
-    (FEE_RECIPIENT_PUBKEY), in the SAME transaction as the trade.
-    That is the ONLY transfer the executor can ever sign:
+    buy needs one) — and, since the 3.65% trading fee (fees.py),
+    TWO extra instructions per trade, in the SAME transaction as
+    the trade: the fee split — 1.7% of the trade to the fee
+    recipient (the treasury, James's wallet) and the rest, 1.95%,
+    burned to the Solana incinerator. The burn is DEVNET ONLY:
+    fee_split_lamports returns a zero burn on any other network,
+    so this build can never burn on mainnet. Those are the ONLY
+    transfers the executor can ever sign:
     _check_instructions_only_allowed refuses any System-program
-    instruction that is not exactly one fee transfer — one
-    instruction, to the fee recipient, for exactly the computed
-    fee lamports, from the user's own wallet. Any other transfer,
-    destination, or amount is still refused. The fee is taken
-    from the trade amount (buys) or the sale proceeds (sells), so
-    the total SOL spent is what the user approved; a trade that
-    fails never pays a fee, and a fee is never charged twice for
-    one trade.
+    instruction that is not exactly one of the two expected fee
+    transfers — each appearing exactly once, to the right
+    destination, for exactly the computed lamports, from the
+    user's own wallet. Any other transfer, destination, or amount
+    is still refused. The fee is taken from the trade amount
+    (buys) or the sale proceeds (sells), so the total SOL spent
+    is what the user approved; a trade that fails never pays a
+    fee, and a fee is never charged twice for one trade.
 
 The user's app wallet key is decrypted transiently with
 ENCRYPTION_KEY into a mutable bytearray, used for one signature,
@@ -48,7 +51,8 @@ from __future__ import annotations
 
 from . import pumpfun
 from .config import Config
-from .fees import fee_lamports as compute_fee_lamports
+from .fees import INCINERATOR_PUBKEY
+from .fees import fee_split_lamports
 from .fees import get_fee_recipient_pubkey
 from .security import decrypt_secret_mutable, wipe_secret
 from .signing_bot import ensure_signing_bot
@@ -64,8 +68,8 @@ FEE_RESERVE_LAMPORTS = 1_000_000
 # Every RPC write here goes through one of these program IDs only.
 # The System program is deliberately NOT in this set: no instruction
 # the executor builds ever uses it as a program (it only appears as
-# an account inside pump.fun instructions) — EXCEPT the single
-# 3.65% fee transfer to the fee recipient, which
+# an account inside pump.fun instructions) — EXCEPT the two fee
+# split transfers (treasury + burn, fees.py), which
 # _check_instructions_only_allowed validates separately (see
 # fees.py). A plain SOL transfer to any other destination can never
 # be signed.
@@ -78,9 +82,9 @@ ALLOWED_PROGRAM_IDS = frozenset([
 
 def _is_fee_transfer(instruction: dict, payer_b58: str,
                      recipient_b58: str, fee_lamports: int) -> bool:
-    """True only when this instruction is exactly the 3.65% fee
+    """True only when this instruction is exactly one expected fee
     transfer: a System-program transfer, from the user's own
-    wallet, to the fee recipient, for exactly the computed fee
+    wallet, to the given recipient, for exactly the given
     lamports. Anything else — any other destination, amount, or
     account layout — is not a fee transfer."""
     if instruction.get("program_id") != SYSTEM_PROGRAM:
@@ -101,36 +105,49 @@ def _is_fee_transfer(instruction: dict, payer_b58: str,
     return instruction.get("data") == expected
 
 
-def _fee_transfer_context(payer_b58: str, recipient_b58: str,
-                          fee_lamports: int) -> dict:
-    """The validated fee-transfer expectation handed to the
-    instruction allow-list check."""
-    return {"payer": payer_b58, "recipient": recipient_b58,
-            "lamports": fee_lamports}
+def _fee_transfer_context(payer_b58: str, transfers) -> dict:
+    """The validated fee-transfer expectations handed to the
+    instruction allow-list check: a list of (recipient, lamports)
+    pairs — the treasury transfer to the fee recipient and, on
+    devnet, the burn transfer to the incinerator. Each must
+    appear exactly once in the transaction."""
+    return {"payer": payer_b58,
+            "transfers": [(recipient, lamports)
+                          for recipient, lamports in transfers]}
 
 
 def _check_instructions_only_allowed(instructions: list,
                                      fee_transfer: dict | None = None):
     """Every instruction's program must be in ALLOWED_PROGRAM_IDS —
-    with exactly one narrow exception: when fee_transfer is given,
-    exactly ONE System-program instruction is allowed, and only
-    when it is the 3.65% fee transfer to the fee recipient for
-    exactly the computed fee (see _is_fee_transfer). Any other
-    System-program instruction, any second fee transfer, or any
-    fee transfer to a different destination or amount raises.
+    with one narrow exception: when fee_transfer is given, the
+    System-program instructions it lists are allowed — each
+    exactly once, and only when it is exactly the expected
+    transfer (treasury to the fee recipient for exactly the
+    treasury lamports, burn to the incinerator for exactly the
+    burn lamports; see _is_fee_transfer). Any other
+    System-program instruction, any missing expected transfer,
+    or any transfer to a different destination or amount raises.
     This is the final gate before a transaction is signed."""
-    fee_seen = False
+    expected = fee_transfer["transfers"] if fee_transfer else []
+    seen = [False] * len(expected)
     for ins in instructions:
         pid = ins.get("program_id")
         if pid in ALLOWED_PROGRAM_IDS:
             continue
-        if (fee_transfer is not None and not fee_seen
-                and _is_fee_transfer(ins, fee_transfer["payer"],
-                                     fee_transfer["recipient"],
-                                     fee_transfer["lamports"])):
-            fee_seen = True
+        matched = False
+        if fee_transfer is not None:
+            for i, (recipient, lamports) in enumerate(expected):
+                if (not seen[i]
+                        and _is_fee_transfer(ins, fee_transfer["payer"],
+                                             recipient, lamports)):
+                    seen[i] = True
+                    matched = True
+                    break
+        if matched:
             continue
         raise ValueError("refused: instruction for an unexpected program")
+    if fee_transfer is not None and not all(seen):
+        raise ValueError("refused: expected fee transfer missing")
 
 
 def _skip(reason: str) -> dict:
@@ -235,14 +252,27 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
             return _skip("insufficient SOL left for fees")
         # The 3.65% trading fee comes out of the trade amount: the
         # user still spends amount_sol in total, but only
-        # amount_sol minus the fee is swapped for tokens, and the
-        # fee goes to the fee recipient in the same transaction
-        # as the buy.
-        fee_lamports = compute_fee_lamports(amount_lamports)
+        # amount_sol minus the fee is swapped for tokens. On devnet
+        # the fee is split in the same transaction (fees.py): 1.7%
+        # of the trade to the fee recipient (the treasury, James's
+        # wallet) and the rest, 1.95%, burned to the incinerator.
+        # The burn is devnet-only — fee_split_lamports returns a
+        # zero burn on any other network, so this build can never
+        # burn on mainnet.
+        split = fee_split_lamports(amount_lamports, cfg.network)
+        fee_lamports = split["fee_lamports"]
+        treasury_lamports = split["treasury_lamports"]
+        burn_lamports = split["burn_lamports"]
         trade_lamports = amount_lamports - fee_lamports
         tokens = pumpfun.buy_quote(curve, fee_bps, trade_lamports)
         if tokens <= 0:
             return _skip("amount too small to buy")
+        # The pump.fun program fee on the SOL actually swapped,
+        # from the live global fee_bps — recorded per trade so the
+        # display sums real program fees (accurate to within the
+        # 1% slippage; see pumpfun.buy_program_fee).
+        pump_fee_lamports = pumpfun.buy_program_fee(trade_lamports,
+                                                    fee_bps)
         max_sol_cost = (trade_lamports
                         * (10000 + pumpfun.DEFAULT_SLIPPAGE_BPS) // 10000
                         + 1)
@@ -295,12 +325,23 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                 ata_before = 0
         instructions.append(pumpfun.build_buy_instruction(
             accts, tokens, max_sol_cost))
-        fee_transfer = None
+        # The fee split travels in the same transaction as the buy:
+        # treasury first, then the burn — each exactly once, each
+        # validated by _check_instructions_only_allowed below.
+        fee_transfers = []
         if fee_lamports > 0:
-            instructions.append(build_transfer_instruction(
-                wallet_pubkey, recipient_pubkey, fee_lamports))
-            fee_transfer = _fee_transfer_context(
-                wallet_pubkey, recipient_pubkey, fee_lamports)
+            if treasury_lamports > 0:
+                instructions.append(build_transfer_instruction(
+                    wallet_pubkey, recipient_pubkey, treasury_lamports))
+                fee_transfers.append(
+                    (recipient_pubkey, treasury_lamports))
+            if burn_lamports > 0:
+                instructions.append(build_transfer_instruction(
+                    wallet_pubkey, INCINERATOR_PUBKEY, burn_lamports))
+                fee_transfers.append(
+                    (INCINERATOR_PUBKEY, burn_lamports))
+        fee_transfer = (_fee_transfer_context(wallet_pubkey, fee_transfers)
+                        if fee_transfers else None)
         _check_instructions_only_allowed(instructions, fee_transfer)
         try:
             blockhash = rpc.get_latest_blockhash()
@@ -322,6 +363,12 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                 "coin_amount": coin_amount,
                 "fee_lamports": fee_lamports,
                 "fee_sol": lamports_to_sol(fee_lamports),
+                "treasury_lamports": treasury_lamports,
+                "treasury_sol": lamports_to_sol(treasury_lamports),
+                "burn_lamports": burn_lamports,
+                "burn_sol": lamports_to_sol(burn_lamports),
+                "pump_fee_lamports": pump_fee_lamports,
+                "pump_fee_sol": lamports_to_sol(pump_fee_lamports),
                 "signing_bot": signing_bot["support_id"]}
     finally:
         # Wipe the seed IN PLACE the moment the trade is done —
@@ -404,11 +451,21 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
                           * (10000 - pumpfun.DEFAULT_SLIPPAGE_BPS)
                           // 10000)
         # The 3.65% trading fee comes out of the sale proceeds: the
-        # fee is 3.65% of the expected SOL out, transferred to the
-        # fee recipient in the same transaction as the sell.
-        # Proceeds are at least 99% of the quote even at worst
-        # slippage, so the transfer is always covered.
-        fee_lamports = compute_fee_lamports(expected_sol)
+        # fee is 3.65% of the expected SOL out, split in the same
+        # transaction as the sell (fees.py) — 1.7% of the proceeds
+        # to the fee recipient (the treasury, James's wallet) and
+        # the rest, 1.95%, burned to the incinerator on devnet
+        # only. Proceeds are at least 99% of the quote even at
+        # worst slippage, so the transfers are always covered.
+        split = fee_split_lamports(expected_sol, cfg.network)
+        fee_lamports = split["fee_lamports"]
+        treasury_lamports = split["treasury_lamports"]
+        burn_lamports = split["burn_lamports"]
+        # The pump.fun program fee on the gross proceeds, from the
+        # live global fee_bps — recorded per trade (accurate to
+        # within slippage; see pumpfun.sell_program_fee).
+        pump_fee_lamports = pumpfun.sell_program_fee(
+            curve, fee_bps, token_base)
         # The fee recipient comes from FEE_RECIPIENT_PUBKEY
         # (fees.py) — fail closed when it is not configured: the
         # trade is refused before anything is signed or sent,
@@ -416,7 +473,7 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
         recipient_pubkey = None
         instructions = [pumpfun.build_sell_instruction(
             accts, token_base, min_sol_output)]
-        fee_transfer = None
+        fee_transfers = []
         if fee_lamports > 0:
             try:
                 recipient_pubkey = get_fee_recipient_pubkey(cfg)
@@ -425,10 +482,18 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
                              "(FEE_RECIPIENT_PUBKEY)")
             recipient_buf = bytearray(recipient_pubkey.encode("ascii"))
             recipient_pubkey = bytes(recipient_buf).decode("ascii")
-            instructions.append(build_transfer_instruction(
-                wallet_pubkey, recipient_pubkey, fee_lamports))
-            fee_transfer = _fee_transfer_context(
-                wallet_pubkey, recipient_pubkey, fee_lamports)
+            if treasury_lamports > 0:
+                instructions.append(build_transfer_instruction(
+                    wallet_pubkey, recipient_pubkey, treasury_lamports))
+                fee_transfers.append(
+                    (recipient_pubkey, treasury_lamports))
+            if burn_lamports > 0:
+                instructions.append(build_transfer_instruction(
+                    wallet_pubkey, INCINERATOR_PUBKEY, burn_lamports))
+                fee_transfers.append(
+                    (INCINERATOR_PUBKEY, burn_lamports))
+        fee_transfer = (_fee_transfer_context(wallet_pubkey, fee_transfers)
+                        if fee_transfers else None)
         _check_instructions_only_allowed(instructions, fee_transfer)
         try:
             blockhash = rpc.get_latest_blockhash()
@@ -442,6 +507,12 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
         return {"status": "executed", "signature": confirmed,
                 "fee_lamports": fee_lamports,
                 "fee_sol": lamports_to_sol(fee_lamports),
+                "treasury_lamports": treasury_lamports,
+                "treasury_sol": lamports_to_sol(treasury_lamports),
+                "burn_lamports": burn_lamports,
+                "burn_sol": lamports_to_sol(burn_lamports),
+                "pump_fee_lamports": pump_fee_lamports,
+                "pump_fee_sol": lamports_to_sol(pump_fee_lamports),
                 "signing_bot": signing_bot["support_id"]}
     finally:
         # Wipe the seed IN PLACE the moment the trade is done —
@@ -467,10 +538,11 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
     protocol and not used for execution. Returns {"status":
     "executed", "signature", "fee_lamports", "fee_sol", ...} or
     {"status": "skipped", "reason": ...}.
-    The fee is 3.65% of the trade, taken in the same transaction
-    as the trade to the fee recipient (fees.py) — a trade that is
-    skipped or fails never pays a fee. Never raises for a refused
-    trade.
+    The fee is 3.65% of the trade, split in the same transaction
+    as the trade — 1.7% of the trade to the fee recipient (the
+    treasury) and, on devnet only, the rest (1.95%) burned to the
+    incinerator (fees.py) — a trade that is skipped or fails
+    never pays a fee. Never raises for a refused trade.
     """
     if cfg.network != "devnet":
         return _skip("real execution requires devnet")

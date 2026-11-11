@@ -133,13 +133,49 @@ def parse_bonding_curve(data: bytes) -> dict:
     }
 
 
+def buy_program_fee(sol_lamports: int, fee_bps: int) -> int:
+    """The pump.fun program fee on a buy of `sol_lamports` SOL in,
+    at the live global fee_bps: sol * fee_bps // 10000. This is
+    the fee buy_quote subtracts before the curve math — the same
+    formula the program applies on-chain, so the fee recorded
+    per trade is the actual program fee, never an estimate.
+    Honest limit: the quote is computed just before execution,
+    and the program's fee is computed on the SOL actually spent,
+    which can move by up to the 1% slippage — so the recorded
+    pump fee is accurate to within slippage, not to the lamport
+    after execution."""
+    if sol_lamports <= 0:
+        return 0
+    return sol_lamports * fee_bps // 10000
+
+
+def _sell_gross_sol(curve: dict, token_base_units: int) -> int:
+    """Gross SOL out for a sell, before the program fee."""
+    vt = curve["virtual_token_reserves"]
+    vs = curve["virtual_sol_reserves"]
+    if vt <= 0 or vs <= 0:
+        return 0
+    return vs - (vt * vs) // (vt + token_base_units)
+
+
+def sell_program_fee(curve: dict, fee_bps: int,
+                     token_base_units: int) -> int:
+    """The pump.fun program fee on a sell, in SOL lamports: the
+    fee on the gross SOL out, gross * fee_bps // 10000 — the same
+    formula sell_quote subtracts. Same slippage caveat as
+    buy_program_fee: accurate to within slippage."""
+    if token_base_units <= 0:
+        return 0
+    return _sell_gross_sol(curve, token_base_units) * fee_bps // 10000
+
+
 def buy_quote(curve: dict, fee_bps: int, sol_lamports: int) -> int:
     """Token base units out for `sol_lamports` in, after the program
     fee. Integer math only. Returns 0 when the amount is too small
     to buy anything."""
     if sol_lamports <= 0:
         return 0
-    fee = sol_lamports * fee_bps // 10000
+    fee = buy_program_fee(sol_lamports, fee_bps)
     net_sol = sol_lamports - fee
     vt = curve["virtual_token_reserves"]
     vs = curve["virtual_sol_reserves"]
@@ -157,8 +193,8 @@ def sell_quote(curve: dict, fee_bps: int, token_base_units: int) -> int:
     vs = curve["virtual_sol_reserves"]
     if vt <= 0 or vs <= 0:
         return 0
-    gross = vs - (vt * vs) // (vt + token_base_units)
-    fee = gross * fee_bps // 10000
+    gross = _sell_gross_sol(curve, token_base_units)
+    fee = sell_program_fee(curve, fee_bps, token_base_units)
     return max(0, gross - fee)
 
 

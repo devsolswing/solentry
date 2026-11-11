@@ -252,6 +252,12 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             record_fee(db, bot["user_id"], bot["id"], coin, "sell",
                        "real", fee_sol,
                        fee_lamports=result.get("fee_lamports"),
+                       treasury_sol=result.get("treasury_sol"),
+                       burn_sol=result.get("burn_sol"),
+                       pump_fee_sol=result.get("pump_fee_sol"),
+                       treasury_lamports=result.get("treasury_lamports"),
+                       burn_lamports=result.get("burn_lamports"),
+                       pump_fee_lamports=result.get("pump_fee_lamports"),
                        signature=result.get("signature"))
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
@@ -373,6 +379,12 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             record_fee(db, bot["user_id"], bot["id"], coin, "buy",
                        "real", fee_sol,
                        fee_lamports=result.get("fee_lamports"),
+                       treasury_sol=result.get("treasury_sol"),
+                       burn_sol=result.get("burn_sol"),
+                       pump_fee_sol=result.get("pump_fee_sol"),
+                       treasury_lamports=result.get("treasury_lamports"),
+                       burn_lamports=result.get("burn_lamports"),
+                       pump_fee_lamports=result.get("pump_fee_lamports"),
                        signature=result.get("signature"))
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {coin} for "

@@ -32,8 +32,8 @@
   var totalPnlEls = collect('[data-live-total-pnl]');
   var portfolioEls = collect('[data-live-total-portfolio]');
 
-  /* Trading-fee total (fees.py): the per-user total in the fees
-     dropdown refreshes every 5 seconds while the page is open,
+  /* Trading-fee totals (fees.py): the three figures in the fees
+     dropdown refresh every 5 seconds while the page is open,
      from one lightweight GET /api/fees per tick (and the live
      price feed's socket is untouched). The poll stops when the
      page is hidden or closed, so it never runs in the background.
@@ -41,6 +41,8 @@
      number. The home page shows ONLY the user's own fees — no
      app-wide total (James, 2026-11-10). */
   var userFeeEls = collect('[data-fees-user-total]');
+  var userPumpFeeEls = collect('[data-fees-user-pump-total]');
+  var userBurnFeeEls = collect('[data-fees-user-burn-total]');
   var FEES_POLL_MS = 5000;
   var feesTimer = null;
 
@@ -57,12 +59,18 @@
       .then(function (data) {
         if (!data || !data.ok) {
           setFeeTotal(userFeeEls, null);
+          setFeeTotal(userPumpFeeEls, null);
+          setFeeTotal(userBurnFeeEls, null);
           return;
         }
         setFeeTotal(userFeeEls, data.user_total_sol);
+        setFeeTotal(userPumpFeeEls, data.user_pump_sol);
+        setFeeTotal(userBurnFeeEls, data.user_burn_sol);
       })
       .catch(function () {
         setFeeTotal(userFeeEls, null);
+        setFeeTotal(userPumpFeeEls, null);
+        setFeeTotal(userBurnFeeEls, null);
       });
   }
   function startFeesPoll() {
@@ -83,6 +91,53 @@
       else startFeesPoll();
     });
     window.addEventListener('pagehide', stopFeesPoll);
+  }
+
+  /* Fee-balance switcher (James, 2026-11-11): the fees card's
+     dropdown. Pressing the closed control drops down the 2
+     options (SolEntry fee balance, Pump.fun fee balance) — the
+     chevron turns to show it is open. Picking one switches the
+     whole fees view (the headline and every row) to that
+     balance, and the control shows the new selection. The
+     burned line is not part of the dropdown and always shows.
+     The menu closes on an outside tap or Escape. */
+  var feesCard = document.getElementById('fees');
+  if (feesCard) {
+    var switcherBtn = feesCard.querySelector('[data-fee-switcher-toggle]');
+    var switcherMenu = feesCard.querySelector('.fees-switcher-menu');
+    var switcherCurrent = feesCard.querySelector('[data-fee-switcher-current]');
+    if (switcherBtn && switcherMenu) {
+      switcherBtn.addEventListener('click', function () {
+        var open = switcherMenu.classList.toggle('open');
+        switcherBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      switcherMenu.addEventListener('click', function (ev) {
+        var opt = ev.target.closest('[data-fee-switch]');
+        if (!opt) return;
+        var view = opt.getAttribute('data-fee-switch');
+        feesCard.setAttribute('data-fee-view', view);
+        if (switcherCurrent) {
+          switcherCurrent.textContent = opt.textContent.trim();
+        }
+        switcherMenu.querySelectorAll('[data-fee-switch]').forEach(function (o) {
+          o.setAttribute('aria-selected', o === opt ? 'true' : 'false');
+        });
+        switcherMenu.classList.remove('open');
+        switcherBtn.setAttribute('aria-expanded', 'false');
+      });
+      document.addEventListener('click', function (ev) {
+        if (!feesCard.contains(ev.target)) {
+          switcherMenu.classList.remove('open');
+          switcherBtn.setAttribute('aria-expanded', 'false');
+        }
+      });
+      document.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape') {
+          switcherMenu.classList.remove('open');
+          switcherBtn.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
   }
 
   var chart = document.getElementById('live-chart');
