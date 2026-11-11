@@ -923,6 +923,21 @@ def register_routes(app: Flask) -> None:
     def health():
         return jsonify({"ok": True, "network": _cfg(app).network})
 
+    # ------------------------------------------------------------------
+    # PWA (Android installable app)
+    # ------------------------------------------------------------------
+    # The manifest and service worker must be served from the app
+    # root (not /static/) so the worker controls the whole app scope
+    # and Chrome offers "Install app". Both are plain static files;
+    # the routes just expose them at the root.
+    @app.route("/manifest.json")
+    def manifest():
+        return app.send_static_file("manifest.json")
+
+    @app.route("/sw.js")
+    def service_worker():
+        return app.send_static_file("sw.js")
+
     @app.route("/")
     def index():
         # No landing page: the login screen is the front door.

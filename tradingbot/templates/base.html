@@ -5,6 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}SolEntry{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{# PWA: Android Chrome offers "Install app"; the app then opens
+   full-screen (standalone) like a native app. Theme color matches
+   the dark-red topbar (#1a0805); gold stays #ffd700 in the CSS. #}
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#1a0805">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SolEntry">
+<link rel="apple-touch-icon" href="/static/fox-red-480.jpg">
+<script nonce="{{ csp_nonce }}">
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/sw.js").catch(function () {});
+  });
+}
+</script>
 </head>
 <body{% if current_user %} class="app-shell {% block body_class %}{% endblock %}"{% endif %}>
 {% block header %}
