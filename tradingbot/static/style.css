@@ -273,6 +273,12 @@ body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-directio
 .carousel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0 6px; }
 .carousel-head h2 { margin: 0; flex: 1; text-align: center; }
 .bot-carousel { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; padding: 2px 2px 8px; flex: 0 0 auto; }
+.bot-carousel[hidden] { display: none; }
+/* Presets swap: while the preset list is showing in the carousel
+   spot, the carousel arrows hide (they scroll the hidden Active
+   Bots strip) but keep their space so the header stays centred. */
+.bots-section.showing-presets [data-carousel-prev],
+.bots-section.showing-presets [data-carousel-next] { visibility: hidden; }
 .bot-card { flex: 0 0 92%; scroll-snap-align: start; display: flex; align-items: center; gap: 12px; margin: 0; text-decoration: none; color: #e8ecf1; }
 .bot-card.active { border-color: #ffd700; box-shadow: 0 0 18px rgba(255, 200, 0, .45); }
 .bot-ico { flex: 0 0 52px; width: 52px; height: 52px; border-radius: 50%; background: #1a0805; border: 2px solid #ffb300; font-size: 26px; display: inline-flex; align-items: center; justify-content: center; }

@@ -39,46 +39,47 @@
     {% endif %}
   </div>
 
-  <div class="card bots-presets" id="preset-list" hidden>
-    <h2>Preset bots</h2>
-    <p class="muted small">Ready-made bots, Clyde first. Tap Create to add one — it starts in paper mode with silent trading off, and only trades within its rules and limits.</p>
-    {% for p in presets %}
-    <div class="preset-card" data-preset="{{ p.key }}">
-      <p class="preset-name"><strong>{{ p.name }}</strong> <span class="muted small">{{ p.tagline }}</span></p>
-      <ul class="preset-rules">
-        {% for line in p.rules_lines %}<li>{{ line }}</li>{% endfor %}
-        {% for note in p.notes %}<li class="preset-note">{{ note }}</li>{% endfor %}
-      </ul>
-      <form method="post" action="{{ p.create_url }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="btn small" type="submit">Create {{ p.name }}</button>
-      </form>
+  <div class="bots-section" id="bots-section">
+    <div class="carousel-head">
+      <button class="icon-btn" type="button" data-carousel-prev aria-label="Previous bot">‹</button>
+      <h2><span data-active-title>Active Bots • {{ bots|length }}</span><span data-presets-title hidden>Presets</span></h2>
+      <button class="icon-btn" type="button" data-carousel-next aria-label="Next bot">›</button>
     </div>
-    {% endfor %}
-  </div>
 
-  <div class="carousel-head">
-    <button class="icon-btn" type="button" data-carousel-prev aria-label="Previous bot">‹</button>
-    <h2>Active Bots • {{ bots|length }}</h2>
-    <button class="icon-btn" type="button" data-carousel-next aria-label="Next bot">›</button>
-  </div>
+    <div class="bot-carousel" data-carousel id="active-bots-list">
+      {% for b in bots %}
+      <a class="card bot-card" href="{{ url_for('bot_detail', bot_id=b.id) }}"
+         data-edit-url="{{ url_for('bot_edit', bot_id=b.id) }}"
+         data-delete-url="{{ url_for('bot_delete_confirm', bot_id=b.id) }}">
+        <span class="bot-ico" aria-hidden="true">{% if b.category == 'Memecoin build' %}🔥{% elif b.category == 'scanner' %}🎯{% else %}🤖{% endif %}</span>
+        <span class="bot-info">
+          <span class="bot-name"><strong>{{ b.name }}</strong> <span class="bot-status {{ 'on' if b.silent else 'off' }}">{% if b.silent %}● Active{% else %}○ Off{% endif %}</span> {% if b.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</span>
+          <span class="bot-id">ID: {{ b.id }}</span>
+          <span class="muted small">Created: {{ b.created_at[:16] }}</span>
+          <span class="muted small">{{ b.strategy }} · Buy {{ b.buy_size_pct }}% · Stop {{ b.stop_loss_pct }}% · Max {{ b.max_open_trades }}</span>
+        </span>
+        <span class="bot-arrow" aria-hidden="true">›</span>
+      </a>
+      {% endfor %}
+      {% if not bots %}<p class="muted">No bots yet — create your first one, or ask the assistant: “create bot”.</p>{% endif %}
+    </div>
 
-  <div class="bot-carousel" data-carousel>
-    {% for b in bots %}
-    <a class="card bot-card" href="{{ url_for('bot_detail', bot_id=b.id) }}"
-       data-edit-url="{{ url_for('bot_edit', bot_id=b.id) }}"
-       data-delete-url="{{ url_for('bot_delete_confirm', bot_id=b.id) }}">
-      <span class="bot-ico" aria-hidden="true">{% if b.category == 'Memecoin build' %}🔥{% elif b.category == 'scanner' %}🎯{% else %}🤖{% endif %}</span>
-      <span class="bot-info">
-        <span class="bot-name"><strong>{{ b.name }}</strong> <span class="bot-status {{ 'on' if b.silent else 'off' }}">{% if b.silent %}● Active{% else %}○ Off{% endif %}</span> {% if b.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</span>
-        <span class="bot-id">ID: {{ b.id }}</span>
-        <span class="muted small">Created: {{ b.created_at[:16] }}</span>
-        <span class="muted small">{{ b.strategy }} · Buy {{ b.buy_size_pct }}% · Stop {{ b.stop_loss_pct }}% · Max {{ b.max_open_trades }}</span>
-      </span>
-      <span class="bot-arrow" aria-hidden="true">›</span>
-    </a>
-    {% endfor %}
-    {% if not bots %}<p class="muted">No bots yet — create your first one, or ask the assistant: “create bot”.</p>{% endif %}
+    <div class="card bots-presets" id="preset-list" hidden>
+      <p class="muted small">Ready-made bots, Clyde first. Tap Create to add one — it starts in paper mode with silent trading off, and only trades within its rules and limits.</p>
+      {% for p in presets %}
+      <div class="preset-card" data-preset="{{ p.key }}">
+        <p class="preset-name"><strong>{{ p.name }}</strong> <span class="muted small">{{ p.tagline }}</span></p>
+        <ul class="preset-rules">
+          {% for line in p.rules_lines %}<li>{{ line }}</li>{% endfor %}
+          {% for note in p.notes %}<li class="preset-note">{{ note }}</li>{% endfor %}
+        </ul>
+        <form method="post" action="{{ p.create_url }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn small" type="submit">Create {{ p.name }}</button>
+        </form>
+      </div>
+      {% endfor %}
+    </div>
   </div>
 
   <div class="card bots-assistant">
@@ -136,15 +137,59 @@
 </div>
 
 <script nonce="{{ csp_nonce }}">
-const presetsToggle = document.querySelector('[data-presets-toggle]');
-const presetList = document.getElementById('preset-list');
-if (presetsToggle && presetList) {
-  presetsToggle.addEventListener('click', () => {
-    const open = presetList.hasAttribute('hidden');
-    if (open) { presetList.removeAttribute('hidden'); }
-    else { presetList.setAttribute('hidden', ''); }
-    presetsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+/* Presets swap (owner, 2026-11-11): the Preset button swaps the
+   Active Bots section IN PLACE — the header becomes "Presets" and
+   the preset list takes the carousel's spot, same layout. There is
+   NO manual switch back: after 6 seconds with no input from the
+   user it swaps back to Active Bots on its own. Any input (tap,
+   scroll, key) while Presets is showing resets the 6-second
+   timer, and pressing Preset again counts as input too. */
+var botsSection = document.getElementById('bots-section');
+var presetsToggle = document.querySelector('[data-presets-toggle]');
+var presetList = document.getElementById('preset-list');
+var activeList = document.getElementById('active-bots-list');
+var activeTitle = document.querySelector('[data-active-title]');
+var presetsTitle = document.querySelector('[data-presets-title]');
+var PRESETS_IDLE_MS = 6000;
+var presetsIdleTimer = null;
+function clearPresetsIdleTimer() {
+  if (presetsIdleTimer) { clearTimeout(presetsIdleTimer); presetsIdleTimer = null; }
+}
+function showActiveBots() {
+  if (!presetList || !activeList) return;
+  clearPresetsIdleTimer();
+  presetList.setAttribute('hidden', '');
+  activeList.removeAttribute('hidden');
+  activeTitle.removeAttribute('hidden');
+  presetsTitle.setAttribute('hidden', '');
+  botsSection.classList.remove('showing-presets');
+  presetsToggle.setAttribute('aria-expanded', 'false');
+}
+function armPresetsIdleTimer() {
+  if (!presetList || presetList.hasAttribute('hidden')) return;
+  clearPresetsIdleTimer();
+  presetsIdleTimer = setTimeout(showActiveBots, PRESETS_IDLE_MS);
+}
+function showPresets() {
+  if (!presetList || !activeList) return;
+  presetList.removeAttribute('hidden');
+  activeList.setAttribute('hidden', '');
+  activeTitle.setAttribute('hidden', '');
+  presetsTitle.removeAttribute('hidden');
+  botsSection.classList.add('showing-presets');
+  presetsToggle.setAttribute('aria-expanded', 'true');
+  armPresetsIdleTimer();
+}
+if (presetsToggle && presetList && activeList) {
+  /* Pressing Preset again is input, not a toggle back — it just
+     re-shows Presets and restarts the idle timer. */
+  presetsToggle.addEventListener('click', showPresets);
+  /* Any input while Presets is showing restarts the 6s timer. */
+  ['pointerdown', 'touchstart', 'keydown', 'click'].forEach(function (ev) {
+    document.addEventListener(ev, armPresetsIdleTimer, { passive: true, capture: true });
   });
+  document.addEventListener('scroll', armPresetsIdleTimer, { passive: true, capture: true });
+  window.addEventListener('scroll', armPresetsIdleTimer, { passive: true });
 }
 const botsLog = document.getElementById('bots-chat-log');
 document.getElementById('bots-chat-form').addEventListener('submit', async (e) => {

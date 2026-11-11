@@ -1,7 +1,12 @@
 """Preset bots on Page 6 (Bots) — the owner's spec (2026-11-11).
 
 - A Preset button sits in the bot-actions row (same action-btn
-  style as Add Bot / Edit Bot) and opens the preset list.
+  style as Add Bot / Edit Bot) and swaps the Active Bots section
+  IN PLACE: the header becomes "Presets" and the preset list
+  takes the carousel's spot, same layout. After 6 seconds with
+  no input from the user it swaps back to Active Bots on its
+  own — there is no manual switch back, and any input (tap,
+  scroll, key) restarts the 6-second timer.
 - The list is Clyde first, then Trenches, then Scanner. Each
   preset shows its name, its rules in plain words, and a Create
   button that really creates the bot.
@@ -56,6 +61,77 @@ class TestBotsPresets(UiBase):
         css = open("tradingbot/static/style.css").read()
         self.assertIn(".bots-presets", css)
         self.assertIn(".bots-presets[hidden]", css)
+        # The preset list lives INSIDE the bots section, in the
+        # carousel's spot (after the carousel head, before the
+        # assistant) — the old separate section below the actions
+        # is gone: the list must not appear before the head.
+        self.assertLess(html.find("carousel-head"),
+                        html.find('id="preset-list"'))
+        self.assertLess(html.find('id="preset-list"'),
+                        html.find("bots-assistant"))
+
+    def test_preset_swap_in_place_same_section(self):
+        """Presets swap the Active Bots section in place (owner,
+        2026-11-11): the header carries both titles and both lists
+        sit in the one bots section — no second preset section."""
+        self._choose_mode("paper")
+        html = self._html("/bots")
+        # One section holds the head + both lists.
+        self.assertIn('id="bots-section"', html)
+        section = html[html.find('id="bots-section"'):]
+        self.assertIn('id="active-bots-list"', section)
+        self.assertIn('id="preset-list"', section)
+        # Only one preset list on the whole page.
+        self.assertEqual(html.count('id="preset-list"'), 1)
+        # Header: "Active Bots" shown, "Presets" hidden until swap.
+        m = re.search(r'<span data-active-title>([^<]*)</span>', html)
+        self.assertIsNotNone(m, "active title not found")
+        self.assertIn("Active Bots", m.group(1))
+        m = re.search(r'<span data-presets-title([^>]*)>([^<]*)</span>',
+                      html)
+        self.assertIsNotNone(m, "presets title not found")
+        self.assertIn("hidden", m.group(1))
+        self.assertIn("Presets", m.group(2))
+        # The hidden Active Bots strip needs a display:none rule —
+        # .bot-carousel is display:flex, which beats [hidden].
+        css = open("tradingbot/static/style.css").read()
+        self.assertIn(".bot-carousel[hidden]", css)
+        # Carousel arrows hide while Presets is showing.
+        self.assertIn(".bots-section.showing-presets", css)
+
+    def test_preset_idle_timer_auto_revert_no_manual_toggle(self):
+        """After 6 seconds with no input Presets swaps back to
+        Active Bots on its own; any input restarts the timer; the
+        Preset button is NOT a manual toggle back."""
+        self._choose_mode("paper")
+        html = self._html("/bots")
+        script = html[html.find("PRESETS_IDLE_MS"):]
+        # 6-second idle timeout that restores Active Bots.
+        self.assertIn("PRESETS_IDLE_MS = 6000", html)
+        self.assertIn("setTimeout(showActiveBots, PRESETS_IDLE_MS)",
+                      html)
+        # The restore shows the Active Bots list + title and hides
+        # the preset list again.
+        restore = script[script.find("function showActiveBots"):]
+        restore = restore[:restore.find("function armPresetsIdleTimer")]
+        self.assertIn("activeList.removeAttribute('hidden')", restore)
+        self.assertIn("activeTitle.removeAttribute('hidden')", restore)
+        self.assertIn("presetList.setAttribute('hidden', '')", restore)
+        self.assertIn("presetsTitle.setAttribute('hidden', '')", restore)
+        # Input restarts the timer: tap, touch, key, scroll, click.
+        for ev in ("pointerdown", "touchstart", "keydown", "scroll",
+                   "click"):
+            self.assertIn("'%s'" % ev, html)
+        self.assertIn("armPresetsIdleTimer", html)
+        # The Preset button only ever SHOWS presets — pressing it
+        # again re-arms the timer; it never hides the list itself.
+        self.assertIn("presetsToggle.addEventListener('click', "
+                      "showPresets)", html)
+        show = script[script.find("function showPresets"):]
+        show = show[:show.find("if (presetsToggle")]
+        # showPresets hides the ACTIVE list (that is the swap), but
+        # it never hides the preset list itself.
+        self.assertNotIn("presetList.setAttribute('hidden', '')", show)
 
     def test_clyde_listed_first_with_rules(self):
         self._choose_mode("paper")
