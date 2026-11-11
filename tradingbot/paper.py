@@ -11,6 +11,7 @@ not enough holding).
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 
 from .fees import fee_sol_from_usd, fee_usd, record_fee
 from .ledger import record_trade
@@ -44,6 +45,33 @@ def paper_bankroll(db: sqlite3.Connection, user_id: int,
                    prices: dict) -> float:
     """Cash + holdings value: the bankroll buy-size % is taken from."""
     return paper_cash(db, user_id) + holdings_value(db, user_id, prices)
+
+
+def reset_paper_balance(db: sqlite3.Connection, user_id: int,
+                        new_cash: float) -> None:
+    """Reset the paper portfolio to a fresh start at `new_cash` CAD.
+
+    Sets the paper cash to the new amount and clears the paper
+    holdings and the paper trade history (positions + P&L history).
+    The bot win/loss counts live in trade_ledger, which is NOT
+    touched — those stay. Paper only: the paper tables never hold
+    real money, and real balances/trades are nowhere near this
+    function. Raises ValueError for a non-positive amount.
+    """
+    if new_cash is None or float(new_cash) <= 0:
+        raise ValueError("Paper balance must be more than $0.")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.execute(
+        "INSERT INTO paper_portfolio (user_id, cash_usd, updated_at) "
+        "VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+        "cash_usd = excluded.cash_usd, "
+        "updated_at = excluded.updated_at",
+        (user_id, float(new_cash), now))
+    db.execute("DELETE FROM paper_holdings WHERE user_id = ?",
+               (user_id,))
+    db.execute("DELETE FROM paper_trades WHERE user_id = ?",
+               (user_id,))
+    db.commit()
 
 
 def paper_buy(db: sqlite3.Connection, user_id: int, coin: str, usd: float,

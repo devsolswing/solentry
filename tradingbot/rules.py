@@ -246,6 +246,155 @@ def scanner_ruleset() -> dict:
     return copy.deepcopy(SCANNER_RULES)
 
 
+# --- Clyde preset ------------------------------------------------------
+
+CLYDE_CATEGORY = "Clyde"
+CLYDE_PRESET_NAME = "Clyde"
+CLYDE_SCAN_INTERVAL_SECONDS = 30
+CLYDE_BUY_THRESHOLD_PCT = 5.0
+CLYDE_STOP_LOSS_PCT = 4.0
+CLYDE_TOP10_CONCENTRATION_PCT = 12.0
+CLYDE_MIN_MARKET_CAP = 45000.0
+CLYDE_ZSCORE_STD = 2.5
+
+# Clyde's spec, exactly as the owner gave it (2026-11-11): scan the
+# pump.fun trenches every 30 seconds via DexScreener; hard minimum
+# market cap $45,000 CAD before any capital deployment; the top ten
+# holding wallets must command less than 12% of total circulating
+# supply, instantly blacklisting any pool failing this; entry needs
+# an exponential velocity shift in liquidity-pool injections plus a
+# volume-weighted Z-score where buy pressure beats the trailing
+# rolling average by at least 2.5 standard deviations; a hard 4%
+# stop loss on every position; take profit 10% to 30% on standard
+# baseline plays, 31% to 1000% on confirmed structural runners
+# with extreme volume acceleration; systematically swap assets by
+# evicting underperforming coins for higher-velocity trench runners,
+# regardless of the position's current P&L.
+#
+# How each rule maps to the engine (kind "scanner" — the only kind
+# with a 30-second scan and two profit ladders, baseline + runners):
+#   * scan every 30s -> scan_interval_seconds 30.
+#   * min market cap $45,000 CAD -> buy_filter min_market_cap_usd
+#     45000. The engine's field is USD, so storing 45000 there is a
+#     STRICTER bar than $45,000 CAD (about $33,000 USD) — a coin
+#     under $45,000 CAD can never pass. The CAD origin is stated in
+#     CLYDE_NOTES so the unit is never hidden.
+#   * top-10 < 12% -> top10_rug concentration_pct 12.0: the engine
+#     sells everything when a held coin's top-10 share reaches 12%.
+#   * 4% stop loss -> the bot row's stop_loss_pct (a limit, never in
+#     the rule set) AND trailing_stop_pct 4.0.
+#   * take profit baseline 10-30% -> sell_ladder (25% at +10%, 25%
+#     at +20%, 50% at +30%); runners 31-1000% -> trending_ladder
+#     (10% at +31%, +100%, +500%, 70% at +1000%).
+#   * Z-score entry, velocity swap, and the pre-buy top-10
+#     blacklist have NO engine field — they are recorded in
+#     CLYDE_NOTES and shown on the preset list, never pretended to
+#     be enforced. The engine's closest available entry signal is
+#     the scanner's 5% gain in 3 minutes (buy threshold 5.0, and
+#     the buy filter's min_signal_pct 5.0).
+CLYDE_RULES = {
+    "version": 1,
+    "kind": "scanner",
+    "scan_sources": ["pump.fun", "pumpswap"],
+    "scan_interval_seconds": CLYDE_SCAN_INTERVAL_SECONDS,
+    "buy": {"metric": "gain_3m_pct",
+            "window_seconds": SCANNER_BUY_WINDOW_SECONDS,
+            "threshold_pct": CLYDE_BUY_THRESHOLD_PCT,
+            "pick": "strongest"},
+    "sell_ladder": [{"pct_of_position": 25, "profit_pct": 10},
+                    {"pct_of_position": 25, "profit_pct": 20},
+                    {"pct_of_position": 50, "profit_pct": 30}],
+    "trailing_stop_pct": CLYDE_STOP_LOSS_PCT,
+    "rug_sell": dict(RUG_SELL_DEFAULT),
+    "top10_rug": {"drop_pct": 10.0,
+                  "concentration_pct": CLYDE_TOP10_CONCENTRATION_PCT,
+                  "slow_climb_sell_pct": 0.0,
+                  "check_interval_seconds": 15.0},
+    "trending_ladder": [{"pct_of_position": 10, "profit_pct": 31},
+                        {"pct_of_position": 10, "profit_pct": 100},
+                        {"pct_of_position": 10, "profit_pct": 500},
+                        {"pct_of_position": 70, "profit_pct": 1000}],
+    "regime": dict(REGIME_DEFAULT),
+    "buy_filter": {"min_volume_5m_usd": 1000.0,
+                   "require_buy_dominance": True,
+                   "min_signal_pct": CLYDE_BUY_THRESHOLD_PCT,
+                   "min_market_cap_usd": CLYDE_MIN_MARKET_CAP},
+    "max_new_positions_per_scan": 1,
+}
+
+
+def clyde_ruleset() -> dict:
+    """A fresh copy of the Clyde preset."""
+    return copy.deepcopy(CLYDE_RULES)
+
+
+# Rules Clyde states that the engine cannot enforce as written.
+# Shown on the preset list, in plain words, next to the enforced
+# rules — never dropped, never pretended to be enforced.
+CLYDE_NOTES = [
+    "Entry — Z-score: buy pressure must beat the trailing rolling "
+    "average by at least 2.5 standard deviations (volume-weighted "
+    "Z-score), with an exponential velocity shift in "
+    "liquidity-pool injections. The engine has no Z-score field, "
+    "so this is recorded here and the engine enforces the closest "
+    "available signal instead: a coin gaining 5% in 3 minutes.",
+    "Market cap — $45,000 CAD minimum. The engine's market-cap "
+    "field is in USD, so the preset stores $45,000 in that field — "
+    "a stricter bar than $45,000 CAD, so a coin under $45,000 CAD "
+    "can never pass.",
+    "Top-10 — the top 10 wallets must hold less than 12% of "
+    "supply. The engine enforces this as a sell when a held "
+    "coin's top-10 share reaches 12%. It does not pre-screen "
+    "concentration before buying, so a coin already over 12% can "
+    "be bought and is then sold when the top-10 watch runs.",
+    "Portfolio swap — evict underperforming coins for "
+    "higher-velocity trench runners, regardless of the "
+    "position's current P&L. The engine has no velocity-swap "
+    "rule, so this is recorded here — the silent loop does not "
+    "auto-swap positions. Underperformers exit only on the stop "
+    "loss, trailing stop, rug sell, or the ladders.",
+    "Runners — a position follows the runner ladder (31% to "
+    "1000%) when the market regime is trending: 5-minute volume "
+    "at least 2x the hourly pace, buys outnumbering sells, and a "
+    "positive 1-hour change. That is the engine's closest proxy "
+    "for 'extreme volume acceleration'.",
+]
+
+
+def preset_bots() -> list:
+    """The preset bots, in list order — Clyde first, then the
+    existing presets. Each entry carries a fresh copy of its rule
+    set, its plain-words notes, and the Flask endpoint that
+    creates it. The list is data, so a new preset is one more
+    entry here plus its create route."""
+    return [
+        {"key": "clyde",
+         "name": CLYDE_PRESET_NAME,
+         "tagline": "Trench sniper — 30-second scans, strict 12% "
+                    "top-10 cap, 4% stop loss.",
+         "category": CLYDE_CATEGORY,
+         "rules": clyde_ruleset(),
+         "notes": list(CLYDE_NOTES),
+         "endpoint": "bot_preset_clyde"},
+        {"key": "trenches",
+         "name": TRENCHES_PRESET_NAME,
+         "tagline": "Memecoin build — scan the trenches every "
+                    "minute, buy the strongest 5-minute gainer.",
+         "category": TRENCHES_CATEGORY,
+         "rules": trenches_ruleset(),
+         "notes": [],
+         "endpoint": "bot_preset_trenches"},
+        {"key": "scanner",
+         "name": SCANNER_PRESET_NAME,
+         "tagline": "∆scanner∆ sniper — buy any coin gaining 5% in "
+                    "3 minutes.",
+         "category": SCANNER_CATEGORY,
+         "rules": scanner_ruleset(),
+         "notes": [],
+         "endpoint": "bot_preset_scanner"},
+    ]
+
+
 def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 

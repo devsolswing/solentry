@@ -626,6 +626,20 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 .signer-tasks { list-style: none; margin: 4px 0 0; padding: 0; }
 .signer-tasks li { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-top: 1px solid #3a1c10; }
 .signer-tasks a { color: #ffd700; }
+/* Preset bots list: compact black card, gold border, red letters.
+   Hidden until the Presets button opens it. */
+.bots-presets { background: #000; color: #b91c1c; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 0 0 auto; }
+.bots-presets[hidden] { display: none; }
+.bots-presets h2 { color: #b91c1c; margin: 0 0 4px; }
+.bots-presets .muted { color: #7f1d1d; }
+.preset-card { border-top: 1px solid #3a1c10; padding: 8px 0 4px; }
+.preset-card:first-of-type { border-top: 0; }
+.preset-name { margin: 0 0 4px; }
+.preset-name strong { color: #ffd700; font-size: 17px; }
+.preset-rules { margin: 0 0 6px; padding-left: 18px; font-size: 13px; line-height: 1.45; }
+.preset-rules li { margin: 2px 0; }
+.preset-rules .preset-note { color: #ffd700; }
+.bots-presets .btn.small { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
 .wallet-rotator { display: flex; align-items: center; gap: 8px; }
 .wallet-arrow { flex: 0 0 auto; background: #b91c1c; color: #ffd700; border-color: #7f1d1d; }
 .wallet-panels { flex: 1 1 auto; min-width: 0; }

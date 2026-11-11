@@ -12,6 +12,7 @@ from tradingbot.config import Config
 from tradingbot.db import init_db
 from tradingbot.ledger import (bot_wl_summary, record_trade,
                                recent_trades)
+from tradingbot.paper import paper_cash
 from tradingbot.rules import validate_ruleset
 from tradingbot.scanner import (BUY_FILTER_DEFAULT,
                                 check_top10_concentration,
@@ -889,6 +890,143 @@ class TestBuilderBotHttp(unittest.TestCase):
         self.assertEqual(self.db.execute(
             "SELECT COUNT(*) c FROM builderbot_adjustments "
             "WHERE bot_id = ?", (bot["id"],)).fetchone()["c"], 0)
+
+
+class TestPaperReset(BuilderBotBase):
+    """builderBot 'Add cad': reset the paper balance to any amount.
+
+    The command works from the builderBot chatbox: "Add cad" asks
+    "How much would you like to start with?", a positive number
+    becomes the new paper balance, and the paper positions,
+    holdings and P&L history reset to a fresh start. ONLY the bot
+    win/loss counts stay (they live in trade_ledger, never
+    touched). Paper only — real mode is never touched.
+    """
+
+    def _seed_paper(self):
+        # A paper holding + paper trade history to be cleared, and a
+        # bot with a win and a loss in the ledger to be kept.
+        self.db.execute(
+            "INSERT INTO paper_holdings (user_id, coin_id, amount, "
+            "avg_price) VALUES (1, 'SOL', 2.0, 10.0)")
+        self.db.execute(
+            "INSERT INTO paper_trades (user_id, coin_id, side, amount, "
+            "price, total_usd, created_at) VALUES (1, 'SOL', 'buy', "
+            "1.0, 10.0, 10.0, '2026-01-01T00:00:00Z')")
+        cur = self.db.execute(
+            "INSERT INTO bots (user_id, name, coins, strategy, "
+            "category, buy_size_pct, stop_loss_pct, max_open_trades, "
+            "platform, mode, silent, rules_json, api_token_hash, "
+            "created_at) VALUES "
+            "(1, 'Luna', '[]', 'balanced', '', 20, 7, 3, 'pump.fun', "
+            "'paper', 0, '', 'x', '2026-01-01T00:00:00Z')")
+        self.db.commit()
+        bot_id = cur.lastrowid
+        record_trade(self.db, 1, bot_id, "A", "sell", 1.0, 110.0,
+                     110.0, pnl_usd=10.0, mode="paper",
+                     now="2026-01-01T00:00:00Z")
+        record_trade(self.db, 1, bot_id, "B", "sell", 1.0, 90.0,
+                     90.0, pnl_usd=-10.0, mode="paper",
+                     now="2026-01-01T00:01:00Z")
+        # A real-mode ledger row: real is never touched.
+        record_trade(self.db, 1, bot_id, "C", "sell", 1.0, 110.0,
+                     110.0, pnl_usd=10.0, mode="real",
+                     now="2026-01-01T00:02:00Z")
+        return bot_id
+
+    def _last_bot_text(self, result):
+        return result["messages"][-1]["text"]
+
+    def test_add_cad_asks_how_much(self):
+        bb.start_conversation(self.db, self.user_id, self.enc_key)
+        result = bb.answer(self.db, self.user_id, self.enc_key,
+                           "Add cad")
+        self.assertEqual(self._last_bot_text(result),
+                         "How much would you like to start with?")
+        # The balance is untouched until a number is given.
+        self.assertEqual(paper_cash(self.db, 1), 100.0)
+
+    def test_add_cad_case_insensitive(self):
+        bb.start_conversation(self.db, self.user_id, self.enc_key)
+        result = bb.answer(self.db, self.user_id, self.enc_key,
+                           "ADD CAD")
+        self.assertEqual(self._last_bot_text(result),
+                         "How much would you like to start with?")
+
+    def test_numeric_answer_resets_paper_keeps_wl(self):
+        bot_id = self._seed_paper()
+        before = bot_wl_summary(self.db, bot_id)
+        self.assertEqual((before["wins"], before["losses"]), (2, 1))
+        bb.start_conversation(self.db, self.user_id, self.enc_key)
+        bb.answer(self.db, self.user_id, self.enc_key, "Add cad")
+        result = bb.answer(self.db, self.user_id, self.enc_key, "500")
+        self.assertIn("$500 CAD", self._last_bot_text(result))
+        self.assertEqual(paper_cash(self.db, 1), 500.0)
+        # Positions, holdings and P&L history are gone.
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM paper_holdings WHERE user_id = 1"
+            ).fetchone()[0], 0)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE user_id = 1"
+            ).fetchone()[0], 0)
+        # ONLY the bot win/loss counts stay — same wins, same
+        # losses — and the real-mode row is untouched too.
+        after = bot_wl_summary(self.db, bot_id)
+        self.assertEqual((after["wins"], after["losses"]), (2, 1))
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM trade_ledger WHERE user_id = 1 "
+            "AND mode = 'real'").fetchone()[0], 1)
+        self.assertEqual(result.get("paper_reset"), 500.0)
+
+    def test_dollar_amount_and_k_suffix(self):
+        bb.start_conversation(self.db, self.user_id, self.enc_key)
+        bb.answer(self.db, self.user_id, self.enc_key, "Add cad")
+        result = bb.answer(self.db, self.user_id, self.enc_key, "$1k")
+        self.assertIn("$1,000 CAD", self._last_bot_text(result))
+        self.assertEqual(paper_cash(self.db, 1), 1000.0)
+
+    def test_non_numeric_rejected_without_reset(self):
+        self._seed_paper()
+        bb.start_conversation(self.db, self.user_id, self.enc_key)
+        bb.answer(self.db, self.user_id, self.enc_key, "Add cad")
+        result = bb.answer(self.db, self.user_id, self.enc_key,
+                           "banana")
+        self.assertIn("doesn't look like a number",
+                      self._last_bot_text(result))
+        self.assertEqual(paper_cash(self.db, 1), 100.0)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM paper_holdings WHERE user_id = 1"
+            ).fetchone()[0], 1)
+        self.assertNotIn("paper_reset", result)
+
+    def test_zero_and_negative_rejected_without_reset(self):
+        self._seed_paper()
+        bb.start_conversation(self.db, self.user_id, self.enc_key)
+        bb.answer(self.db, self.user_id, self.enc_key, "Add cad")
+        result = bb.answer(self.db, self.user_id, self.enc_key, "0")
+        self.assertIn("more than $0", self._last_bot_text(result))
+        self.assertEqual(paper_cash(self.db, 1), 100.0)
+        # Still in the ask — a valid number after the rejection works.
+        result = bb.answer(self.db, self.user_id, self.enc_key, "-50")
+        self.assertIn("more than $0", self._last_bot_text(result))
+        self.assertEqual(paper_cash(self.db, 1), 100.0)
+        result = bb.answer(self.db, self.user_id, self.enc_key, "250")
+        self.assertIn("$250 CAD", self._last_bot_text(result))
+        self.assertEqual(paper_cash(self.db, 1), 250.0)
+
+    def test_cancel_backs_out_without_reset(self):
+        self._seed_paper()
+        bb.start_conversation(self.db, self.user_id, self.enc_key)
+        bb.answer(self.db, self.user_id, self.enc_key, "Add cad")
+        result = bb.answer(self.db, self.user_id, self.enc_key,
+                           "cancel")
+        self.assertIn("nothing was changed",
+                      self._last_bot_text(result))
+        self.assertEqual(paper_cash(self.db, 1), 100.0)
+        # The bot-building conversation is untouched — the next
+        # message answers the first question again.
+        result = bb.answer(self.db, self.user_id, self.enc_key, "Luna")
+        self.assertNotIn("paper_reset", result)
 
 
 if __name__ == "__main__":

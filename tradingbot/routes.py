@@ -61,10 +61,13 @@ from .builderbot import list_adjustments
 from .home_holdings import (enrich_row, fetch_chain_token_balances,
                             reconcile_holdings, sparkline_svg_1h)
 from .ledger import bot_wl_summary, recent_trades
-from .rules import (RUG_SELL_DEFAULT, SCANNER_CATEGORY, SCANNER_DISPLAY,
+from .rules import (CLYDE_CATEGORY, CLYDE_PRESET_NAME,
+                    CLYDE_STOP_LOSS_PCT, RUG_SELL_DEFAULT,
+                    SCANNER_CATEGORY, SCANNER_DISPLAY,
                     SCANNER_PRESET_NAME, TRENCHES_CATEGORY,
-                    TRENCHES_PRESET_NAME, load_rules, scanner_ruleset,
-                    summarize_rules, trenches_ruleset, validate_ruleset)
+                    TRENCHES_PRESET_NAME, clyde_ruleset, load_rules,
+                    preset_bots, scanner_ruleset, summarize_rules,
+                    trenches_ruleset, validate_ruleset)
 from .security import (decrypt_secret, encrypt_secret, hash_password,
                        hash_token, new_csrf_token, new_token,
                        temporary_secret, verify_password, verify_turnstile,
@@ -3297,6 +3300,20 @@ def register_routes(app: Flask) -> None:
                 "AND mode = 'real'", (user["id"],)).fetchone()[0]
         except Exception:
             signing_tx_count = None
+        # Preset bots for the Preset button on Page 6 (Clyde first,
+        # then Trenches, then Scanner): each entry carries its
+        # plain-words rules (from summarize_rules) plus its notes —
+        # the rules the engine cannot enforce as written, stated
+        # plainly — and the URL that creates it. The list is data
+        # (rules.preset_bots), so a new preset is one more entry.
+        presets = [{
+            "key": p["key"],
+            "name": p["name"],
+            "tagline": p["tagline"],
+            "rules_lines": summarize_rules(p["rules"]).split("\n"),
+            "notes": p["notes"],
+            "create_url": url_for(p["endpoint"]),
+        } for p in preset_bots()]
         return render_template("bots.html", **data,
                                memecoin_bots=memecoin_bots,
                                platforms=platforms_mod.PLATFORMS,
@@ -3305,7 +3322,8 @@ def register_routes(app: Flask) -> None:
                                platform_wallets=platforms_mod.get_platform_wallets(
                                    _db(app), user["id"]),
                                signing_tasks=signing_tasks,
-                               signing_tx_count=signing_tx_count)
+                               signing_tx_count=signing_tx_count,
+                               presets=presets)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required
@@ -3413,6 +3431,12 @@ def register_routes(app: Flask) -> None:
         if result.get("created"):
             _log(app, user["id"], "bot_create",
                  "Created a bot with builderBot.", "")
+        if result.get("paper_reset") is not None:
+            _log(app, user["id"], "paper_reset",
+                 f"Paper balance reset to "
+                 f"${result['paper_reset']:,.2f} CAD via builderBot "
+                 f"(paper positions and history cleared; bot "
+                 f"win/loss counts kept).", "paper")
         return jsonify(result)
 
     @app.route("/bots/preset/trenches", methods=["POST"])
@@ -3488,6 +3512,45 @@ def register_routes(app: Flask) -> None:
               f"({SCANNER_DISPLAY}, paper). Turn silent trading on when "
               f"you are ready — it only trades within its rules and "
               f"limits.")
+        return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
+
+    @app.route("/bots/preset/clyde", methods=["POST"])
+    @login_required
+    def bot_preset_clyde():
+        """Create the Clyde preset bot.
+
+        Paper mode, silent off. One per user — if a Clyde bot
+        already exists, go to it instead of making a duplicate.
+        Stop loss 4% (Clyde's hard number, on the bot row), buy
+        size 20% and max 3 open trades (the preset defaults).
+        """
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        existing = db.execute(
+            "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+            "AND name = ?",
+            (user["id"], CLYDE_CATEGORY, CLYDE_PRESET_NAME)).fetchone()
+        if existing:
+            flash("You already have a Clyde bot.")
+            return redirect(url_for("bot_detail", bot_id=existing["id"]))
+        token = new_token()
+        cur = db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash, category, rules_json, platform) "
+            "VALUES (?, ?, 'bold', '[]', 20, ?, 'paper', 0, 3, ?, ?, ?, "
+            "'pump.fun')",
+            (user["id"], CLYDE_PRESET_NAME, CLYDE_STOP_LOSS_PCT,
+             hash_token(token), CLYDE_CATEGORY,
+             json.dumps(clyde_ruleset())))
+        db.commit()
+        _log(app, user["id"], "bot_create",
+             f"Created bot '{CLYDE_PRESET_NAME}' (Clyde preset, "
+             f"paper). Silent trading is off.", "paper")
+        flash(f"Created the {CLYDE_PRESET_NAME} bot (Clyde preset, "
+              f"paper). Turn silent trading on when you are ready — "
+              f"it only trades within its rules and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
     @app.route("/bots/<int:bot_id>")

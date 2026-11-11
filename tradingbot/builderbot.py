@@ -49,6 +49,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from .ledger import bot_wl_summary
+from .paper import reset_paper_balance
 from .rules import (REGIME_DEFAULT, SLOW_LADDER, TRENDING_LADDER,
                     load_rules, summarize_rules, validate_ruleset)
 from .scanner import BUY_FILTER_DEFAULT
@@ -513,7 +514,9 @@ def _public_state(state: dict) -> dict:
     """What the chatbox page shows: the message history, the current
     suggestions, and whether it is waiting on a confirmation."""
     step = state.get("step")
-    if step == "confirm":
+    if state.get("pending") == "paper_reset":
+        suggestions = ["$100", "$500", "$1,000"]
+    elif step == "confirm":
         suggestions = ["Yes", "No, start over"]
     elif isinstance(step, int) and 0 <= step < len(STEPS):
         suggestions = list(STEPS[step]["suggestions"])
@@ -676,6 +679,84 @@ def _confirmation_text(answers: dict, rules: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_cad(amount: float) -> str:
+    """$500 / $1,000 / $1,250.50 — whole dollars without decimals."""
+    if float(amount) == int(amount):
+        return f"${int(amount):,}"
+    return f"${float(amount):,.2f}"
+
+
+def _answer_paper_reset(db, user_id: int, enc_key: bytes, state: dict,
+                        cleaned: str) -> dict:
+    """One turn of the 'Add cad' paper-reset flow. `state` already
+    carries pending='paper_reset' and the user's message is already
+    appended. Returns the public state (plus paper_reset on success,
+    so the route can log it). The reset is paper only: it touches
+    only this user's paper tables, and the bot win/loss counts
+    (trade_ledger) are never touched."""
+    text = cleaned.strip()
+    if text.lower() == "cancel":
+        # Back out of the reset — the bot-building conversation is
+        # untouched, and the next message answers its question.
+        state.pop("pending", None)
+        step = state.get("step")
+        if isinstance(step, int) and 0 <= step < len(STEPS):
+            state["messages"].append(
+                {"role": "builderbot",
+                 "text": "No problem — nothing was changed. "
+                         + _question_text(STEPS[step])})
+        elif step == "confirm":
+            state["messages"].append(
+                {"role": "builderbot",
+                 "text": "No problem — nothing was changed. Reply "
+                         "\"yes\" to create the bot, or \"no\" to "
+                         "start over."})
+        else:
+            state["messages"].append(
+                {"role": "builderbot",
+                 "text": "No problem — nothing was changed."})
+        _save_state(db, user_id, enc_key, state)
+        return _public_state(state)
+    amount = _parse_money(text)
+    if amount is None and text.lstrip().startswith("-"):
+        # A negative number is a number below zero, not "not a
+        # number" — _parse_money has no minus sign, so parse the
+        # magnitude and negate it to get the right rejection.
+        magnitude = _parse_money(text.lstrip()[1:])
+        if magnitude is not None:
+            amount = -magnitude
+    if amount is None:
+        state["messages"].append(
+            {"role": "builderbot",
+             "text": "That doesn't look like a number — type an "
+                     "amount like $500, or 1000. Nothing was "
+                     "changed. How much would you like to start "
+                     "with?"})
+        _save_state(db, user_id, enc_key, state)
+        return _public_state(state)
+    if amount <= 0:
+        state["messages"].append(
+            {"role": "builderbot",
+             "text": "The amount has to be more than $0 — type a "
+                     "positive amount like $500. Nothing was "
+                     "changed. How much would you like to start "
+                     "with?"})
+        _save_state(db, user_id, enc_key, state)
+        return _public_state(state)
+    reset_paper_balance(db, user_id, amount)
+    state.pop("pending", None)
+    state["messages"].append(
+        {"role": "builderbot",
+         "text": f"Done — your paper balance is now "
+                 f"{_fmt_cad(amount)} CAD. Your paper positions, "
+                 f"holdings, and P&L history are reset to a fresh "
+                 f"start. Your bots' win/loss counts are unchanged."})
+    _save_state(db, user_id, enc_key, state)
+    result = _public_state(state)
+    result["paper_reset"] = amount
+    return result
+
+
 def answer(db, user_id: int, enc_key: bytes, raw_text: str) -> dict:
     """One chatbox turn. Returns the public state (messages,
     suggestions, confirm/done flags) plus, on completion,
@@ -698,6 +779,20 @@ def answer(db, user_id: int, enc_key: bytes, raw_text: str) -> dict:
         return _public_state(state)
     # Only the scrubbed text is ever stored or logged.
     state["messages"].append({"role": "user", "text": cleaned})
+
+    # "Add cad" command: reset the paper balance to a fresh start.
+    # A command, not an answer to the current bot-building
+    # question — it works at any step, and the pending flag carries
+    # the ask across turns. Paper only, never real.
+    if state.get("pending") == "paper_reset":
+        return _answer_paper_reset(db, user_id, enc_key, state, cleaned)
+    if cleaned.strip().lower() == "add cad":
+        state["pending"] = "paper_reset"
+        state["messages"].append(
+            {"role": "builderbot",
+             "text": "How much would you like to start with?"})
+        _save_state(db, user_id, enc_key, state)
+        return _public_state(state)
 
     step = state["step"]
     if step == "confirm":

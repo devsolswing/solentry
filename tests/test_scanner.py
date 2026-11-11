@@ -1147,7 +1147,10 @@ class TestScannerRoutes(unittest.TestCase):
     def test_bots_page_has_no_standalone_scanner_card(self):
         # The scanner lives in Edit Bots under the Memecoin build
         # category now — its standalone card on the Bots page is
-        # gone, preset route and agent flow unchanged.
+        # gone, preset route and agent flow unchanged. It appears
+        # on the Bots page only in the preset list (Clyde first,
+        # then Trenches, then Scanner) and as the bot itself in
+        # the carousel.
         token = csrf(self.client, "/bots")
         self.client.post("/bots/preset/scanner",
                          data={"csrf_token": token}, follow_redirects=False)
@@ -1157,7 +1160,9 @@ class TestScannerRoutes(unittest.TestCase):
         resp = self.client.get("/bots")
         html = resp.get_data(as_text=True)
         self.assertNotIn("Create the Scanner bot", html)
-        self.assertNotIn(SCANNER_DISPLAY, html)
+        # "∆scanner∆" appears only in the Scanner preset's tagline.
+        self.assertIn('data-preset="scanner"', html)
+        self.assertEqual(html.count(SCANNER_DISPLAY), 1)
         # The scanner bot itself still lists with the other bots.
         self.assertIn("Scanner", html)
 

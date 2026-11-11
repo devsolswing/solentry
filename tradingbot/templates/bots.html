@@ -29,6 +29,7 @@
 
   <div class="bot-actions">
     <a class="btn action-btn" href="{{ url_for('bot_create') }}" aria-label="Add a bot">+ Add Bot</a>
+    <button class="btn action-btn" type="button" data-presets-toggle aria-expanded="false" aria-controls="preset-list">Presets</button>
     {% if bots %}
     <a class="btn danger action-btn" data-delete-target href="{{ url_for('bot_delete_confirm', bot_id=bots[0].id) }}" aria-label="Delete the bot in view">− Delete</a>
     <a class="btn action-btn edit-btn" data-edit-target href="{{ url_for('bot_edit', bot_id=bots[0].id) }}">Edit Bot ✏️</a>
@@ -36,6 +37,24 @@
     <button class="btn danger action-btn" type="button" disabled aria-label="Delete a bot">− Delete</button>
     <button class="btn action-btn edit-btn" type="button" disabled>Edit Bot ✏️</button>
     {% endif %}
+  </div>
+
+  <div class="card bots-presets" id="preset-list" hidden>
+    <h2>Preset bots</h2>
+    <p class="muted small">Ready-made bots, Clyde first. Tap Create to add one — it starts in paper mode with silent trading off, and only trades within its rules and limits.</p>
+    {% for p in presets %}
+    <div class="preset-card" data-preset="{{ p.key }}">
+      <p class="preset-name"><strong>{{ p.name }}</strong> <span class="muted small">{{ p.tagline }}</span></p>
+      <ul class="preset-rules">
+        {% for line in p.rules_lines %}<li>{{ line }}</li>{% endfor %}
+        {% for note in p.notes %}<li class="preset-note">{{ note }}</li>{% endfor %}
+      </ul>
+      <form method="post" action="{{ p.create_url }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn small" type="submit">Create {{ p.name }}</button>
+      </form>
+    </div>
+    {% endfor %}
   </div>
 
   <div class="carousel-head">
@@ -117,6 +136,16 @@
 </div>
 
 <script nonce="{{ csp_nonce }}">
+const presetsToggle = document.querySelector('[data-presets-toggle]');
+const presetList = document.getElementById('preset-list');
+if (presetsToggle && presetList) {
+  presetsToggle.addEventListener('click', () => {
+    const open = presetList.hasAttribute('hidden');
+    if (open) { presetList.removeAttribute('hidden'); }
+    else { presetList.setAttribute('hidden', ''); }
+    presetsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+}
 const botsLog = document.getElementById('bots-chat-log');
 document.getElementById('bots-chat-form').addEventListener('submit', async (e) => {
   e.preventDefault();

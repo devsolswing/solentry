@@ -39,7 +39,11 @@ class TestBotsPage6(UiBase):
         self._choose_mode("paper")
         html = self._html("/bots")
         self.assertNotIn("page-scroll-panel", html)
-        self.assertNotIn("Memecoin build", html)
+        # "Memecoin build" now appears ONLY in the preset list
+        # (the Trenches preset's tagline) — the old lower
+        # scrolling section's Memecoin build card is gone.
+        self.assertIn('data-preset="trenches"', html)
+        self.assertEqual(html.count("Memecoin build"), 1)
         # The Trenches card/link in the page body is gone (the
         # page-id picker in the topbar still lists every page,
         # including Trenches — that is a different link).
