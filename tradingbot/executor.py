@@ -65,6 +65,7 @@ from .fees import INCINERATOR_PUBKEY
 from .fees import fee_split_lamports
 from .fees import get_fee_recipient_pubkey
 from .security import decrypt_secret_mutable, wipe_secret
+from .wallet_keys import decrypt_wallet_secret
 from .signing_bot import ensure_signing_bot
 from .solana import (SYSTEM_PROGRAM, RpcError, SolanaRpcClient,
                      base58_encode, build_message,
@@ -175,17 +176,20 @@ def _load_wallet(db, user_id: int, cfg: Config):
     a finally block before this function returns — it never leaves
     this function alive, on success or on failure. Only the 32-byte
     seed leaves, as its own bytearray, and the caller must wipe it
-    in its own finally block."""
+    in its own finally block. The wallet secret is decrypted through
+    the password+email user-key layer (wallet_keys) — v1 wallets
+    (server key only) and v2 wallets (user key, unwrapped with the
+    server key) both work here, so the signing bot keeps signing
+    while the user is offline."""
     row = db.execute(
-        "SELECT pubkey, encrypted_secret FROM wallets WHERE user_id = ?",
+        "SELECT pubkey FROM wallets WHERE user_id = ?",
         (user_id,)).fetchone()
     if not row:
         return None, None
     secret = None
     try:
-        secret = decrypt_secret_mutable(row["encrypted_secret"],
-                                        cfg.encryption_key)
-        if len(secret) != 64:
+        secret = decrypt_wallet_secret(db, user_id, cfg.encryption_key)
+        if secret is None or len(secret) != 64:
             return None, None
         seed = bytearray(secret[:32])
         if base58_encode(ed25519_publickey_from_seed(seed)) != row["pubkey"]:

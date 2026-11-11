@@ -25,6 +25,10 @@ def make_config(tmpdir: str) -> Config:
         "DATABASE_PATH": os.path.join(tmpdir, "test.db"),
         "PAPER_START_CASH": "100",
         "FEE_RECIPIENT_PUBKEY": TEST_FEE_RECIPIENT,
+        # Tests only: the Security bot's codes are echoed in the
+        # signup/recovery popup so the flow can be tested without
+        # SMTP. Never set in production.
+        "SECURITY_CODE_DEV_ECHO": "1",
     }
     return Config(env=env)
 
@@ -44,11 +48,36 @@ def csrf(client, path: str) -> str:
     return m.group(1)
 
 
-def signup(client, username: str, password: str = "password123"):
+def signup(client, username: str, password: str = "password123",
+           email: str | None = None):
+    """Two-step signup: POST /signup (creates a pending signup and
+    the Security bot's code, echoed in the popup under the test
+    dev-echo flag), then POST /signup/verify-code with the code.
+    Returns the final response (302 to /wallet on success, or the
+    first response when the signup itself was refused)."""
     token = csrf(client, "/signup")
-    return client.post("/signup", data={
+    resp = client.post("/signup", data={
         "csrf_token": token, "username": username, "password": password,
+        "email": email or f"{username}@example.com",
     }, follow_redirects=False)
+    if resp.status_code != 200:
+        return resp
+    html = resp.get_data(as_text=True)
+    m = re.search(r"your code is (\d{4})", html)
+    assert m, "no dev code in signup popup"
+    token = csrf(client, "/signup")
+    return client.post("/signup/verify-code", data={
+        "csrf_token": token, "code": m.group(1),
+    }, follow_redirects=False)
+
+
+def dev_code_from_signup(resp) -> str:
+    """The Security bot's code, echoed in the signup popup under
+    the test dev-echo flag."""
+    html = resp.get_data(as_text=True)
+    m = re.search(r"your code is (\d{4})", html)
+    assert m, "no dev code in signup popup"
+    return m.group(1)
 
 
 def login(client, username: str, password: str = "password123"):

@@ -59,6 +59,52 @@ def hash_password(password: str) -> tuple[str, str]:
     return salt.hex(), digest.hex()
 
 
+def _account_password_material(password: str, email: str) -> bytes:
+    """The scrypt input for an ACCOUNT password: the password plus
+    the account's email, domain-separated. The email is a required
+    second factor — the hash cannot be verified without it, and a
+    leaked hash alone cannot be brute-forced without knowing the
+    email it is bound to."""
+    return ("password\x00" + password + "\x00"
+            + (email or "").strip().lower()).encode("utf-8")
+
+
+def hash_account_password(password: str, email: str) -> tuple[str, str]:
+    """Return (salt_hex, hash_hex) for an account password bound to
+    its email. New accounts use this; the recovery-question answer
+    keeps the plain hash_password (it is not an account password)."""
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(
+        _account_password_material(password, email),
+        salt=salt,
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        dklen=_SCRYPT_DKLEN,
+    )
+    return salt.hex(), digest.hex()
+
+
+def verify_account_password(password: str, email: str, salt_hex: str,
+                            hash_hex: str) -> bool:
+    """Constant-time account-password check (password + email).
+    Returns False on any malformed input."""
+    try:
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(hash_hex)
+    except ValueError:
+        return False
+    digest = hashlib.scrypt(
+        _account_password_material(password, email),
+        salt=salt,
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        dklen=_SCRYPT_DKLEN,
+    )
+    return hmac.compare_digest(digest, expected)
+
+
 def verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
     """Constant-time password check. Returns False on any malformed input."""
     try:

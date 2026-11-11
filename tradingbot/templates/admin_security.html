@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Admin — Account Security — SolEntry{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Admin — Account Security</h1>
+  <p class="muted">Owner-only overrides for when something goes wrong with an account. Every action here is logged (kind "admin_override") so there is an audit trail of who overrode what, when. Nothing here emails anyone — the only emails the app ever sends are the Security bot's two codes (signup + recovery). If you reset a password, give the user the new password yourself.</p>
+
+  <h2>Users</h2>
+  {% if users %}
+  <ul>
+    {% for u in users %}
+    <li>
+      <b>{{ u.username }}</b> — {{ u.email if u.email else "no email" }}
+      {% if u.username in locked %}<b style="color:#ff2d20">[LOCKED OUT]</b>{% endif %}
+      {% if not u.recovery_question %}<span class="muted">(no security question)</span>{% endif %}
+      <span class="muted small">password v{{ u.pw_version }} · joined {{ u.created_at[:10] }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No users yet.</p>
+  {% endif %}
+
+  <h2>Reset a password</h2>
+  <form method="post" action="{{ url_for('admin_security_reset_password') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username<input name="username" required placeholder="Username"></label>
+    <label>New password<input name="new_password" type="password" required placeholder="New password (min 8 characters)"></label>
+    <button class="btn big" type="submit">Reset password</button>
+  </form>
+
+  <h2>Clear a login lockout</h2>
+  <form method="post" action="{{ url_for('admin_security_clear_lockout') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username<input name="username" required placeholder="Username"></label>
+    <button class="btn" type="submit">Clear lockout</button>
+  </form>
+
+  <h2>Void a user's email codes</h2>
+  <form method="post" action="{{ url_for('admin_security_void_codes') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username<input name="username" required placeholder="Username"></label>
+    <button class="btn" type="submit">Void codes</button>
+  </form>
+
+  <h2>Pending signups (waiting on their email code)</h2>
+  {% if pending %}
+  <ul>
+    {% for p in pending %}
+    <li>
+      <b>{{ p.username }}</b> — {{ p.email }}
+      <form method="post" action="{{ url_for('admin_security_approve_signup') }}" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="pending_id" value="{{ p.id }}">
+        <button class="btn ghost" type="submit">Approve (bypass code)</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No pending signups.</p>
+  {% endif %}
+
+  <p><a href="{{ url_for('admin_donations') }}">← Donations</a></p>
+  <p><a href="{{ url_for('wallet') }}">← Back to wallet</a></p>
+</div>
+{% endblock %}

@@ -203,11 +203,14 @@ class ExecutorBase(unittest.TestCase):
         ).fetchone()["id"]
         # Throwaway wallet (never funded, never on-chain) in place of
         # the signup wallet, so the executor signs with a known key.
+        # The blob is encrypted with the server key, so this is a
+        # v1 wallet — say so, or the v2 (user-key) decrypt path
+        # would rightly refuse it.
         self.seed, self.pubkey, secret64 = generate_keypair()
         blob = encrypt_secret(secret64, self.cfg.encryption_key)
         self.db.execute(
-            "UPDATE wallets SET pubkey = ?, encrypted_secret = ? "
-            "WHERE user_id = ?",
+            "UPDATE wallets SET pubkey = ?, encrypted_secret = ?, "
+            "enc_version = 1 WHERE user_id = ?",
             (self.pubkey, blob, self.user_id))
         self.db.commit()
         _, self.mint, _ = generate_keypair()

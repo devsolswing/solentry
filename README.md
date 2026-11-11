@@ -552,6 +552,43 @@ redeploys unless a volume is attached — attach a Railway volume at the
 `DATABASE_PATH` location before real users sign up). For mainnet, set
 `NETWORK=mainnet` only on explicit config, after a devnet shakedown.
 
+## Email codes (Security bot) — SMTP setup
+
+Signup and account recovery are confirmed by a 4-digit code the
+**Security bot** emails to the user's email address. The Security bot
+is server-side only — it is not part of any user's account, users have
+no access to it (no UI, no chat, no route), and it only ever sends
+these two codes: the signup confirmation code (after pressing Create
+on Page 2) and the account-recovery code (Recover Account on Page 1).
+There is no other channel by which the app sends account information
+to users. The owner (admin) can override a stuck account from
+`/admin/security` (reset password / clear lockout / approve a signup
+without the code / void codes); every override is logged
+(kind `admin_override`) and never emails anyone.
+
+**SMTP — required for real emails.** Set these service variables on
+Railway (values are yours; never put a password in code or the repo):
+- `SMTP_HOST` — e.g. `smtp.gmail.com`
+- `SMTP_PORT` — e.g. `587` (STARTTLS) or `465` (SSL)
+- `SMTP_USER` — the mailbox that sends the codes, e.g.
+  `mintendont94@gmail.com`
+- `SMTP_PASSWORD` — the mailbox password / app password (for Gmail,
+  an app password — a normal account password does not work with
+  2-step verification on)
+- `SMTP_FROM` — the From address shown to users, e.g.
+  `mintendont94@gmail.com` (defaults to `SMTP_USER`)
+- `SMTP_USE_TLS` — `1` for STARTTLS on port 587 (default), `0` for
+  implicit SSL on port 465
+
+Without SMTP configured, signup and Recover Account fail closed: the
+user is told plainly "Email is not set up yet" and no account is
+created / no code is issued. Codes are 4 digits, single-use, expire
+after 10 minutes, and are voided after 5 wrong tries; only a SHA-256
+hash is stored and the code is never logged. **Test-only fallback:**
+`SECURITY_CODE_DEV_ECHO=1` returns the code in the popup instead of
+sending email, so the flow can be tested without SMTP — never set it
+in production.
+
 ## Live price feed (WebSocket)
 
 One feed serves the whole app (`tradingbot/livefeed.py`): the server
@@ -738,9 +775,19 @@ never charged, and every user's fee total starts at zero.
 No app is unhackable, and this one does not claim to be. What it does:
 
 - **Passwords are irreversibly hashed** (scrypt, per-user salt). A
-  stolen database gives an attacker hashes, not passwords.
+  stolen database gives an attacker hashes, not passwords. Since
+  2026-11-11 the password hash is bound to the account email too
+  (v2: `scrypt(password + "|" + email)`), so the email is a required
+  second factor to unlock the account.
 - **Wallet keys are encrypted at rest** (AES-256-GCM, key from the
   `ENCRYPTION_KEY` env var only — never in code or the repo).
+  Since 2026-11-11 the wallet key is encrypted with a user key
+  derived from BOTH the password and the email (v2: scrypt
+  password+email → user key → wrapped with the server key), so the
+  email is a required second factor to unlock the wallet key.
+  Older (v1) accounts are upgraded transparently at their next
+  login: the wallet is re-encrypted with the new scheme and the
+  password re-hashed, before the session is rotated.
 - **Keys are wiped from memory the moment a transaction is done.**
   The key is decrypted into a mutable buffer, used for one signature,
   and overwritten with zeros in a `finally` block — on success,

@@ -4,6 +4,11 @@
 <div class="card narrow">
   <h1>Account settings</h1>
 
+  <h2>Personal Details</h2>
+  <p class="muted">Your account is linked to this email — it is where the Security bot sends your confirmation and recovery codes. It cannot be changed here; if it is wrong, contact support.</p>
+  <p>Username: <b>{{ username }}</b></p>
+  <p>Email: <b>{{ email if email else "—" }}</b></p>
+
   <h2>Recovery question</h2>
   <p class="muted">If you forget your password, the forgot-password page will ask you this question. Pick something only you know — the answer is stored hashed, like your password, and never shown anywhere.</p>
   {% if has_recovery %}

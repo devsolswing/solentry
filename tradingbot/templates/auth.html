@@ -62,6 +62,37 @@
   </div>
 </div>
 
+{% if show_code_popup %}
+{# Email confirmation popup (Security bot): after pressing Create,
+   the Security bot emails a 4-digit code; entering it here
+   finishes account creation. The popup is server-rendered so it
+   works with no JavaScript. #}
+<div class="overlay">
+  <div class="coin-popup">
+    <p class="popup-head"><a class="popup-close" href="{{ url_for('signup') }}" aria-label="Close">✕</a></p>
+    <h3>Check your email</h3>
+    <p>We sent a 4-digit code to <b>{{ pending_email }}</b>. Enter it below to finish creating your account. The code expires in 10 minutes and can only be used once.</p>
+    {% if code_error %}
+    <p style="color:#ff2d20;font-weight:800">{{ code_error }}</p>
+    {% endif %}
+    {% if dev_code %}
+    <p style="color:#ffd700;font-weight:800">DEV ONLY — email is not configured in this test build; your code is {{ dev_code }}.</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('signup_verify_code') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="fox-field">
+        <span class="fox-icon" aria-hidden="true">✉️</span>
+        <input type="text" name="code" required inputmode="numeric"
+               pattern="[0-9]{4}" maxlength="4" autocomplete="one-time-code"
+               placeholder="4-digit code" aria-label="4-digit code">
+      </div>
+      <button class="fox-btn fox-btn-gold" type="submit">Verify code</button>
+    </form>
+    <p class="muted small">Didn't get it? Check spam, then press Create Account again for a new code.</p>
+  </div>
+</div>
+{% endif %}
+
 <script nonce="{{ csp_nonce }}">
 (function () {
   var pw = document.getElementById('fox-password');

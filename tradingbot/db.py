@@ -404,6 +404,49 @@ CREATE TABLE IF NOT EXISTS builderbot_adjustments (
     FOREIGN KEY (bot_id) REFERENCES bots (id),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
+
+-- Security bot email codes (signup confirmation + account
+-- recovery). Only the SHA-256 hash of (per-code salt + code) is
+-- stored — the 4-digit code itself is never stored and never
+-- logged. Single-use (used=1 after a correct entry or after 5
+-- wrong tries), 10-minute expiry. At most one live code per
+-- purpose per email (issuing a new one voids the old).
+CREATE TABLE IF NOT EXISTS email_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    purpose TEXT NOT NULL,
+    user_id INTEGER,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    code_salt TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    used INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Signups waiting on their email confirmation code. The account
+-- is NOT created until the code is entered correctly — this row
+-- holds the validated signup (password hash bound to the email,
+-- recovery question/answer) plus the user key wrapped with the
+-- server key, so the wallet can be created at verification time
+-- without ever storing the plaintext password. Rows older than
+-- 30 minutes are dead (the code itself expires in 10).
+CREATE TABLE IF NOT EXISTS pending_signups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    pw_version INTEGER NOT NULL DEFAULT 2,
+    email TEXT NOT NULL,
+    recovery_question TEXT NOT NULL DEFAULT '',
+    recovery_answer_hash TEXT NOT NULL DEFAULT '',
+    recovery_answer_salt TEXT NOT NULL DEFAULT '',
+    recovery_hint TEXT NOT NULL DEFAULT '',
+    user_key_salt TEXT NOT NULL,
+    wrapped_user_key TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -517,6 +560,19 @@ _MIGRATIONS = (
     ("send_intents", "mint", "TEXT NOT NULL DEFAULT ''"),
     ("send_intents", "amount_base_units", "INTEGER NOT NULL DEFAULT 0"),
     ("send_intents", "decimals", "INTEGER NOT NULL DEFAULT 0"),
+    # Password + email second level (Security bot build, 2026-11-11):
+    # pw_version 1 = legacy password-only hash, 2 = password bound
+    # to the account email (hash_account_password). user_key_salt +
+    # wrapped_user_key hold the per-user key (derived from
+    # password+email) wrapped with the server key, so the signing
+    # bot can unlock the wallet offline. wallets.enc_version 1 =
+    # server-key-only (legacy), 2 = user-key encrypted. Legacy rows
+    # upgrade transparently at the next login, when the password
+    # is available to derive the user key.
+    ("users", "pw_version", "INTEGER NOT NULL DEFAULT 1"),
+    ("users", "user_key_salt", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "wrapped_user_key", "TEXT NOT NULL DEFAULT ''"),
+    ("wallets", "enc_version", "INTEGER NOT NULL DEFAULT 1"),
 )
 
 

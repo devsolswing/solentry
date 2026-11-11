@@ -38,6 +38,7 @@
 
   <a class="fox-btn fox-btn-red" href="{{ url_for('signup') }}">Create Account</a>
   <button class="fox-btn fox-btn-donate" type="button" id="fox-donate">Donate</button>
+  <a class="fox-btn fox-btn-donate" href="{{ url_for('recover_account') }}">Recover Account</a>
 
   <button type="button" class="fox-passkey" id="passkey-login-btn">Sign in with passkey</button>
   <p class="fox-note" id="passkey-status"></p>
@@ -79,6 +80,76 @@
     <p class="fox-tagline">Still on<br>the $GATE?</p>
   </div>
 </div>
+
+{% if recover_step %}
+{# Recover Account popup (login page): for a user who forgot their
+   secret question's answer and lost access. The Security bot
+   emails a 4-digit code; the code unlocks a new password + new
+   security question. Server-rendered steps, no JavaScript. #}
+<div class="overlay">
+  <div class="coin-popup">
+    <p class="popup-head"><a class="popup-close" href="{{ url_for('recover_account_cancel') }}" aria-label="Close">✕</a></p>
+    <h3>Recover Account</h3>
+    {% if recover_error %}
+    <p style="color:#ff2d20;font-weight:800">{{ recover_error }}</p>
+    {% endif %}
+    {% if recover_step == "email" %}
+    <p>Lost access and forgot your secret question's answer? Enter the email on your account (or your username) and the Security bot will send a code to that email.</p>
+    <form method="post" action="{{ url_for('recover_account') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="fox-field">
+        <span class="fox-icon" aria-hidden="true">✉️</span>
+        <input type="text" name="identifier" required autocomplete="email"
+               placeholder="Email or username" aria-label="Email or username">
+      </div>
+      <button class="fox-btn fox-btn-gold" type="submit">Send code</button>
+    </form>
+    {% elif recover_step == "code" %}
+    <p>Enter the code we've sent to your email{% if recover_email %} ({{ recover_email }}){% endif %}. It expires in 10 minutes and can only be used once.</p>
+    {% if recover_dev_code %}
+    <p style="color:#ffd700;font-weight:800">DEV ONLY — email is not configured in this test build; your code is {{ recover_dev_code }}.</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('recover_account_verify') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="fox-field">
+        <span class="fox-icon" aria-hidden="true">✉️</span>
+        <input type="text" name="code" required inputmode="numeric"
+               pattern="[0-9]{4}" maxlength="4" autocomplete="one-time-code"
+               placeholder="4-digit code" aria-label="4-digit code">
+      </div>
+      <button class="fox-btn fox-btn-gold" type="submit">Enter</button>
+    </form>
+    <p class="muted small"><a href="{{ url_for('recover_account') }}">Use a different email</a></p>
+    {% elif recover_step == "reset" %}
+    <p>Code accepted. Set a new password and a new security question.</p>
+    <form method="post" action="{{ url_for('recover_account_reset') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="fox-field">
+        <span class="fox-icon" aria-hidden="true">🔒</span>
+        <input type="password" name="password" required autocomplete="new-password"
+               placeholder="New password" aria-label="New password">
+      </div>
+      <div class="fox-field">
+        <span class="fox-icon" aria-hidden="true">🛡️</span>
+        <input type="text" name="question" required autocomplete="off"
+               placeholder="New security question" aria-label="New security question">
+      </div>
+      <div class="fox-field">
+        <span class="fox-icon" aria-hidden="true">💬</span>
+        <input type="text" name="answer" required autocomplete="off"
+               placeholder="Answer" aria-label="Answer">
+      </div>
+      <div class="fox-field">
+        <span class="fox-icon" aria-hidden="true">💡</span>
+        <input type="text" name="hint" autocomplete="off"
+               placeholder="Hint (optional)" aria-label="Hint">
+      </div>
+      <button class="fox-btn fox-btn-gold" type="submit">Enter</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 
 <script nonce="{{ csp_nonce }}">
 (function () {

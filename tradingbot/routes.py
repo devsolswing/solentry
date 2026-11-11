@@ -45,6 +45,8 @@ from . import networks as networks_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
 from . import pnl as pnl_mod
+from . import security_bot as security_bot_mod
+from . import wallet_keys as wallet_keys_mod
 from .page_numbers import page_list, page_number_for
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
@@ -68,10 +70,11 @@ from .rules import (CLYDE_CATEGORY, CLYDE_PRESET_NAME,
                     TRENCHES_PRESET_NAME, clyde_ruleset, load_rules,
                     preset_bots, scanner_ruleset, summarize_rules,
                     trenches_ruleset, validate_ruleset)
-from .security import (decrypt_secret, encrypt_secret, hash_password,
-                       hash_token, new_csrf_token, new_token,
-                       temporary_secret, verify_password, verify_turnstile,
-                       wipe_secret)
+from .security import (decrypt_secret, encrypt_secret, hash_account_password,
+                       hash_password, hash_token, new_csrf_token, new_token,
+                       verify_account_password, verify_password,
+                       verify_turnstile, wipe_secret)
+from .wallet_keys import temporary_wallet_secret
 from .signals import signal_for_coin
 from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
@@ -95,6 +98,14 @@ MAX_BOT_CREATES_PER_USER = 20        # bot creates, 1 hour, per user
 BOT_CREATE_USER_WINDOW_SECONDS = 60 * 60
 MAX_POST_BURST_PER_IP = 120          # POSTs to guarded endpoints, 1 min
 POST_BURST_WINDOW_SECONDS = 60
+# Security bot / Recover Account: code requests are rate-limited
+# per IP and per email so one address cannot be spammed with codes
+# and one IP cannot hammer the flow. The code itself allows only
+# 5 wrong tries before it is void.
+MAX_RECOVER_PER_IP = 10              # recovery code requests, 1 hour, per IP
+RECOVER_IP_WINDOW_SECONDS = 60 * 60
+MAX_RECOVER_PER_EMAIL = 5            # recovery code requests, 1 hour, per email
+RECOVER_EMAIL_WINDOW_SECONDS = 60 * 60
 # Anomaly detection: this many failed logins in 15 minutes from IPs
 # the account has never successfully logged in from locks the
 # account for 15 minutes and writes a suspicious-activity audit row.
@@ -880,8 +891,12 @@ def _confirm_token_send(app, user, intent, return_to, return_coin_id):
         # The key is decrypted into a mutable buffer, used for one
         # signature, and wiped IN PLACE the moment signing is done —
         # before the transaction is even sent, as in the SOL send.
-        with temporary_secret(wallet["encrypted_secret"],
-                              _cfg(app).encryption_key) as secret:
+        # Decrypted through the password+email user-key layer, so
+        # v1 and v2 wallets both work here.
+        with temporary_wallet_secret(_db(app), user["id"],
+                                     _cfg(app).encryption_key) as secret:
+            if secret is None:
+                raise ValueError("No app wallet.")
             seed = bytearray(secret[:32])
             try:
                 blockhash = client.get_latest_blockhash()
@@ -908,6 +923,141 @@ def _confirm_token_send(app, user, intent, return_to, return_coin_id):
     return _done()
 
 
+def _create_account_from_pending(db, app, pending) -> int | None:
+    """Create a user account from a pending signup row. The email
+    is already confirmed (correct code entered) or the signup was
+    approved by the admin override. Returns the new user id, or
+    None when the username/email was taken in the meantime (the
+    pending row is deleted either way).
+
+    Creates the user (v2 password hash bound to the email), the
+    app wallet encrypted with the password+email user key, the
+    signing bot, and the paper portfolio. The caller logs the
+    signup / override and rotates the session."""
+    username = pending["username"]
+    email = pending["email"]
+    if db.execute("SELECT id FROM users WHERE username = ?",
+                  (username,)).fetchone() or db.execute(
+            "SELECT id FROM users WHERE LOWER(email) = LOWER(?) "
+            "AND email != ''", (email,)).fetchone():
+        db.execute("DELETE FROM pending_signups WHERE id = ?",
+                   (pending["id"],))
+        db.commit()
+        return None
+    cur = db.execute(
+        "INSERT INTO users (username, password_hash, salt, "
+        "pw_version, email, recovery_question, "
+        "recovery_answer_hash, recovery_answer_salt, "
+        "recovery_hint, user_key_salt, wrapped_user_key) "
+        "VALUES (?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?)",
+        (username, pending["password_hash"], pending["salt"],
+         email, pending["recovery_question"],
+         pending["recovery_answer_hash"],
+         pending["recovery_answer_salt"], pending["recovery_hint"],
+         pending["user_key_salt"], pending["wrapped_user_key"]))
+    user_id = cur.lastrowid
+    # Fresh app wallet — generated here, encrypted with the
+    # password+email user key (unwrapped with the server key),
+    # never shown in full and never logged. The seed and secret
+    # are wiped IN PLACE the moment the encrypted blob exists,
+    # even if the insert fails.
+    user_key = None
+    seed, pubkey, secret64 = generate_keypair()
+    try:
+        user_key = wallet_keys_mod.unwrap_user_key(
+            pending["wrapped_user_key"], _cfg(app).encryption_key)
+        blob = encrypt_secret(secret64, bytes(user_key))
+        db.execute(
+            "INSERT INTO wallets (user_id, pubkey, "
+            "encrypted_secret, enc_version) VALUES (?, ?, ?, 2)",
+            (user_id, pubkey, blob))
+    finally:
+        wipe_secret(seed)
+        wipe_secret(secret64)
+        if user_key is not None:
+            wipe_secret(user_key)
+    # The app wallet IS the user's pump.fun trading wallet:
+    # pump.fun has no separate accounts, so trading on pump.fun
+    # uses this linked Solana wallet.
+    db.execute(
+        "UPDATE users SET pumpfun_wallet = ? WHERE id = ?",
+        (pubkey, user_id))
+    # Every account gets ONE dedicated signing bot (with its
+    # immutable 8-digit support ID) at signup.
+    signing_bot_mod.ensure_signing_bot(db, user_id)
+    db.execute(
+        "INSERT INTO paper_portfolio (user_id, cash_usd) "
+        "VALUES (?, ?)", (user_id, _cfg(app).paper_start_cash))
+    db.execute("DELETE FROM pending_signups WHERE id = ?",
+               (pending["id"],))
+    db.commit()
+    return user_id
+
+
+def _set_account_password(db, cfg, user_id: int, new_password: str) -> bool:
+    """Set a user's password to `new_password`, bound to the
+    account's email (v2), and re-encrypt the wallet key with the
+    new password+email-derived user key.
+
+    When the account has an email, the password hash is the v2
+    password+email hash and the wallet is re-encrypted with the
+    new user key (enc_version 2). When the account has no email
+    (an account from before email was collected), the password
+    stays on the legacy v1 hash and the wallet stays as it is —
+    the v2 layer needs an email to derive from. The user key and
+    any decrypted wallet secret are wiped in place.
+
+    Returns True when the password was set. Used by the
+    forgot-password reset, the Recover Account reset, and the
+    admin override — every path that changes a password goes
+    through here, so the wallet key always follows the current
+    password+email."""
+    row = db.execute(
+        "SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        return False
+    email = (row["email"] or "").strip()
+    if not email:
+        salt, pw_hash = hash_password(new_password)
+        db.execute(
+            "UPDATE users SET password_hash = ?, salt = ?, "
+            "pw_version = 1 WHERE id = ?",
+            (pw_hash, salt, user_id))
+        db.commit()
+        return True
+    salt, pw_hash = hash_account_password(new_password, email)
+    user_key_salt = wallet_keys_mod.new_user_key_salt()
+    user_key = None
+    try:
+        user_key = wallet_keys_mod.derive_user_key(
+            new_password, email, user_key_salt)
+        db.execute(
+            "UPDATE users SET password_hash = ?, salt = ?, "
+            "pw_version = 2, user_key_salt = ? WHERE id = ?",
+            (pw_hash, salt, user_key_salt, user_id))
+        db.commit()
+        wallet_keys_mod.rewrap_wallet_to_user_key(
+            db, user_id, cfg.encryption_key, bytes(user_key))
+    finally:
+        if user_key is not None:
+            wipe_secret(user_key)
+    return True
+
+
+def _upgrade_account_to_v2(db, cfg, user_row, password: str) -> bool:
+    """Transparent upgrade for a legacy (v1) account at login: the
+    password is available, so re-hash it bound to the email (v2)
+    and re-encrypt the wallet with the password+email-derived
+    user key. No-op when the account is already v2 or has no
+    email. Returns True when an upgrade happened."""
+    if int(user_row["pw_version"] or 1) == 2:
+        return False
+    email = (user_row["email"] or "").strip()
+    if not email:
+        return False
+    return _set_account_password(db, cfg, int(user_row["id"]), password)
+
+
 def register_routes(app: Flask) -> None:
     login_required = _login_required(app)
 
@@ -915,8 +1065,10 @@ def register_routes(app: Flask) -> None:
     # endpoints (login, signup, sends, bot creation, trades). A
     # burst past the limit is a plain 429 — the action never runs.
     _BURST_ENDPOINTS = {
-        "login", "signup", "wallet_send", "wallet_send_confirm",
-        "bot_create", "bot_preset_trenches", "coin_buy", "coin_sell",
+        "login", "signup", "signup_verify_code", "wallet_send",
+        "wallet_send_confirm", "bot_create", "bot_preset_trenches",
+        "coin_buy", "coin_sell", "recover_account",
+        "recover_account_verify", "recover_account_reset",
     }
 
     @app.before_request
@@ -1020,19 +1172,19 @@ def register_routes(app: Flask) -> None:
             if len(password) < 8:
                 flash("Password must be at least 8 characters.")
                 return redirect(url_for("signup"))
-            # The sign-up page also collects the email and the
-            # recovery question/answer/hint (same bounds as the
-            # Settings recovery form). All three are optional here
-            # so username+password-only signups keep working — the
-            # page itself asks for them. A question without an
-            # answer (or the reverse) is refused.
-            email = (request.form.get("email") or "").strip()
+            # The sign-up page collects the email (REQUIRED — the
+            # account is linked to it, and the Security bot sends
+            # the confirmation code there) and the recovery
+            # question/answer/hint (same bounds as the Settings
+            # recovery form). A question without an answer (or the
+            # reverse) is refused.
+            email = (request.form.get("email") or "").strip().lower()
             question = (request.form.get("question") or "").strip()
             answer = (request.form.get("answer") or "").strip()
             hint = (request.form.get("hint") or "").strip()
-            if email and ("@" not in email
-                          or "." not in email.rsplit("@", 1)[-1]
-                          or len(email) > 254):
+            if not email or ("@" not in email
+                             or "." not in email.rsplit("@", 1)[-1]
+                             or len(email) > 254):
                 flash("Enter a valid email address.")
                 return redirect(url_for("signup"))
             if question or answer:
@@ -1052,54 +1204,123 @@ def register_routes(app: Flask) -> None:
                           (username,)).fetchone():
                 flash("That username is taken.")
                 return redirect(url_for("signup"))
-            salt, pw_hash = hash_password(password)
+            if db.execute(
+                    "SELECT id FROM users WHERE LOWER(email) = LOWER(?) "
+                    "AND email != ''", (email,)).fetchone():
+                flash("That email is already registered.")
+                return redirect(url_for("signup"))
+            # The account is NOT created yet. The signup is held as
+            # a pending row and the Security bot sends a 4-digit
+            # confirmation code to the email; only the correct code
+            # (entered in the popup) creates the account. The
+            # password hash is bound to the email (v2) and the user
+            # key (password+email) is derived now — while the
+            # plaintext password is available — and stored wrapped
+            # with the server key, so the wallet can be created at
+            # verification time without ever storing the password.
+            salt, pw_hash = hash_account_password(password, email)
             ans_salt, ans_hash = ("", "")
             if question and answer:
                 ans_salt, ans_hash = hash_password(answer)
-            cur = db.execute(
-                "INSERT INTO users (username, password_hash, salt, "
-                "email, recovery_question, recovery_answer_hash, "
-                "recovery_answer_salt, recovery_hint) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (username, pw_hash, salt, email, question, ans_hash,
-                 ans_salt, hint))
-            user_id = cur.lastrowid
-            # Fresh app wallet for this user — generated here, encrypted
-            # immediately, never shown in full and never logged. The
-            # seed and secret are wiped IN PLACE the moment the
-            # encrypted blob exists, even if the insert fails.
-            seed, pubkey, secret64 = generate_keypair()
+            user_key_salt = wallet_keys_mod.new_user_key_salt()
+            user_key = wallet_keys_mod.derive_user_key(
+                password, email, user_key_salt)
             try:
-                blob = encrypt_secret(secret64, _cfg(app).encryption_key)
-                db.execute(
-                    "INSERT INTO wallets (user_id, pubkey, "
-                    "encrypted_secret) VALUES (?, ?, ?)",
-                    (user_id, pubkey, blob))
+                wrapped_user_key = wallet_keys_mod.wrap_user_key(
+                    user_key, _cfg(app).encryption_key)
             finally:
-                wipe_secret(seed)
-                wipe_secret(secret64)
-            # The app wallet IS the user's pump.fun trading wallet:
-            # pump.fun has no separate accounts, so trading on pump.fun
-            # uses this linked Solana wallet.
+                wipe_secret(user_key)
+            # A re-submit starts fresh (and owns the email).
+            db.execute("DELETE FROM pending_signups WHERE username = ?",
+                       (username,))
             db.execute(
-                "UPDATE users SET pumpfun_wallet = ? WHERE id = ?",
-                (pubkey, user_id))
-            # Every account gets ONE dedicated signing bot (with its
-            # immutable 8-digit support ID) at signup.
-            signing_bot_mod.ensure_signing_bot(db, user_id)
-            db.execute(
-                "INSERT INTO paper_portfolio (user_id, cash_usd) "
-                "VALUES (?, ?)", (user_id, _cfg(app).paper_start_cash))
+                "DELETE FROM pending_signups WHERE LOWER(email) = LOWER(?)",
+                (email,))
+            cur = db.execute(
+                "INSERT INTO pending_signups (username, password_hash, "
+                "salt, pw_version, email, recovery_question, "
+                "recovery_answer_hash, recovery_answer_salt, "
+                "recovery_hint, user_key_salt, wrapped_user_key, "
+                "created_at) VALUES (?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (username, pw_hash, salt, email, question, ans_hash,
+                 ans_salt, hint, user_key_salt, wrapped_user_key,
+                 int(time.time())))
+            pending_id = cur.lastrowid
             db.commit()
-            _log(app, user_id, "signup",
-                 "Account created; app wallet generated.")
-            _rotate_session(user_id)
-            # Fresh sign-in: the mode chooser shows once, then the
-            # answer is remembered (see _clear_mode_chosen).
-            _clear_mode_chosen(_db(app), user_id)
-            flash("Welcome! Your app wallet was created for you.")
-            return redirect(url_for("wallet"))
+            result = security_bot_mod.issue_code(
+                db, _cfg(app), purpose=security_bot_mod.PURPOSE_SIGNUP,
+                email=email)
+            if not result["ok"]:
+                db.execute("DELETE FROM pending_signups WHERE id = ?",
+                           (pending_id,))
+                db.commit()
+                if result["error"] == "email is not set up yet":
+                    flash("Email is not set up yet — the app cannot "
+                          "send a confirmation code right now. Please "
+                          "try again later.")
+                else:
+                    flash("Could not send the confirmation code right "
+                          "now. Please try again later.")
+                return redirect(url_for("signup"))
+            session["pending_signup_id"] = pending_id
+            session["pending_signup_email"] = email
+            return render_template(
+                "auth.html", mode="signup", show_code_popup=True,
+                pending_email=email, dev_code=result.get("dev_code"))
         return render_template("auth.html", mode="signup")
+
+    @app.route("/signup/verify-code", methods=["POST"])
+    def signup_verify_code():
+        """Second step of signup: the 4-digit code from the Security
+        bot's email. A correct code creates the account (user, app
+        wallet encrypted with the password+email user key, signing
+        bot, paper portfolio) and signs the user in. A wrong or
+        expired code is a plain rejection — no account is created.
+        The pending signup expires after 30 minutes."""
+        _csrf_check()
+        pending_id = session.get("pending_signup_id")
+        db = _db(app)
+        if not pending_id:
+            flash("Your signup expired. Please start again.")
+            return redirect(url_for("signup"))
+        pending = db.execute(
+            "SELECT * FROM pending_signups WHERE id = ?",
+            (pending_id,)).fetchone()
+        if not pending or int(time.time()) - int(pending["created_at"]) > 30 * 60:
+            session.pop("pending_signup_id", None)
+            session.pop("pending_signup_email", None)
+            if pending:
+                db.execute("DELETE FROM pending_signups WHERE id = ?",
+                           (pending_id,))
+                db.commit()
+            flash("Your signup expired. Please start again.")
+            return redirect(url_for("signup"))
+        code = request.form.get("code") or ""
+        ok, reason = security_bot_mod.verify_code(
+            db, purpose=security_bot_mod.PURPOSE_SIGNUP,
+            email=pending["email"], code=code)
+        if not ok:
+            return render_template(
+                "auth.html", mode="signup", show_code_popup=True,
+                pending_email=pending["email"], code_error=reason)
+        # The code was right — create the account from the pending row.
+        user_id = _create_account_from_pending(db, app, pending)
+        if user_id is None:
+            session.pop("pending_signup_id", None)
+            session.pop("pending_signup_email", None)
+            flash("That username or email was just taken. "
+                  "Please start again.")
+            return redirect(url_for("signup"))
+        _log(app, user_id, "signup",
+             "Account created (email confirmed); app wallet generated.")
+        session.pop("pending_signup_id", None)
+        session.pop("pending_signup_email", None)
+        _rotate_session(user_id)
+        # Fresh sign-in: the mode chooser shows once, then the
+        # answer is remembered (see _clear_mode_chosen).
+        _clear_mode_chosen(_db(app), user_id)
+        flash("Welcome! Your app wallet was created for you.")
+        return redirect(url_for("wallet"))
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -1127,10 +1348,26 @@ def register_routes(app: Flask) -> None:
                       "Please try again later.")
                 return redirect(url_for("login"))
             row = _db(app).execute(
-                "SELECT id, password_hash, salt FROM users WHERE username = ?",
+                "SELECT id, password_hash, salt, pw_version, email, "
+                "user_key_salt, wrapped_user_key FROM users "
+                "WHERE username = ?",
                 (username,)).fetchone()
-            if not row or not verify_password(password, row["salt"],
-                                              row["password_hash"]):
+            # Password check is version-aware: v2 hashes are bound
+            # to the account email (password+email), v1 hashes are
+            # the legacy password-only hash. A correct v1 login
+            # upgrades the account transparently to v2 (the
+            # password is available, so the user key can be
+            # derived and the wallet re-encrypted).
+            password_ok = False
+            if row:
+                if int(row["pw_version"] or 1) == 2:
+                    password_ok = verify_account_password(
+                        password, row["email"] or "", row["salt"],
+                        row["password_hash"])
+                else:
+                    password_ok = verify_password(
+                        password, row["salt"], row["password_hash"])
+            if not row or not password_ok:
                 _record_login_fail(app, username)
                 rate_limit_mod.record_hit(
                     _db(app), f"login-fail:ip:{ip}",
@@ -1146,6 +1383,8 @@ def register_routes(app: Flask) -> None:
             rate_limit_mod.reset_key(
                 _db(app), f"login-fail:ip:{ip}")
             _record_login_event(app, username, True)
+            if int(row["pw_version"] or 1) != 2:
+                _upgrade_account_to_v2(_db(app), _cfg(app), row, password)
             _rotate_session(row["id"])
             # Fresh sign-in: the mode chooser shows once, then the
             # answer is remembered (see _clear_mode_chosen).
@@ -1168,7 +1407,18 @@ def register_routes(app: Flask) -> None:
         return render_template(
             "login.html",
             donation_address_masked=donation_masked,
-            rpc_url=_cfg(app).rpc_url)
+            rpc_url=_cfg(app).rpc_url,
+            # Recover Account popup state (None = closed): "email",
+            # "code", or "reset". The popup lives on Page 1 and its
+            # steps are rendered server-side by the recover routes.
+            # Read with .get, NOT .pop — a reload of the login page
+            # must not wipe the popup mid-flow; the state is cleared
+            # by the reset route on success or by /recover-account/
+            # cancel when the user closes the popup.
+            recover_step=session.get("recover_step"),
+            recover_email=session.get("recover_email", ""),
+            recover_error=session.get("recover_error", ""),
+            recover_dev_code=session.get("recover_dev_code", ""))
 
     @app.route("/logout")
     def logout():
@@ -1184,7 +1434,7 @@ def register_routes(app: Flask) -> None:
     def settings():
         user = _current_user(app)
         row = _db(app).execute(
-            "SELECT recovery_question, recovery_hint, "
+            "SELECT username, email, recovery_question, recovery_hint, "
             "recovery_answer_hash FROM users WHERE id = ?",
             (user["id"],)).fetchone()
         passkeys = _db(app).execute(
@@ -1195,6 +1445,8 @@ def register_routes(app: Flask) -> None:
                                                       user["id"])
         return render_template(
             "settings.html",
+            username=row["username"],
+            email=row["email"],
             has_recovery=bool(row["recovery_answer_hash"]),
             recovery_question=row["recovery_question"],
             recovery_hint=row["recovery_hint"],
@@ -1308,10 +1560,12 @@ def register_routes(app: Flask) -> None:
             if not row:
                 session.pop("recovery_verified_user_id", None)
                 return redirect(url_for("forgot_password"))
-            salt, pw_hash = hash_password(password)
-            _db(app).execute(
-                "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
-                (pw_hash, salt, user_id))
+            # The new password is bound to the account email (v2)
+            # and the wallet key is re-encrypted with the new
+            # password+email user key — one helper for every
+            # password change, so the wallet always follows the
+            # current password+email.
+            _set_account_password(_db(app), _cfg(app), user_id, password)
             _db(app).commit()
             # The recovery answer proved ownership, so any login
             # lockout is cleared.
@@ -1392,6 +1646,192 @@ def register_routes(app: Flask) -> None:
                     hint=row["recovery_hint"])
             session.pop("forgot_username_user_id", None)
         return render_template("forgot_username.html", phase="email")
+
+    # ------------------------------------------------------------------
+    # Recover Account (Page 1 popup): for a user who forgot their
+    # secret question's answer — so the security-question recovery
+    # cannot help them — and lost access to the account. The
+    # Security bot emails them a 4-digit code; the code unlocks a
+    # new password + new security question. This is a SEPARATE path
+    # from forgot-password (security question) and forgot-username
+    # (Page 19) — neither of those is changed here.
+    #
+    # Steps (the popup on the login page renders one step at a
+    # time, driven by session state; every POST redirects back to
+    # /login, which pops the state and re-renders the popup):
+    #   email -> the user enters their email (or username); the
+    #            Security bot sends a code to the account email.
+    #            Unknown email/username gets the SAME generic
+    #            treatment (the popup still advances to the code
+    #            step) so the page never reveals whether an
+    #            account exists.
+    #   code  -> "enter the code we've sent to your email".
+    #   reset -> new password + new security question (+ answer).
+    #            Enter changes the password (re-encrypted with the
+    #            new password+email) and sets the new question.
+    # ------------------------------------------------------------------
+    @app.route("/recover-account/cancel")
+    def recover_account_cancel():
+        """Close the Recover Account popup (the ✕ in the popup):
+        clear the recover state and go back to plain Page 1."""
+        session.pop("recover_step", None)
+        session.pop("recover_email", None)
+        session.pop("recover_error", None)
+        session.pop("recover_dev_code", None)
+        session.pop("recover_user_id", None)
+        return redirect(url_for("login"))
+
+    @app.route("/recover-account", methods=["GET", "POST"])
+    def recover_account():
+        if request.method == "GET":
+            session["recover_step"] = "email"
+            session["recover_email"] = ""
+            session["recover_error"] = ""
+            return redirect(url_for("login"))
+        _csrf_check()
+        identifier = (request.form.get("identifier") or "").strip()
+        ip = _client_ip()
+        if not rate_limit_mod.record_hit(
+                _db(app), f"recover:ip:{ip}",
+                MAX_RECOVER_PER_IP, RECOVER_IP_WINDOW_SECONDS):
+            session["recover_step"] = "email"
+            session["recover_error"] = (
+                "Too many tries from this address. "
+                "Please try again later.")
+            return redirect(url_for("login"))
+        if not identifier:
+            session["recover_step"] = "email"
+            session["recover_error"] = "Enter your email or username."
+            return redirect(url_for("login"))
+        db = _db(app)
+        row = None
+        if "@" in identifier:
+            if not rate_limit_mod.record_hit(
+                    db, f"recover:email:{identifier.lower()}",
+                    MAX_RECOVER_PER_EMAIL, RECOVER_EMAIL_WINDOW_SECONDS):
+                session["recover_step"] = "email"
+                session["recover_error"] = (
+                    "Too many tries for that email. "
+                    "Please try again later.")
+                return redirect(url_for("login"))
+            row = db.execute(
+                "SELECT id, email FROM users "
+                "WHERE LOWER(email) = LOWER(?) AND email != ''",
+                (identifier,)).fetchone()
+        else:
+            row = db.execute(
+                "SELECT id, email FROM users WHERE username = ?",
+                (identifier,)).fetchone()
+        # The popup advances to the code step either way — an
+        # unknown email/username is indistinguishable from a real
+        # one (no code is sent, so no code can ever match).
+        if row and row["email"]:
+            result = security_bot_mod.issue_code(
+                db, _cfg(app), purpose=security_bot_mod.PURPOSE_RECOVER,
+                email=row["email"], user_id=row["id"])
+            if result.get("dev_code"):
+                # Test-only fallback (dev-echo flag on): the code
+                # is shown in the popup so the flow can be tested
+                # without SMTP. Never in production.
+                session["recover_dev_code"] = result["dev_code"]
+            session["recover_email"] = row["email"]
+        else:
+            session["recover_email"] = identifier
+        session["recover_step"] = "code"
+        session["recover_error"] = ""
+        return redirect(url_for("login"))
+
+    @app.route("/recover-account/verify", methods=["POST"])
+    def recover_account_verify():
+        _csrf_check()
+        db = _db(app)
+        email = session.get("recover_email") or ""
+        code = request.form.get("code") or ""
+        if not email:
+            session["recover_step"] = "email"
+            session["recover_error"] = "Enter your email or username."
+            return redirect(url_for("login"))
+        ok, reason = security_bot_mod.verify_code(
+            db, purpose=security_bot_mod.PURPOSE_RECOVER,
+            email=email, code=code)
+        if not ok:
+            session["recover_step"] = "code"
+            session["recover_error"] = reason
+            return redirect(url_for("login"))
+        row = db.execute(
+            "SELECT id FROM users WHERE LOWER(email) = LOWER(?) "
+            "AND email != ''", (email,)).fetchone()
+        if not row:
+            session["recover_step"] = "email"
+            session["recover_error"] = "That code is wrong."
+            return redirect(url_for("login"))
+        session["recover_user_id"] = row["id"]
+        session["recover_step"] = "reset"
+        session["recover_error"] = ""
+        return redirect(url_for("login"))
+
+    @app.route("/recover-account/reset", methods=["POST"])
+    def recover_account_reset():
+        _csrf_check()
+        user_id = session.get("recover_user_id")
+        if not user_id:
+            return redirect(url_for("login"))
+        db = _db(app)
+        password = request.form.get("password") or ""
+        question = (request.form.get("question") or "").strip()
+        answer = (request.form.get("answer") or "").strip()
+        hint = (request.form.get("hint") or "").strip()
+        if len(password) < 8:
+            session["recover_step"] = "reset"
+            session["recover_error"] = (
+                "Password must be at least 8 characters.")
+            return redirect(url_for("login"))
+        if not 3 <= len(question) <= 200:
+            session["recover_step"] = "reset"
+            session["recover_error"] = (
+                "The security question must be 3-200 characters.")
+            return redirect(url_for("login"))
+        if not answer or len(answer) > 200:
+            session["recover_step"] = "reset"
+            session["recover_error"] = (
+                "The security answer must not be empty "
+                "(max 200 characters).")
+            return redirect(url_for("login"))
+        if len(hint) > 200:
+            session["recover_step"] = "reset"
+            session["recover_error"] = (
+                "The hint must be at most 200 characters.")
+            return redirect(url_for("login"))
+        row = db.execute(
+            "SELECT username FROM users WHERE id = ?",
+            (user_id,)).fetchone()
+        if not row:
+            session.pop("recover_user_id", None)
+            session["recover_step"] = "email"
+            session["recover_error"] = ""
+            return redirect(url_for("login"))
+        # New password (bound to the email, wallet re-encrypted
+        # with the new password+email user key) + new security
+        # question/answer, in one step.
+        _set_account_password(db, _cfg(app), user_id, password)
+        ans_salt, ans_hash = hash_password(answer)
+        db.execute(
+            "UPDATE users SET recovery_question = ?, "
+            "recovery_answer_hash = ?, recovery_answer_salt = ?, "
+            "recovery_hint = ? WHERE id = ?",
+            (question, ans_hash, ans_salt, hint, user_id))
+        db.commit()
+        _clear_login_fails(app, row["username"])
+        _log(app, user_id, "password_reset",
+             "Password + security question changed through Recover "
+             "Account (email code).")
+        session.pop("recover_user_id", None)
+        session.pop("recover_step", None)
+        session.pop("recover_email", None)
+        session.pop("recover_error", None)
+        session.pop("recover_dev_code", None)
+        flash("Password changed. Log in with your new password.")
+        return redirect(url_for("login"))
 
     # ------------------------------------------------------------------
     # Passkeys (WebAuthn): register in Settings, sign in from Login.
@@ -1670,6 +2110,147 @@ def register_routes(app: Flask) -> None:
             "admin_donations.html",
             donations=donations_mod.list_donations(app),
             donation_address_masked=donation_masked)
+
+    # ------------------------------------------------------------------
+    # Admin override (James only): when something goes wrong with
+    # an account, the owner can fix it from his end. NEVER
+    # user-facing — the page is admin-only (403 otherwise) and is
+    # not linked from any user page. Every override is LOGGED
+    # (kind "admin_override", the admin's user id, the target
+    # username, the action, and the time) so there is an audit
+    # trail of who overrode what, when. The target user also gets
+    # an activity row for password resets, so their own log shows
+    # it. The override never emails anyone anything — the only
+    # emails the app ever sends are the Security bot's two codes
+    # (signup + recovery); the admin tells the user the new
+    # password himself, out of band.
+    #   * reset password — set a new password for a user (bound
+    #     to their email, wallet re-encrypted, as everywhere).
+    #   * clear lockout — clear a user's 15-minute login lockout.
+    #   * approve signup — create a pending signup's account
+    #     without the email code (email never arrived, etc.).
+    #   * void codes — void a user's outstanding email codes.
+    # ------------------------------------------------------------------
+    @app.route("/admin/security")
+    @login_required
+    def admin_security():
+        user = _current_user(app)
+        if not _is_admin(user):
+            abort(403)
+        db = _db(app)
+        users = db.execute(
+            "SELECT id, username, email, pw_version, "
+            "recovery_question, created_at FROM users "
+            "ORDER BY id ASC").fetchall()
+        locked = {r["username"] for r in db.execute(
+            "SELECT username FROM login_attempts "
+            "WHERE locked_until IS NOT NULL").fetchall()}
+        pending = db.execute(
+            "SELECT id, username, email, created_at FROM pending_signups "
+            "ORDER BY id ASC").fetchall()
+        return render_template(
+            "admin_security.html", users=users, locked=locked,
+            pending=pending)
+
+    def _admin_override_log(app, admin_user, action: str,
+                            target_username: str) -> None:
+        _log(app, admin_user["id"], "admin_override",
+             f"Admin override by {admin_user['username']}: {action} "
+             f"for {target_username}.")
+
+    @app.route("/admin/security/reset-password", methods=["POST"])
+    @login_required
+    def admin_security_reset_password():
+        admin = _current_user(app)
+        if not _is_admin(admin):
+            abort(403)
+        _csrf_check()
+        username = (request.form.get("username") or "").strip()
+        new_password = request.form.get("new_password") or ""
+        db = _db(app)
+        row = db.execute(
+            "SELECT id, email FROM users WHERE username = ?",
+            (username,)).fetchone()
+        if not row:
+            flash("No such user.")
+            return redirect(url_for("admin_security"))
+        if len(new_password) < 8:
+            flash("New password must be at least 8 characters.")
+            return redirect(url_for("admin_security"))
+        _set_account_password(db, _cfg(app), row["id"], new_password)
+        _clear_login_fails(app, username)
+        _log(app, row["id"], "password_reset",
+             "Password reset by the admin.")
+        _admin_override_log(app, admin, "reset password", username)
+        flash(f"Password reset for {username}. Give them the new "
+              "password yourself — the app does not email it.")
+        return redirect(url_for("admin_security"))
+
+    @app.route("/admin/security/clear-lockout", methods=["POST"])
+    @login_required
+    def admin_security_clear_lockout():
+        admin = _current_user(app)
+        if not _is_admin(admin):
+            abort(403)
+        _csrf_check()
+        username = (request.form.get("username") or "").strip()
+        _clear_login_fails(app, username)
+        _admin_override_log(app, admin, "cleared login lockout", username)
+        flash(f"Lockout cleared for {username}.")
+        return redirect(url_for("admin_security"))
+
+    @app.route("/admin/security/approve-signup", methods=["POST"])
+    @login_required
+    def admin_security_approve_signup():
+        admin = _current_user(app)
+        if not _is_admin(admin):
+            abort(403)
+        _csrf_check()
+        pending_id = request.form.get("pending_id") or ""
+        db = _db(app)
+        try:
+            pending_id_int = int(pending_id)
+        except ValueError:
+            flash("Bad signup.")
+            return redirect(url_for("admin_security"))
+        pending = db.execute(
+            "SELECT * FROM pending_signups WHERE id = ?",
+            (pending_id_int,)).fetchone()
+        if not pending:
+            flash("That signup is gone.")
+            return redirect(url_for("admin_security"))
+        user_id = _create_account_from_pending(db, app, pending)
+        if user_id is None:
+            flash("That username or email was just taken.")
+            return redirect(url_for("admin_security"))
+        _log(app, user_id, "signup",
+             "Account created by admin override (code bypassed).")
+        _admin_override_log(app, admin, "approved signup (code bypassed)",
+                            pending["username"])
+        flash(f"Account created for {pending['username']}.")
+        return redirect(url_for("admin_security"))
+
+    @app.route("/admin/security/void-codes", methods=["POST"])
+    @login_required
+    def admin_security_void_codes():
+        admin = _current_user(app)
+        if not _is_admin(admin):
+            abort(403)
+        _csrf_check()
+        username = (request.form.get("username") or "").strip()
+        db = _db(app)
+        row = db.execute(
+            "SELECT id, email FROM users WHERE username = ?",
+            (username,)).fetchone()
+        if not row:
+            flash("No such user.")
+            return redirect(url_for("admin_security"))
+        count = security_bot_mod.void_codes(
+            db, user_id=row["id"], email=row["email"] or None)
+        _admin_override_log(
+            app, admin, f"voided {count} email code(s)", username)
+        flash(f"Voided {count} code(s) for {username}.")
+        return redirect(url_for("admin_security"))
 
     # ------------------------------------------------------------------
     # Dashboard
@@ -2985,9 +3566,13 @@ def register_routes(app: Flask) -> None:
                 # signing is done — before the transaction is even
                 # sent. The finally blocks guarantee the wipe on
                 # every path, including a signing failure.
-                with temporary_secret(
-                        wallet["encrypted_secret"],
+                # Decrypted through the password+email user-key
+                # layer, so v1 and v2 wallets both work here.
+                with temporary_wallet_secret(
+                        _db(app), user["id"],
                         _cfg(app).encryption_key) as secret:
+                    if secret is None:
+                        raise ValueError("No app wallet.")
                     seed = bytearray(secret[:32])
                     try:
                         pubkey = wallet["pubkey"]

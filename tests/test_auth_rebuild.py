@@ -11,7 +11,7 @@ import re
 import tempfile
 import unittest
 
-from helpers import csrf, login, make_client, signup
+from helpers import csrf, dev_code_from_signup, login, make_client, signup
 
 
 class AuthRebuildTestCase(unittest.TestCase):
@@ -28,10 +28,19 @@ class AuthRebuildTestCase(unittest.TestCase):
     def signup_full(self, username="alice", email="alice@example.com",
                     question="First pet?", answer="fluffy", hint="the dog"):
         token = csrf(self.client, "/signup")
-        return self.client.post("/signup", data={
+        resp = self.client.post("/signup", data={
             "csrf_token": token, "username": username,
             "password": "password123", "email": email,
             "question": question, "answer": answer, "hint": hint},
+            follow_redirects=False)
+        if resp.status_code != 200:
+            return resp
+        # Two-step signup: finish with the Security bot's code
+        # (echoed in the popup under the test dev-echo flag).
+        code = dev_code_from_signup(resp)
+        token = csrf(self.client, "/signup")
+        return self.client.post("/signup/verify-code", data={
+            "csrf_token": token, "code": code},
             follow_redirects=False)
 
     def start_forgot_username(self, email="alice@example.com"):
@@ -63,7 +72,21 @@ class TestSignupFields(AuthRebuildTestCase):
         self.assertNotEqual(row["recovery_answer_hash"], "fluffy")
         self.assertNotIn("fluffy", row["recovery_answer_hash"])
 
-    def test_signup_username_password_only_still_works(self):
+    def test_signup_without_email_is_rejected(self):
+        # Email is required on signup (the account is linked to
+        # it and the Security bot sends the code there).
+        token = csrf(self.client, "/signup")
+        resp = self.client.post("/signup", data={
+            "csrf_token": token, "username": "bob",
+            "password": "password123", "email": ""},
+            follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/signup", resp.headers["Location"])
+        row = self.db().execute(
+            "SELECT id FROM users WHERE username = 'bob'").fetchone()
+        self.assertIsNone(row)
+
+    def test_signup_with_email_but_no_question_still_works(self):
         signup(self.client, "bob")
         self.client.get("/logout")
         resp = login(self.client, "bob")

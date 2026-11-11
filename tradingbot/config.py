@@ -103,6 +103,28 @@ class Config:
         # compromised session draining a wallet in one day.
         self.daily_send_limit_sol: float = float(
             env.get("DAILY_SEND_LIMIT_SOL", "5"))
+        # Outbound email for the Security bot ONLY (see mailer.py):
+        # the 4-digit signup confirmation code and the 4-digit
+        # account-recovery code are the only emails the app ever
+        # sends. Unset = email is not configured and the
+        # signup/recovery flows say so plainly instead of
+        # pretending a code was sent. Set on Railway (a Gmail app
+        # password works): SMTP_HOST=smtp.gmail.com, SMTP_PORT=587,
+        # SMTP_USER=<gmail address>, SMTP_PASSWORD=<16-char app
+        # password>, SMTP_FROM=<gmail address>. Never commit real
+        # credentials — env vars only.
+        self.smtp_host: str = env.get("SMTP_HOST", "").strip()
+        self.smtp_port: int = int(env.get("SMTP_PORT", "587") or 587)
+        self.smtp_user: str = env.get("SMTP_USER", "").strip()
+        self.smtp_password: str = env.get("SMTP_PASSWORD", "")
+        self.smtp_from: str = env.get("SMTP_FROM", "").strip()
+        self.smtp_use_tls: bool = env.get("SMTP_USE_TLS", "1") == "1"
+        # Dev/test fallback for the Security bot's codes: when on,
+        # issue_code returns the code in its result so the signup /
+        # recovery flows can be tested without SMTP. TESTS ONLY —
+        # never set in production (Railway must not have it).
+        self.security_code_dev_echo: bool = env.get(
+            "SECURITY_CODE_DEV_ECHO", "0") == "1"
         # Secure session cookies (only sent over HTTPS). Railway
         # serves HTTPS, so this is on by default; set
         # SESSION_COOKIE_SECURE=0 only for plain-HTTP local dev.

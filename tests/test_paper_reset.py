@@ -25,6 +25,9 @@ def make_default_config(tmpdir: str) -> Config:
         "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
         "NETWORK": "devnet",
         "DATABASE_PATH": os.path.join(tmpdir, "test.db"),
+        # Tests only: the Security bot's codes are echoed in the
+        # popup so signup can complete without SMTP.
+        "SECURITY_CODE_DEV_ECHO": "1",
     }
     return Config(env=env)
 

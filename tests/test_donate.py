@@ -220,6 +220,9 @@ class TestAdminDonations(unittest.TestCase):
             "NETWORK": "devnet",
             "DATABASE_PATH": os.path.join(tmp.name, "test2.db"),
             "ADMIN_USERNAME": "bob",
+            # Tests only: the Security bot's codes are echoed in the
+            # popup so signup can complete without SMTP.
+            "SECURITY_CODE_DEV_ECHO": "1",
         }
         from tradingbot.config import Config
         app2 = create_app(Config(env=env))
