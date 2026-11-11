@@ -1,15 +1,20 @@
 """Preset bots on Page 6 (Bots) — the owner's spec (2026-11-11).
 
 - A Preset button sits in the bot-actions row (same action-btn
-  style as Add Bot / Edit Bot) and swaps the Active Bots section
-  IN PLACE: the header becomes "Presets" and the preset list
-  takes the carousel's spot, same layout. After 6 seconds with
-  no input from the user it swaps back to Active Bots on its
-  own — there is no manual switch back, and any input (tap,
-  scroll, key) restarts the 6-second timer.
-- The list is Clyde first, then Trenches, then Scanner. Each
-  preset shows its name, its rules in plain words, and a Create
-  button that really creates the bot.
+  style as Add Bot / Edit Bot) and swaps the contents of the ONE
+  Active Bots carousel: the header becomes "Presets", the active
+  bot cards hide and the Clyde card shows in their spot, same
+  layout. After 6 seconds with no input from the user it swaps
+  back to Active Bots on its own — there is no manual switch
+  back, and any input (tap, scroll, key) restarts the 6-second
+  timer. There is NO separate preset window or preset list
+  element anywhere on the page.
+- The preset view is a BUTTON ONLY (owner, 2026-11-11 ~10:31
+  PST, structure corrected ~10:43 PST): one Clyde button, no
+  description, no rules, no notes. It looks identical to an
+  active bot card (🔥, Clyde, gold Preset pill, its stats line)
+  and POSTs to /bots/preset/clyde, which creates Clyde (or goes
+  to the existing one) and lands on the bot details page.
 - Clyde (owner's exact rules): scan the pump.fun trenches every
   30 seconds; hard minimum market cap $45,000 CAD; top-10 wallets
   under 12% of supply; entry is a Z-score (buy pressure 2.5
@@ -18,9 +23,9 @@
   31-1000% for confirmed runners; swap underperformers for
   higher-velocity runners regardless of P&L.
 - The engine has no Z-score field, no velocity-swap rule, and no
-  pre-buy top-10 screen — those are recorded in the preset and
-  stated plainly on the list, never pretended to be enforced.
-  The engine enforces the closest available signals: 5% gain in
+  pre-buy top-10 screen — those live in the preset data
+  (rules.py), never pretended to be enforced. The engine
+  enforces the closest available signals: 5% gain in
   3 minutes for entry, the 12% top-10 share as a sell on held
   coins, and the market-cap bar in its USD field (stricter than
   $45,000 CAD).
@@ -43,46 +48,57 @@ class TestBotsPresets(UiBase):
         html = self._html("/bots")
         self.assertIn("Presets", html)
         self.assertIn("data-presets-toggle", html)
-        self.assertIn('aria-controls="preset-list"', html)
+        # The button controls the one carousel list.
+        self.assertIn('aria-controls="active-bots-list"', html)
+        self.assertNotIn('aria-controls="preset-list"', html)
         # Same sizing class as Add Bot / Edit Bot.
         m = re.search(r'class="([^"]*action-btn[^"]*)"[^>]*>Presets',
                       html)
         self.assertIsNotNone(m, "Presets button not found")
         self.assertIn("action-btn", m.group(1).split())
 
-    def test_preset_list_hidden_by_default(self):
+    def test_clyde_card_hidden_by_default_in_carousel(self):
+        """One list, contents swap (owner, 2026-11-11 ~10:43 PST):
+        the Clyde card is a carousel item inside #active-bots-list,
+        hidden until the Presets button opens it. There is NO
+        separate preset list element anywhere on the page."""
         self._choose_mode("paper")
         html = self._html("/bots")
-        self.assertIn('id="preset-list"', html)
+        self.assertNotIn('id="preset-list"', html)
+        self.assertNotIn("preset-list", html)
+        self.assertNotIn("bots-presets", html)
+        # The Clyde card lives INSIDE the one carousel, after the
+        # active bot cards and before the assistant.
+        carousel = html.find('id="active-bots-list"')
+        self.assertGreater(carousel, -1, "carousel not found")
+        clyde = html.find("data-preset-item", carousel)
+        self.assertGreater(clyde, -1, "Clyde card not in carousel")
+        self.assertLess(clyde, html.find("bots-assistant", carousel))
         # Hidden until the Presets button opens it.
-        m = re.search(r'<div[^>]*id="preset-list"[^>]*>', html)
-        self.assertIsNotNone(m, "preset list not found")
+        m = re.search(r'<form[^>]*data-preset-item[^>]*>', html)
+        self.assertIsNotNone(m, "Clyde form not found")
         self.assertIn("hidden", m.group(0))
+        # Items hide via [hidden] — .bot-card is display:flex,
+        # which beats the UA [hidden] rule, so the carousel needs
+        # the override.
         css = open("tradingbot/static/style.css").read()
-        self.assertIn(".bots-presets", css)
-        self.assertIn(".bots-presets[hidden]", css)
-        # The preset list lives INSIDE the bots section, in the
-        # carousel's spot (after the carousel head, before the
-        # assistant) — the old separate section below the actions
-        # is gone: the list must not appear before the head.
-        self.assertLess(html.find("carousel-head"),
-                        html.find('id="preset-list"'))
-        self.assertLess(html.find('id="preset-list"'),
-                        html.find("bots-assistant"))
+        self.assertIn(".bot-carousel [hidden]", css)
 
-    def test_preset_swap_in_place_same_section(self):
-        """Presets swap the Active Bots section in place (owner,
-        2026-11-11): the header carries both titles and both lists
-        sit in the one bots section — no second preset section."""
+    def test_preset_swap_single_list_same_carousel(self):
+        """Presets swap the contents of the ONE carousel (owner,
+        2026-11-11 ~10:43 PST): the header carries both titles,
+        the active bot cards and the Clyde card sit in the same
+        list — no second list, no separate preset section."""
         self._choose_mode("paper")
         html = self._html("/bots")
-        # One section holds the head + both lists.
+        # One section holds the head + the one carousel.
         self.assertIn('id="bots-section"', html)
         section = html[html.find('id="bots-section"'):]
         self.assertIn('id="active-bots-list"', section)
-        self.assertIn('id="preset-list"', section)
-        # Only one preset list on the whole page.
-        self.assertEqual(html.count('id="preset-list"'), 1)
+        self.assertNotIn("preset-list", section)
+        # Bot cards and the Clyde card are items of that list.
+        self.assertIn("data-active-item", section)
+        self.assertIn("data-preset-item", section)
         # Header: "Active Bots" shown, "Presets" hidden until swap.
         m = re.search(r'<span data-active-title>([^<]*)</span>', html)
         self.assertIsNotNone(m, "active title not found")
@@ -92,11 +108,8 @@ class TestBotsPresets(UiBase):
         self.assertIsNotNone(m, "presets title not found")
         self.assertIn("hidden", m.group(1))
         self.assertIn("Presets", m.group(2))
-        # The hidden Active Bots strip needs a display:none rule —
-        # .bot-carousel is display:flex, which beats [hidden].
-        css = open("tradingbot/static/style.css").read()
-        self.assertIn(".bot-carousel[hidden]", css)
         # Carousel arrows hide while Presets is showing.
+        css = open("tradingbot/static/style.css").read()
         self.assertIn(".bots-section.showing-presets", css)
 
     def test_preset_idle_timer_auto_revert_no_manual_toggle(self):
@@ -110,74 +123,135 @@ class TestBotsPresets(UiBase):
         self.assertIn("PRESETS_IDLE_MS = 6000", html)
         self.assertIn("setTimeout(showActiveBots, PRESETS_IDLE_MS)",
                       html)
-        # The restore shows the Active Bots list + title and hides
-        # the preset list again.
+        # The restore shows the active bot cards + title and hides
+        # the Clyde card again (one list, contents swap).
         restore = script[script.find("function showActiveBots"):]
         restore = restore[:restore.find("function armPresetsIdleTimer")]
-        self.assertIn("activeList.removeAttribute('hidden')", restore)
+        self.assertIn("setCarouselItems(false)", restore)
         self.assertIn("activeTitle.removeAttribute('hidden')", restore)
-        self.assertIn("presetList.setAttribute('hidden', '')", restore)
         self.assertIn("presetsTitle.setAttribute('hidden', '')", restore)
+        swap = script[script.find("function setCarouselItems"):]
+        swap = swap[:swap.find("function presetsShowing")]
+        # Active items unhide, preset items hide.
+        self.assertIn("querySelectorAll('[data-active-item]')", swap)
+        self.assertIn("querySelectorAll('[data-preset-item]')", swap)
+        self.assertIn("removeAttribute('hidden')", swap)
+        self.assertIn("setAttribute('hidden', '')", swap)
+        # The timer only arms while Presets is showing.
+        self.assertIn("function presetsShowing()", html)
+        self.assertIn("if (!presetsShowing()) return;", html)
         # Input restarts the timer: tap, touch, key, scroll, click.
         for ev in ("pointerdown", "touchstart", "keydown", "scroll",
                    "click"):
             self.assertIn("'%s'" % ev, html)
         self.assertIn("armPresetsIdleTimer", html)
         # The Preset button only ever SHOWS presets — pressing it
-        # again re-arms the timer; it never hides the list itself.
+        # again re-arms the timer; it never hides the Clyde card.
         self.assertIn("presetsToggle.addEventListener('click', "
                       "showPresets)", html)
         show = script[script.find("function showPresets"):]
         show = show[:show.find("if (presetsToggle")]
-        # showPresets hides the ACTIVE list (that is the swap), but
-        # it never hides the preset list itself.
-        self.assertNotIn("presetList.setAttribute('hidden', '')", show)
+        self.assertIn("setCarouselItems(true)", show)
+        # showPresets never hides the preset item itself.
+        self.assertNotIn("presetList.setAttribute", show)
+        self.assertNotIn("presetList", show)
 
-    def test_clyde_listed_first_with_rules(self):
+    def test_preset_window_is_clyde_button_only(self):
+        """Owner (2026-11-11): the preset view is a BUTTON ONLY —
+        no description, no rules, no notes. One Clyde button, a
+        carousel item like an active bot card (🔥, Clyde, gold
+        Preset pill, its stats line), that POSTs to create Clyde."""
         self._choose_mode("paper")
         html = self._html("/bots")
-        # Clyde first, then the existing presets — scoped to the
-        # preset list itself (the word "Trenches" also appears in
-        # the assistant's hint text higher on the page).
-        clyde = html.find('data-preset="clyde"')
-        trenches = html.find('data-preset="trenches"')
-        scanner = html.find('data-preset="scanner"')
-        self.assertGreater(clyde, -1, "Clyde not listed")
-        self.assertGreater(trenches, -1, "Trenches not listed")
-        self.assertGreater(scanner, -1, "Scanner not listed")
-        self.assertLess(clyde, trenches)
-        self.assertLess(trenches, scanner)
-        # Clyde's enforced rules, in plain words.
-        self.assertIn("30 seconds", html)
-        self.assertIn("$45,000", html)
-        self.assertIn("12%", html)
-        self.assertIn("4.0%", html)
-        # Take-profit brackets: baseline 10-30%, runners 31-1000%.
-        self.assertIn("+10% profit", html)
-        self.assertIn("+30% profit", html)
-        self.assertIn("+31% profit", html)
-        self.assertIn("+1000% profit", html)
-        # The rules the engine cannot enforce as written are stated
-        # plainly, not dropped: Z-score entry, CAD market cap,
-        # pre-buy top-10 screen, velocity swap.
-        self.assertIn("2.5 standard deviations", html)
-        self.assertIn("CAD", html)
-        self.assertIn("does not pre-screen", html)
-        self.assertIn("velocity-swap", html)
-        # Create buttons post to the preset routes.
-        self.assertIn("/bots/preset/clyde", html)
-        self.assertIn("/bots/preset/trenches", html)
-        self.assertIn("/bots/preset/scanner", html)
+        # No separate preset list element anywhere.
+        self.assertNotIn("preset-list", html)
+        # Scope to the one carousel (the words "Trenches" and
+        # "Scanner" still appear in the assistant hint below it).
+        start = html.find('id="active-bots-list"')
+        end = html.find("bots-assistant", start)
+        window = html[start:end]
+        # The Clyde card is a carousel item, hidden by default.
+        self.assertIn("data-preset-item", window)
+        m = re.search(r'<form[^>]*data-preset-item[^>]*>', window)
+        self.assertIsNotNone(m, "Clyde form not found")
+        self.assertIn("hidden", m.group(0))
+        # One POST form, to the Clyde create route.
+        self.assertEqual(window.count("<form"), 1)
+        self.assertIn('action="/bots/preset/clyde"', window)
+        # The button IS the card: same classes as a bot card.
+        m = re.search(r'<button class="([^"]*)" type="submit"',
+                      window)
+        self.assertIsNotNone(m, "Clyde button not found")
+        self.assertIn("card", m.group(1).split())
+        self.assertIn("bot-card", m.group(1).split())
+        # Identical to the Moonshot card: 🔥 icon, name, chevron.
+        self.assertIn("🔥", window)
+        self.assertIn("<strong>Clyde</strong>", window)
+        self.assertIn("bot-arrow", window)
+        # Gold Preset pill — never "Active" / "Silent ON": no bot
+        # exists yet.
+        self.assertIn('badge preset">Preset<', window)
+        self.assertNotIn("Silent ON", window)
+        self.assertNotIn("● Active", window)
+        # Clyde's stats line, same format as a bot card.
+        self.assertIn("bold · Buy 20% · Stop 4% · Max 3", window)
+        # No bot-yet lines, no description of any kind.
+        self.assertNotIn("ID:", window)
+        self.assertNotIn("Created:", window)
+        self.assertNotIn("preset-rules", window)
+        self.assertNotIn("preset-note", window)
+        self.assertNotIn("preset-card", window)
+        self.assertNotIn("data-preset=", window)
+        # No other preset in the window at all.
+        self.assertNotIn("Trenches", window)
+        self.assertNotIn("Scanner", window)
+        self.assertNotIn("/bots/preset/trenches", window)
+        self.assertNotIn("/bots/preset/scanner", window)
+        # None of the rules text survives in the window.
+        self.assertNotIn("30 seconds", window)
+        self.assertNotIn("$45,000", window)
+        self.assertNotIn("2.5 standard deviations", window)
+        self.assertNotIn("velocity-swap", window)
 
-    def test_preset_list_theme_black_gold_red(self):
+    def test_clyde_card_same_carousel_slot_as_bot_card(self):
+        """The Clyde card takes the same carousel slot as a bot
+        card (no outer wrapper, no second card border): the form
+        is a 92% carousel item like .bot-card, the button fills
+        it, and the button carries the card styling (same .card
+        + .bot-card as an active bot card)."""
         self._choose_mode("paper")
         self._html("/bots")
         css = open("tradingbot/static/style.css").read()
-        # Black card, gold border, red letters — the page stays
-        # toned down (no yellow wash).
-        self.assertRegex(css, r"\.bots-presets\s*\{[^}]*background:\s*#000")
-        self.assertRegex(css, r"\.bots-presets\s*\{[^}]*#ffd700")
-        self.assertRegex(css, r"\.bots-presets[^{]*\{[^}]*#b91c1c")
+        # No preset-window styling left at all.
+        self.assertNotIn("bots-presets", css)
+        self.assertNotIn("preset-list", css)
+        # The Clyde form is a carousel item: same 92% slot and
+        # snap as a bot card.
+        self.assertRegex(
+            css,
+            r"#active-bots-list form\[data-preset-item\]\s*\{[^}]*"
+            r"flex:\s*0 0 92%")
+        self.assertRegex(
+            css,
+            r"#active-bots-list form\[data-preset-item\]\s*\{[^}]*"
+            r"scroll-snap-align:\s*start")
+        # Items hide via [hidden] — .bot-card is display:flex,
+        # which beats the UA [hidden] rule.
+        self.assertIn(".bot-carousel [hidden]", css)
+        # The <button> UA chrome is reset so it renders like the
+        # <a class="card bot-card">.
+        self.assertIn("button.bot-card", css)
+        self.assertRegex(css,
+                         r"button\.bot-card\s*\{[^}]*font:\s*inherit")
+        self.assertRegex(css,
+                         r"button\.bot-card\s*\{[^}]*text-align:\s*left")
+        self.assertRegex(css,
+                         r"button\.bot-card\s*\{[^}]*cursor:\s*pointer")
+        # Gold Preset pill.
+        self.assertRegex(css, r"\.badge\.preset\s*\{[^}]*#ffd700")
+        # The button still gets the card look from the shared
+        # classes (gold border, dark background).
+        self.assertRegex(css, r"\.card\s*\{[^}]*#ffb300")
 
     def test_clyde_ruleset_validates(self):
         cleaned, err = validate_ruleset(clyde_ruleset())

@@ -3899,6 +3899,18 @@ def register_routes(app: Flask) -> None:
             "notes": p["notes"],
             "create_url": url_for(p["endpoint"]),
         } for p in preset_bots()]
+        # The Page 6 preset window is a single Clyde button (owner,
+        # 2026-11-11): only Clyde's stats are rendered there, from
+        # the same stored values the create route writes
+        # (strategy 'bold', buy size 20%, stop loss
+        # CLYDE_STOP_LOSS_PCT, max 3 open).
+        clyde_preset = next(p for p in presets if p["key"] == "clyde")
+        clyde_preset.update({
+            "strategy": "bold",
+            "buy_size_pct": 20,
+            "stop_loss_pct": int(CLYDE_STOP_LOSS_PCT),
+            "max_open_trades": 3,
+        })
         return render_template("bots.html", **data,
                                memecoin_bots=memecoin_bots,
                                platforms=platforms_mod.PLATFORMS,
@@ -3908,7 +3920,8 @@ def register_routes(app: Flask) -> None:
                                    _db(app), user["id"]),
                                signing_tasks=signing_tasks,
                                signing_tx_count=signing_tx_count,
-                               presets=presets)
+                               presets=presets,
+                               clyde_preset=clyde_preset)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required

@@ -29,7 +29,7 @@
 
   <div class="bot-actions">
     <a class="btn action-btn" href="{{ url_for('bot_create') }}" aria-label="Add a bot">+ Add Bot</a>
-    <button class="btn action-btn" type="button" data-presets-toggle aria-expanded="false" aria-controls="preset-list">Presets</button>
+    <button class="btn action-btn" type="button" data-presets-toggle aria-expanded="false" aria-controls="active-bots-list">Presets</button>
     {% if bots %}
     <a class="btn danger action-btn" data-delete-target href="{{ url_for('bot_delete_confirm', bot_id=bots[0].id) }}" aria-label="Delete the bot in view">− Delete</a>
     <a class="btn action-btn edit-btn" data-edit-target href="{{ url_for('bot_edit', bot_id=bots[0].id) }}">Edit Bot ✏️</a>
@@ -48,7 +48,7 @@
 
     <div class="bot-carousel" data-carousel id="active-bots-list">
       {% for b in bots %}
-      <a class="card bot-card" href="{{ url_for('bot_detail', bot_id=b.id) }}"
+      <a class="card bot-card" href="{{ url_for('bot_detail', bot_id=b.id) }}" data-active-item
          data-edit-url="{{ url_for('bot_edit', bot_id=b.id) }}"
          data-delete-url="{{ url_for('bot_delete_confirm', bot_id=b.id) }}">
         <span class="bot-ico" aria-hidden="true">{% if b.category == 'Memecoin build' %}🔥{% elif b.category == 'scanner' %}🎯{% else %}🤖{% endif %}</span>
@@ -61,24 +61,25 @@
         <span class="bot-arrow" aria-hidden="true">›</span>
       </a>
       {% endfor %}
-      {% if not bots %}<p class="muted">No bots yet — create your first one, or ask the assistant: “create bot”.</p>{% endif %}
-    </div>
-
-    <div class="card bots-presets" id="preset-list" hidden>
-      <p class="muted small">Ready-made bots, Clyde first. Tap Create to add one — it starts in paper mode with silent trading off, and only trades within its rules and limits.</p>
-      {% for p in presets %}
-      <div class="preset-card" data-preset="{{ p.key }}">
-        <p class="preset-name"><strong>{{ p.name }}</strong> <span class="muted small">{{ p.tagline }}</span></p>
-        <ul class="preset-rules">
-          {% for line in p.rules_lines %}<li>{{ line }}</li>{% endfor %}
-          {% for note in p.notes %}<li class="preset-note">{{ note }}</li>{% endfor %}
-        </ul>
-        <form method="post" action="{{ p.create_url }}">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="btn small" type="submit">Create {{ p.name }}</button>
-        </form>
-      </div>
-      {% endfor %}
+      {% if not bots %}<p class="muted" data-active-item>No bots yet — create your first one, or ask the assistant: “create bot”.</p>{% endif %}
+      {# Clyde preset button (owner, 2026-11-11): ONE list, contents
+         swap — the Clyde card is a carousel item alongside the
+         active bot cards, hidden until Presets is tapped. Button
+         ONLY: no description, no rules, no notes. It looks
+         identical to an active bot card (same card + 🔥 icon +
+         chevron) and POSTs to create Clyde, landing on the bot
+         details page. #}
+      <form method="post" action="{{ clyde_preset.create_url }}" data-preset-item hidden>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="card bot-card" type="submit" aria-label="Create the Clyde bot">
+          <span class="bot-ico" aria-hidden="true">🔥</span>
+          <span class="bot-info">
+            <span class="bot-name"><strong>{{ clyde_preset.name }}</strong> <span class="badge preset">Preset</span></span>
+            <span class="muted small">{{ clyde_preset.strategy }} · Buy {{ clyde_preset.buy_size_pct }}% · Stop {{ clyde_preset.stop_loss_pct }}% · Max {{ clyde_preset.max_open_trades }}</span>
+          </span>
+          <span class="bot-arrow" aria-hidden="true">›</span>
+        </button>
+      </form>
     </div>
   </div>
 
@@ -137,16 +138,16 @@
 </div>
 
 <script nonce="{{ csp_nonce }}">
-/* Presets swap (owner, 2026-11-11): the Preset button swaps the
-   Active Bots section IN PLACE — the header becomes "Presets" and
-   the preset list takes the carousel's spot, same layout. There is
-   NO manual switch back: after 6 seconds with no input from the
-   user it swaps back to Active Bots on its own. Any input (tap,
-   scroll, key) while Presets is showing resets the 6-second
-   timer, and pressing Preset again counts as input too. */
+/* Presets swap (owner, 2026-11-11): ONE list, contents swap. The
+   Preset button hides the active bot cards inside the carousel
+   and shows the Clyde card in their spot — same layout, header
+   becomes "Presets". There is NO manual switch back: after 6
+   seconds with no input from the user it swaps back to Active
+   Bots on its own. Any input (tap, scroll, key) while Presets is
+   showing resets the 6-second timer, and pressing Preset again
+   counts as input too. */
 var botsSection = document.getElementById('bots-section');
 var presetsToggle = document.querySelector('[data-presets-toggle]');
-var presetList = document.getElementById('preset-list');
 var activeList = document.getElementById('active-bots-list');
 var activeTitle = document.querySelector('[data-active-title]');
 var presetsTitle = document.querySelector('[data-presets-title]');
@@ -155,32 +156,46 @@ var presetsIdleTimer = null;
 function clearPresetsIdleTimer() {
   if (presetsIdleTimer) { clearTimeout(presetsIdleTimer); presetsIdleTimer = null; }
 }
+function setCarouselItems(showingPresets) {
+  if (!activeList) return;
+  activeList.querySelectorAll('[data-active-item]').forEach(function (el) {
+    if (showingPresets) { el.setAttribute('hidden', ''); }
+    else { el.removeAttribute('hidden'); }
+  });
+  activeList.querySelectorAll('[data-preset-item]').forEach(function (el) {
+    if (showingPresets) { el.removeAttribute('hidden'); }
+    else { el.setAttribute('hidden', ''); }
+  });
+}
+function presetsShowing() {
+  if (!activeList) return false;
+  var preset = activeList.querySelector('[data-preset-item]');
+  return !!preset && !preset.hasAttribute('hidden');
+}
 function showActiveBots() {
-  if (!presetList || !activeList) return;
+  if (!activeList) return;
   clearPresetsIdleTimer();
-  presetList.setAttribute('hidden', '');
-  activeList.removeAttribute('hidden');
+  setCarouselItems(false);
   activeTitle.removeAttribute('hidden');
   presetsTitle.setAttribute('hidden', '');
   botsSection.classList.remove('showing-presets');
   presetsToggle.setAttribute('aria-expanded', 'false');
 }
 function armPresetsIdleTimer() {
-  if (!presetList || presetList.hasAttribute('hidden')) return;
+  if (!presetsShowing()) return;
   clearPresetsIdleTimer();
   presetsIdleTimer = setTimeout(showActiveBots, PRESETS_IDLE_MS);
 }
 function showPresets() {
-  if (!presetList || !activeList) return;
-  presetList.removeAttribute('hidden');
-  activeList.setAttribute('hidden', '');
+  if (!activeList) return;
+  setCarouselItems(true);
   activeTitle.setAttribute('hidden', '');
   presetsTitle.removeAttribute('hidden');
   botsSection.classList.add('showing-presets');
   presetsToggle.setAttribute('aria-expanded', 'true');
   armPresetsIdleTimer();
 }
-if (presetsToggle && presetList && activeList) {
+if (presetsToggle && activeList) {
   /* Pressing Preset again is input, not a toggle back — it just
      re-shows Presets and restarts the idle timer. */
   presetsToggle.addEventListener('click', showPresets);
