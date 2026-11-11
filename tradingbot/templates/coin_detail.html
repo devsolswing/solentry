@@ -5,15 +5,15 @@
   <p><a class="btn ghost small" href="{{ url_for('wallet') }}">← Wallet</a> <a class="btn ghost small" href="{{ url_for('dashboard') }}">Coins</a> <a class="btn small" href="{{ url_for('coin_detail', coin_id=coin.coin_id, range=range_key) }}">↻ Refresh</a></p>
   <h1>{{ coin.name }} <span class="muted">({{ coin.ticker }})</span></h1>
   <p class="muted small">{{ mode_label }}</p>
-  <p class="big-num" id="live-price">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>
-  <div class="live-chart" id="live-chart" data-tick-url="{{ url_for('coin_tick', coin_id=coin.coin_id) }}">
+  <p class="big-num" id="live-price" data-live-price="{{ coin.coin_id }}">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>
+  <div class="live-chart" id="live-chart" data-tick-url="{{ url_for('coin_tick', coin_id=coin.coin_id) }}" data-coin-id="{{ coin.coin_id }}">
     <p class="muted small live-status">Live — updating every second · Last updated <span id="live-updated">—</span></p>
     <svg id="live-chart-svg" viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Live price chart, last 2 minutes">
       <polyline id="live-chart-line" fill="none" stroke="#ffd700" stroke-width="1.5" points="" />
     </svg>
     <p class="muted small" id="live-chart-note">Waiting for the first live tick…</p>
   </div>
-  <p class="muted small">{% if coin.change_24h is not none %}24h <span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}24h change unavailable{% endif %} · Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
+  <p class="muted small">24h <span data-live-change-24h="{{ coin.coin_id }}">{% if coin.change_24h is not none %}<span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span> · Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
 
   <div class="chart-ranges" role="group" aria-label="Chart range">
     {% for key, (label, days) in ranges.items() %}
@@ -31,7 +31,7 @@
     <p>Buyers / sellers (24h): <strong>{% if flow %}Buyers {{ "%.0f"|format(flow.buys_pct) }}% / Sellers {{ "%.0f"|format(flow.sells_pct) }}% <span class="muted small">({{ flow.buys }} buys, {{ flow.sells }} sells)</span>{% else %}<span class="muted">—</span>{% endif %}</strong></p>
   </div>
 
-  <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ "%.4f"|format(coin.avg_price) }}{% endif %}{% if coin.pnl is not none %} · P&amp;L <strong>{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
+  <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ "%.4f"|format(coin.avg_price) }}{% endif %} · P&amp;L <strong data-live-pnl="{{ coin.coin_id }}" data-live-amount="{{ coin.held }}" data-live-avg="{{ coin.avg_price }}">{% if coin.pnl is not none %}{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}{% else %}—{% endif %}</strong>{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 
   <div class="coin-actions-row">
     <button class="btn coin-action-btn" type="button" data-overlay-open="coin-send-overlay">↑ Send</button>

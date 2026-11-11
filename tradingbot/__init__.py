@@ -87,6 +87,18 @@ def create_app(config: Config | None = None) -> Flask:
         resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         return resp
 
+    from .livefeed import LiveFeed
+
+    # One live-feed service for the whole app (validated ticks for
+    # majors + watched mints). Created here, started only from run.py
+    # — create_app never opens sockets, so tests stay offline.
+    app.config["LIVE_FEED"] = LiveFeed(cfg)
+    # Flask-Sock: the app's own WebSocket (/ws/live) runs on the same
+    # server. The route itself is registered in register_routes.
+    from flask_sock import Sock
+
+    app.config["SOCK"] = Sock(app)
+
     from .routes import register_routes
 
     register_routes(app)

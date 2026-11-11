@@ -963,13 +963,18 @@ def top10_watch_loop(db_path: str, cfg: Config,
 
 def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
              rpc_factory=None, real_executor=None,
-             trenches_fetcher=None) -> list:
+             trenches_fetcher=None, feed=None) -> list:
     """One loop iteration over every silent-enabled bot.
 
     Returns a list of per-bot outcome dicts. A failure for one bot is
     recorded and never stops the others. The trenches feed (DexScreener)
     is fetched at most once per iteration, only when at least one
-    silent bot has a valid trenches or scanner rule set.
+    silent bot has a valid trenches or scanner rule set. When a live
+    feed is passed, both price sources are sanitized against it first:
+    a price the feed rejects as an absurd single-tick jump never
+    reaches an evaluation or a snapshot — the coin reads as unpriced
+    for this iteration instead. With no feed, prices pass through
+    exactly as before.
     """
     price_fetcher = price_fetcher or get_prices
     rpc_factory = rpc_factory or SolanaRpcClient
@@ -990,6 +995,13 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             "SELECT DISTINCT coin_id FROM bot_positions WHERE bot_id IN "
             "(SELECT id FROM bots WHERE silent = 1)").fetchall()]
         trenches_data = trenches_fetcher(mints=held_mints)
+    if feed is not None:
+        # Bad-tick guard: an absurd price never becomes a buy/sell
+        # signal or a snapshot value. The sanitizers return copies;
+        # the fetched data is untouched.
+        prices_data = feed.sanitize_prices_data(prices_data)
+        if trenches_data is not None:
+            trenches_data = feed.sanitize_trenches(trenches_data)
     outcomes = []
     for bot in bots:
         # Platform gate: real execution is built against the pump.fun
@@ -1087,7 +1099,7 @@ def _record_snapshots(db: sqlite3.Connection, cfg: Config,
 def loop_forever(db_path: str, cfg: Config, interval: int | None = None,
                  price_fetcher=None, rpc_factory=None,
                  real_executor=None, once: bool = False,
-                 trenches_fetcher=None) -> None:
+                 trenches_fetcher=None, feed=None) -> None:
     """Run iterations forever (or once with once=True). Opens a fresh
     DB connection per iteration so the web process's connection is
     never shared across threads. The 15-second top-10 watch starts
@@ -1124,7 +1136,8 @@ def loop_forever(db_path: str, cfg: Config, interval: int | None = None,
             outcomes = run_once(db, cfg, price_fetcher=price_fetcher,
                                 rpc_factory=rpc_factory,
                                 real_executor=real_executor,
-                                trenches_fetcher=trenches_fetcher)
+                                trenches_fetcher=trenches_fetcher,
+                                feed=feed)
         except Exception as exc:  # loop-level failure: log, keep going
             print(f"[silent-loop] iteration failed: {exc}", flush=True)
             outcomes = []
@@ -1154,6 +1167,7 @@ def start_background_loop(app) -> threading.Thread | None:
     thread = threading.Thread(
         target=loop_forever,
         args=(cfg.database_path, cfg, cfg.silent_loop_interval_seconds),
+        kwargs={"feed": app.config.get("LIVE_FEED")},
         daemon=True, name="silent-loop")
     thread.start()
     app._silent_loop_started = True

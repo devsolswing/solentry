@@ -7,10 +7,10 @@
 {% if mode == 'paper' %}
 <div class="card">
   <h2>Balance — paper portfolio</h2>
-  <p class="big-num">${{ "%.2f"|format(totals.total_value_usd) }} CAD</p>
-  <p class="muted">Cash: ${{ "%.2f"|format(totals.cash_usd) }} CAD · Holdings: ${{ "%.2f"|format(totals.holdings_value_usd) }} CAD</p>
+  <p class="big-num" data-live-total-portfolio data-live-cash="{{ totals.cash_usd }}">${{ "%.2f"|format(totals.total_value_usd) }} CAD</p>
+  <p class="muted">Cash: ${{ "%.2f"|format(totals.cash_usd) }} CAD · Holdings: <span data-live-total-value>${{ "%.2f"|format(totals.holdings_value_usd) }}</span> CAD</p>
   <p>P&amp;L vs ${{ "%.2f"|format(start_cash) }} CAD starting paper cash:
-    <strong>{% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }} CAD</strong></p>
+    <strong data-live-total-pnl>{% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}</strong> CAD</p>
   <p class="muted small">Paper trading is fake money. Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
 </div>
 {% else %}
@@ -33,9 +33,9 @@
     <tr><th>Coin</th><th>Amount</th><th>Avg price</th><th>Current price</th><th>Value</th><th>P&amp;L</th></tr>
     {% for h in totals.holdings %}
     <tr><td>{{ h.coin_id }}</td><td>{{ "%.4f"|format(h.amount) }}</td><td>${{ "%.4f"|format(h.avg_price) }}</td>
-      <td>{% if h.price is not none %}${{ "%.4f"|format(h.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</td>
-      <td>${{ "%.2f"|format(h.value) }}</td>
-      <td>{% if h.pnl is not none %}{% if h.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(h.pnl) }}{% else %}<span class="muted">—</span>{% endif %}</td></tr>
+      <td><span data-live-price="{{ h.coin_id }}">{% if h.price is not none %}${{ "%.4f"|format(h.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span></td>
+      <td><span data-live-value="{{ h.coin_id }}" data-live-amount="{{ h.amount }}">${{ "%.2f"|format(h.value) }}</span></td>
+      <td><span data-live-pnl="{{ h.coin_id }}" data-live-amount="{{ h.amount }}" data-live-avg="{{ h.avg_price }}">{% if h.pnl is not none %}{% if h.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(h.pnl) }}{% else %}<span class="muted">—</span>{% endif %}</span></td></tr>
     {% endfor %}
   </table>
   <p class="muted small">Coins with no current price are valued at their average cost and their P&amp;L is shown as —, never guessed.</p>

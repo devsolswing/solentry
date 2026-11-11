@@ -533,6 +533,59 @@ redeploys unless a volume is attached — attach a Railway volume at the
 `DATABASE_PATH` location before real users sign up). For mainnet, set
 `NETWORK=mainnet` only on explicit config, after a devnet shakedown.
 
+## Live price feed (WebSocket)
+
+One feed serves the whole app (`tradingbot/livefeed.py`): the server
+subscribes to upstream sources, validates every tick, and pushes
+validated ticks to browsers over the app's own WebSocket at `/ws/live`
+(login required). Pages subscribe to the coins they show; prices,
+holdings values, P&L, 1h/24h %, and the coin-detail chart update live
+without a reload. If the socket drops, the page falls back to polling
+`GET /api/live?coins=...` every 10 seconds and says so in the status
+pill. The older per-page REST tick endpoint (`/api/coins/<id>/tick`)
+is kept as a second fallback. Every displayed price shows its source
+and last-updated time (hover any live number); a stale tick is dimmed
+and labelled with its age, never shown as fresh.
+
+**Sources (all free, no key):**
+
+| Source | What it feeds | How |
+|---|---|---|
+| Kraken public WebSocket (`wss://ws.kraken.com`) | BTC / ETH / SOL majors | live ticker subscription |
+| DexScreener public REST | pump.fun mint prices + 1h/24h changes | polled every 5s for watched mints |
+| Jupiter lite-api v3 (`lite-api.jup.ag/price/v3`) | SOL cross-check | polled every 60s; used only if Kraken SOL is stale/missing, or logged as a warning if the two disagree by >5% |
+| CoinGecko REST | fallback only (free tier is rate-limited) | the pre-existing price path, unchanged |
+
+**Left out, on purpose:** Binance — its public REST and WebSocket
+both return HTTP 451 from US IPs, and Railway runs in US East, so
+Binance cannot serve this app. DexScreener's own WebSocket streams
+only token profiles, boosts, and takeovers — not pair prices — so
+mint prices are polled, not streamed. PumpPortal's WebSocket
+(`wss://pumpportal.fun/api/data`) streams new-token events live and
+works without a key; it is a candidate real-time mint source for a
+later step (it needs per-mint trade subscriptions plus reconnect
+handling, which the current poll already covers).
+
+**Tick validation — why a bad price can never again inflate a
+balance:** every tick is checked against the last good price for
+that coin before it is used or shown. A single tick jumping more
+than **50%** is rejected and logged, and the last good price stands.
+A genuine step change is still picked up: three consecutive ticks
+agreeing at the new level (within 5% of each other) re-base the
+reference. Non-positive and non-finite prices are always rejected.
+Data goes stale **30 seconds** after its last good tick. The same
+validation gates the silent loop: prices and trenches data are
+sanitised before evaluation and before a portfolio snapshot is
+recorded, so a rejected tick can never become a trade signal or a
+spiked balance — the $709,599.60 incident (one bad print, one
+minute) cannot recur through this path. The P&L chart is still
+snapshot history: it updates when the loop records snapshots, not
+tick-by-tick.
+
+Kill switch: `LIVE_FEED_ENABLED=0` stops the upstream threads; the
+app keeps serving from the existing REST feeds. No new secret is
+needed — every source above is keyless.
+
 ## Security rules (do not weaken)
 
 - Never log, print, or return a private key, password, session secret,

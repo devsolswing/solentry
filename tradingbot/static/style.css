@@ -39,7 +39,16 @@ h3 { font-size: 15px; margin: 14px 0 6px; }
 .muted { color: #b9a99a; }
 .small { font-size: 12px; }
 .big-num { font-size: 26px; font-weight: 800; margin: 6px 0; color: #ffd700; }
+/* Live feed: the status pill in the topbar (source + freshness of
+   the last tick), and stale ticks shown dimmed, never as fresh. */
+.live-status { font-size: 12px; font-weight: 700; color: #b9a99a; white-space: nowrap; }
+.live-status.live-up { color: #4ade80; }
+.live-status.live-down { color: #fbbf24; }
+.live-stale { opacity: .55; }
 .addr { word-break: break-all; background: #000; border: 2px solid #ffb300; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 13px; }
+/* Plain refusal (coin detail Send/Receive when the coin is not a
+   Solana asset): red-bordered box, impossible to mistake for a form. */
+.refusal { background: #2a0705; border: 2px solid #f87171; border-radius: 8px; padding: 12px; color: #fecaca; }
 .btn { display: inline-block; background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border: 2px solid #ffcf3d; border-radius: 999px; padding: 10px 16px; font-size: 15px; font-weight: 700; cursor: pointer; text-decoration: none; }
 .btn.ghost { background: transparent; border: 1px solid #ffb300; color: #ffd700; }
 .btn.danger { background: #dc2626; margin-top: 12px; }

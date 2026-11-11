@@ -5,7 +5,14 @@
    with the bot's limits for real, two-step confirm for sends).
    Every action ends on a confirmation stating the result, with a
    way back to the coin page. Expects: coin (row), bots, mode
-   ('paper' or 'devnet'), mode_label, receive_address. #}
+   ('paper' or 'devnet'), mode_label, receive_address, coin_network
+   (which chain the coin lives on), send_refusal (plain refusal when
+   the coin is not a Solana asset, else None), network_label
+   ("Solana (devnet)"). The Send and Receive windows account for
+   the network: a Solana coin shows the network it will use in plain
+   words; a coin that lives on another chain is refused plainly —
+   its address is never shown and no send form is rendered, so
+   nothing can be sent on the wrong network. #}
 
 <div class="overlay hidden" id="coin-buy-overlay" role="dialog" aria-label="Buy {{ coin.name }}">
   <div class="coin-popup">
@@ -98,9 +105,14 @@
   <div class="coin-popup">
     <p class="popup-head"><button class="popup-close" type="button" data-overlay-close aria-label="Close">✕</button></p>
     <h2>Receive {{ coin.name }}</h2>
-    <p class="muted small">Send {{ coin.ticker }} to this address — it lands in your app wallet ({{ mode_label }}).</p>
+    {% if coin_network.is_solana %}
+    <p class="muted small">Network: <strong>{{ network_label }}</strong></p>
+    <p class="muted small">Send {{ coin.ticker }} to this address — it lands in your app wallet ({{ mode_label }}). Only send on the Solana network — anything sent on another network will not arrive.</p>
     <p class="addr">{{ receive_address }}</p>
     <p><button class="btn big" type="button" data-copy="{{ receive_address }}">Copy address</button></p>
+    {% else %}
+    <p class="refusal"><strong>Can't receive {{ coin.name }} here.</strong> {{ send_refusal }}</p>
+    {% endif %}
     <p><button class="btn ghost big" type="button" data-overlay-close>← Back to coin</button></p>
   </div>
 </div>
@@ -109,6 +121,8 @@
   <div class="coin-popup">
     <p class="popup-head"><button class="popup-close" type="button" data-overlay-close aria-label="Close">✕</button></p>
     <h2>Send {{ coin.name }} ({{ coin.ticker }})</h2>
+    {% if coin_network.is_solana %}
+    <p class="muted small">Network: <strong>{{ network_label }}</strong> — this sends SOL{% if coin.ticker != "SOL" %}, not {{ coin.ticker }}{% endif %}. SolEntry sends SOL only.</p>
     <p class="muted">Step 1 of 2 — enter the details. Nothing moves yet; the next screen asks you to confirm, then takes you back to this coin.</p>
     <form method="post" action="{{ url_for('wallet_send') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -118,6 +132,9 @@
       <label>Amount (SOL)<input type="number" name="amount" step="any" min="0" required placeholder="0.1"></label>
       <button class="btn big" type="submit">Review send →</button>
     </form>
+    {% else %}
+    <p class="refusal"><strong>Can't send {{ coin.name }} from here.</strong> {{ send_refusal }}</p>
+    {% endif %}
     <p><button class="btn ghost big" type="button" data-overlay-close>← Back to coin</button></p>
   </div>
 </div>

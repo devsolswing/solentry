@@ -7,7 +7,15 @@
    real price stays on screen with its time, and the note says the
    feed is unavailable. The "last updated" time comes from the
    tick's own as_of — for a cached feed price that is when the
-   price was fetched, not when this tick arrived. */
+   price was fetched, not when this tick arrived.
+
+   When the app WebSocket is up (live.js sets
+   window.__solentryLiveUp), the socket owns the ticks: this poller
+   stands down and live.js feeds ticks into the same applyTick
+   below, so the price, chart and note update from the socket
+   instead. When the socket drops, the flag clears and this poller
+   resumes on its next second — the REST fallback, with no gap in
+   the chart. */
 (function () {
   'use strict';
   var chart = document.getElementById('live-chart');
@@ -42,7 +50,33 @@
     line.setAttribute('points', pts.join(' '));
   }
 
+  /* One validated tick, from the REST poll or the live WebSocket:
+     update the price, the "last updated" time, the chart and the
+     note. asOf is a Date (the tick's own time); source names the
+     feed the tick came from. */
+  function applyTick(price, asOf, source) {
+    if (typeof price !== 'number' || isNaN(price)) return;
+    if (!(asOf instanceof Date) || isNaN(asOf.getTime())) {
+      asOf = new Date();
+    }
+    lastOkAt = asOf;
+    if (priceEl) priceEl.textContent = '$' + price.toFixed(4);
+    if (updatedEl) updatedEl.textContent = fmtTime(asOf);
+    points.push(price);
+    if (points.length > MAX_POINTS) points.shift();
+    draw();
+    if (note) {
+      note.textContent = 'Live · ' + points.length + ' tick'
+        + (points.length === 1 ? '' : 's')
+        + ' · source: ' + (source || 'feed');
+    }
+  }
+
+  /* The live feed (live.js) calls this for every socket tick. */
+  window.SolEntryTick = { apply: applyTick };
+
   function tick() {
+    if (window.__solentryLiveUp) return;
     fetch(url, { credentials: 'same-origin' })
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
@@ -58,17 +92,7 @@
         }
         var asOf = data.as_of ? new Date(data.as_of) : new Date();
         if (isNaN(asOf.getTime())) asOf = new Date();
-        lastOkAt = asOf;
-        if (priceEl) priceEl.textContent = '$' + data.price.toFixed(4);
-        if (updatedEl) updatedEl.textContent = fmtTime(asOf);
-        points.push(data.price);
-        if (points.length > MAX_POINTS) points.shift();
-        draw();
-        if (note) {
-          note.textContent = 'Live · ' + points.length + ' tick'
-            + (points.length === 1 ? '' : 's')
-            + ' · source: ' + (data.source || 'feed');
-        }
+        applyTick(data.price, asOf, data.source);
       })
       .catch(function () {
         if (note) {

@@ -15,6 +15,11 @@
   </div>
   {% if current_user %}
   <div class="top-actions">
+    {# Live-feed status: hidden until live.js runs on a page with
+       live numbers. Shows the source and how fresh the last tick
+       is — "● Live · 12:03:44 · kraken" — or that the feed is down
+       and the page is showing last prices. #}
+    <span id="live-status" class="live-status" hidden>↻ Connecting to live feed…</span>
     {# Paper/Devnet switch lives in the topbar now — same form,
        same endpoint, works from every page. #}
     <form method="post" action="{{ url_for('mode_switch') }}" class="hud-mode">
@@ -85,5 +90,6 @@
 <script src="{{ url_for('static', filename='ui.js') }}"></script>
 <script src="{{ url_for('static', filename='quick_trade.js') }}"></script>
 <script src="{{ url_for('static', filename='coin_tick.js') }}"></script>
+<script src="{{ url_for('static', filename='live.js') }}"></script>
 </body>
 </html>

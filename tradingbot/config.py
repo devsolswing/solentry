@@ -60,6 +60,14 @@ class Config:
         # bots the user explicitly switched to silent.
         self.silent_loop_enabled: bool = env.get(
             "SILENT_LOOP_ENABLED", "0") == "1"
+        # Live price feed: Kraken WebSocket for majors, DexScreener
+        # poll for pump.fun mints, Jupiter cross-check for SOL. Runs
+        # as daemon threads inside the web process (started from
+        # run.py, never from create_app). ON by default — set
+        # LIVE_FEED_ENABLED=0 to kill it; the app keeps serving from
+        # the existing REST feeds.
+        self.live_feed_enabled: bool = env.get(
+            "LIVE_FEED_ENABLED", "1") == "1"
         self.silent_loop_interval_seconds: int = max(
             10, int(env.get("SILENT_LOOP_INTERVAL_SECONDS", "60")))
         # WebAuthn passkeys: RP identity comes from env vars only —

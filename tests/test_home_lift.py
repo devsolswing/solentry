@@ -170,7 +170,12 @@ class TestHomeLiftLayout(HomeLiftBase):
         self._hold_mint()
         html = self._html("/wallet")
         self.assertIn("Pump.fun token 1111…1111", html)
-        self.assertIn('class="holdings-1h muted">—', html)
+        # No 1h data: the 1h cell still shows a dash, never a guess.
+        # (The dash sits in the live-update value span, ahead of the
+        # "1h" label, so the live feed can fill it when data arrives.)
+        self.assertIn('class="holdings-1h muted"', html)
+        self.assertIn('>—</span><span class="holdings-1h-label">1h</span>',
+                      html)
 
     def test_home_has_no_back_button_x(self):
         self._choose_mode("paper")

@@ -39,6 +39,7 @@ from . import assistant as assistant_mod
 from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
 from . import donations as donations_mod
+from . import networks as networks_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
 from . import pnl as pnl_mod
@@ -466,7 +467,8 @@ def _real_avg_price(app, mint: str, amount_sol: float,
     return 0.0
 
 
-def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
+def _coin_rows(db, user_id: int, mode: str, prices: dict,
+               feed=None) -> list:
     """The coins list: ONLY the coins the user holds in the ACTIVE
     mode, with name, ticker, current price, P&L and 1-hour % change.
     Coins the user does not hold are not listed here at all — the
@@ -474,7 +476,11 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
     are how new coins are found. P&L is (current price − average
     cost) × amount; a holding with no current price has P&L None
     and is valued at cost — never guessed. A holding with no 1h
-    figure in the feed has change_1h None ("—" on the page)."""
+    figure in the feed has change_1h None ("—" on the page). When a
+    live feed is passed, any price it rejects against its last good
+    tick is dropped here too, so a bad tick can never inflate a
+    balance on render; with no feed (or no reference yet) every
+    price passes unchanged."""
     price_map = {c: e.get("price") for c, e in prices["prices"].items()}
     if mode == "devnet":
         held = {h["coin_id"]: h for h in _real_holdings_view(db, user_id)}
@@ -495,6 +501,12 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict) -> list:
             changes_1h = fetch_mint_1h_changes(mint_ids)
         except Exception:
             changes_1h = {}
+    # A bad tick must never inflate a balance on render either: drop
+    # any price the live feed rejects against its last good tick. No
+    # reference yet (feed empty or off) means everything passes.
+    if feed is not None:
+        price_map = {c: p for c, p in price_map.items()
+                     if p is None or feed.would_accept(c, p)}
     rows = []
     for symbol, info in COINS.items():
         h = held.get(symbol)
@@ -1355,7 +1367,7 @@ def register_routes(app: Flask) -> None:
         real_sol = (_real_balance(app, wallet["pubkey"])
                     if wallet and mode == "devnet" else None)
         prices = get_prices()
-        coin_rows = _coin_rows(db, user["id"], mode, prices)
+        coin_rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"))
         holdings_value = sum(r["held"] * (r["price"] or 0.0)
                              for r in coin_rows)
         # Portfolio header (Kraken-style): total balance + chart from
@@ -1553,7 +1565,7 @@ def register_routes(app: Flask) -> None:
         if coin_id_resolved is None:
             abort(404)
         prices = get_prices()
-        rows = _coin_rows(db, user["id"], mode, prices)
+        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"))
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
         if row is None:
@@ -1583,7 +1595,7 @@ def register_routes(app: Flask) -> None:
         if coin_id_resolved is None:
             abort(404)
         prices = get_prices()
-        rows = _coin_rows(db, user["id"], mode, prices)
+        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"))
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
         if row is None:
@@ -1620,7 +1632,14 @@ def register_routes(app: Flask) -> None:
             mode_label=_mode_label(mode),
             receive_address=wallet["pubkey"] if wallet else "",
             prices_source=prices["source"],
-            prices_as_of=prices["as_of"])
+            prices_as_of=prices["as_of"],
+            # Page 5 Send/Receive must account for the network: the
+            # coin's chain, the plain refusal when it is not a Solana
+            # asset, and the network this app sends on.
+            coin_network=networks_mod.coin_network(coin_id_resolved),
+            send_refusal=networks_mod.send_refusal(
+                coin_id_resolved, _cfg(app).network),
+            network_label=networks_mod.network_label(_cfg(app).network))
 
     @app.route("/api/coins/<coin_id>/tick")
     @login_required
@@ -1663,6 +1682,102 @@ def register_routes(app: Flask) -> None:
         return jsonify({"ok": False, "coin_id": coin_id, "price": None,
                         "source": None, "as_of": _now(),
                         "error": "Unknown coin — no live price."})
+
+    # ------------------------------------------------------------------
+    # Live prices over WebSocket (/ws/live) + REST snapshot (/api/live).
+    # One feed for the whole app (see livefeed.py): browsers subscribe
+    # to the coins on their page and get validated ticks pushed as
+    # they arrive. A tick the feed rejected never reaches this socket.
+    # The REST tick endpoint above stays as the fallback: when the
+    # socket drops, live.js polls /api/live instead and says so.
+    # ------------------------------------------------------------------
+    @app.route("/api/live")
+    @login_required
+    def live_snapshot():
+        coins = [c.strip()
+                 for c in (request.args.get("coins") or "").split(",")
+                 if c.strip()]
+        feed = app.config["LIVE_FEED"]
+        return jsonify({"ok": True,
+                        "ticks": feed.snapshot(coins or None),
+                        "as_of": _now()})
+
+    sock = app.config["SOCK"]
+
+    @sock.route("/ws/live")
+    def live_ws(ws):
+        user = _current_user(app)
+        if user is None:
+            try:
+                ws.send(json.dumps(
+                    {"type": "error",
+                     "error": "Sign in to use live prices."}))
+            except Exception:
+                pass
+            return
+        feed = app.config["LIVE_FEED"]
+        subscribed: list = []
+        last_sent: dict = {}
+
+        def _push_new():
+            # Dedup on the whole tick, not just its timestamp: as_of
+            # is second-precision, so two ticks in the same second
+            # with different prices must both be pushed.
+            snap = feed.snapshot(subscribed)
+            for cid, tick in snap.items():
+                if last_sent.get(cid) == tick:
+                    continue
+                ws.send(json.dumps({"type": "tick", **tick}))
+                last_sent[cid] = tick
+
+        try:
+            while True:
+                try:
+                    msg = ws.receive(timeout=0.5)
+                except Exception:
+                    break  # connection closed
+                try:
+                    if msg is not None:
+                        try:
+                            data = json.loads(msg)
+                        except Exception:
+                            data = {}
+                        want = data.get("subscribe")
+                        if isinstance(want, list):
+                            # Only real coins: known symbols or valid
+                            # mint addresses, at most 100 per
+                            # connection.
+                            new_subs = []
+                            for coin in want:
+                                if not isinstance(coin, str):
+                                    continue
+                                if coin.upper() in COINS:
+                                    new_subs.append(coin.upper())
+                                elif is_valid_address(coin):
+                                    new_subs.append(coin)
+                                if len(new_subs) >= 100:
+                                    break
+                            for coin in subscribed:
+                                if coin not in new_subs \
+                                        and coin not in COINS:
+                                    feed.unsubscribe_mint(coin)
+                            for coin in new_subs:
+                                if coin not in subscribed \
+                                        and coin not in COINS:
+                                    feed.subscribe_mint(coin)
+                            subscribed = new_subs
+                            snap = feed.snapshot(subscribed)
+                            ws.send(json.dumps(
+                                {"type": "snapshot", "ticks": snap}))
+                            last_sent = dict(snap)
+                    if subscribed:
+                        _push_new()
+                except Exception:
+                    break  # send failed — the connection is gone
+        finally:
+            for coin in subscribed:
+                if coin not in COINS:
+                    feed.unsubscribe_mint(coin)
 
     def _coin_result(heading: str, lines: list, ok: bool,
                      coin_id: str, mode_label: str):
@@ -2073,6 +2188,13 @@ def register_routes(app: Flask) -> None:
                         price_map[mint] = price
                 except Exception:
                     pass
+            # Bad-tick guard, as in _coin_rows: drop any price the
+            # live feed rejects, so a bad print can never inflate
+            # the real-holdings total on this page.
+            _feed = app.config.get("LIVE_FEED")
+            if _feed is not None:
+                price_map = {c: p for c, p in price_map.items()
+                             if p is None or _feed.would_accept(c, p)}
             holdings = []
             for h in real_rows:
                 raw_price = price_map.get(h["coin_id"])
@@ -2120,6 +2242,13 @@ def register_routes(app: Flask) -> None:
                     price_map[mint] = price
             except Exception:
                 pass
+        # Bad-tick guard, as in _coin_rows: drop any price the live
+        # feed rejects, so a bad print can never inflate the paper
+        # portfolio total on this page.
+        _feed = app.config.get("LIVE_FEED")
+        if _feed is not None:
+            price_map = {c: p for c, p in price_map.items()
+                         if p is None or _feed.would_accept(c, p)}
         totals = pnl_mod.portfolio_totals(db, user["id"], price_map)
         start_cash = _cfg(app).paper_start_cash
         points, has_data = pnl_mod.chart_points(db, user["id"], range_key)
@@ -2249,6 +2378,22 @@ def register_routes(app: Flask) -> None:
             if amount <= 0:
                 flash("Amount must be more than 0.")
                 return redirect(url_for("wallet_send"))
+            # The coin detail page's Send posts here with
+            # return_to=coin:<id>. A coin that is not a Solana asset
+            # is refused here too — the template hides the form, but
+            # a crafted POST must not be able to send on the wrong
+            # network. The refusal names the coin's network, and no
+            # intent is created. (A return_to that names no real coin
+            # falls through to the plain wallet send, as before.)
+            return_to = (request.form.get("return_to") or "").strip()
+            coin_id = _coin_return_to(return_to)
+            if coin_id:
+                refusal = networks_mod.send_refusal(
+                    coin_id, _cfg(app).network)
+                if refusal:
+                    flash(refusal)
+                    return redirect(url_for("coin_detail",
+                                            coin_id=coin_id))
             lamports = sol_to_lamports(amount)
             db = _db(app)
             # Anti-bot / wallet protection: at most 10 sends an hour,
@@ -2277,13 +2422,13 @@ def register_routes(app: Flask) -> None:
             # through, so the completed send lands back on the coins
             # screen instead of the wallet page. return_to=coin:<id>
             # (from a coin detail page's Send window) carries
-            # through to that coin's page instead.
-            return_to = (request.form.get("return_to") or "").strip()
+            # through to that coin's page instead. return_to and
+            # coin_id were resolved above, before the intent was
+            # created (the network check lives there).
             if return_to == "coins":
                 return redirect(url_for("wallet_send_confirm",
                                         intent_id=cur.lastrowid,
                                         return_to="coins"))
-            coin_id = _coin_return_to(return_to)
             if coin_id:
                 return redirect(url_for("wallet_send_confirm",
                                         intent_id=cur.lastrowid,
@@ -2386,7 +2531,17 @@ def register_routes(app: Flask) -> None:
                                     "wallet"))
         return render_template("send_confirm.html", intent=intent,
                                return_to=return_to,
-                               return_coin_id=return_coin_id)
+                               return_coin_id=return_coin_id,
+                               # The Network row in the template was
+                               # rendering the bare config value
+                               # ("devnet") from the context processor
+                               # — not the network in plain words.
+                               # The confirm step must state the
+                               # network alongside destination, amount
+                               # and token — it is always Solana on
+                               # this app's configured network.
+                               network=networks_mod.network_label(
+                                   _cfg(app).network))
 
     # ------------------------------------------------------------------
     # Platform wallets: one wallet per trading platform, per user.

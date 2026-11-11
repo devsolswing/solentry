@@ -8,8 +8,8 @@
 </form>
 <div class="card portfolio-head">
   <p class="portfolio-mode"><strong>{{ mode_label }}</strong></p>
-  <p class="portfolio-total">{% if mode == 'paper' %}${{ "%.2f"|format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "%.2f"|format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable{% endif %}{% endif %}</p>
-  <p class="muted small">{% if mode == 'paper' %}${{ "%.2f"|format(paper_cash) }} CAD cash · Holdings ${{ "%.2f"|format(holdings_value) }} CAD{% else %}Your app wallet, on-chain (devnet){% endif %}</p>
+  <p class="portfolio-total"{% if mode == 'paper' %} data-live-total-portfolio data-live-cash="{{ paper_cash }}"{% endif %}>{% if mode == 'paper' %}${{ "%.2f"|format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "%.2f"|format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable{% endif %}{% endif %}</p>
+  <p class="muted small">{% if mode == 'paper' %}${{ "%.2f"|format(paper_cash) }} CAD cash · Holdings <span data-live-total-value>${{ "%.2f"|format(holdings_value) }}</span> CAD{% else %}Your app wallet, on-chain (devnet){% endif %}</p>
   <div class="portfolio-chart">
     {% if portfolio_has_data %}{{ portfolio_chart_svg|safe }}{% else %}<p class="muted small">No chart data yet — your portfolio chart builds as you trade.</p>{% endif %}
   </div>
@@ -21,9 +21,9 @@
   {% for row in coin_rows %}
   <a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
     <span class="coin-name"><strong>{{ row.name }}</strong><span class="muted small"> {{ row.ticker }}</span></span>
-    <span class="coin-price">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span>
-    <span class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
-    <span class="coin-pnl">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+    <span class="coin-price" data-live-price="{{ row.coin_id }}">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span>
+    <span data-live-change-24h="{{ row.coin_id }}" class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+    <span class="coin-pnl" data-live-pnl="{{ row.coin_id }}" data-live-amount="{{ row.held }}" data-live-avg="{{ row.avg_price }}">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
   </a>
   {% endfor %}
   {% if not coin_rows %}
@@ -40,8 +40,8 @@
   {% for t in trenches_rows %}
   <a class="coin-row" href="{{ url_for('coin_popup', coin_id=t.mint) }}">
     <span class="coin-name"><strong>{{ t.name }}</strong><span class="muted small"> {{ t.symbol }}</span></span>
-    <span class="coin-price">${{ "%.4f"|format(t.price_usd) }}</span>
-    <span class="coin-change">{% if t.change_1h_pct is not none %}<span class="{{ 'up' if t.change_1h_pct >= 0 else 'down' }}">{% if t.change_1h_pct >= 0 %}+{% endif %}{{ "%.1f"|format(t.change_1h_pct) }}% 1h</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+    <span class="coin-price" data-live-price="{{ t.mint }}">${{ "%.4f"|format(t.price_usd) }}</span>
+    <span data-live-change-1h="{{ t.mint }}" class="coin-change">{% if t.change_1h_pct is not none %}<span class="{{ 'up' if t.change_1h_pct >= 0 else 'down' }}">{% if t.change_1h_pct >= 0 %}+{% endif %}{{ "%.1f"|format(t.change_1h_pct) }}% 1h</span>{% else %}<span class="muted">—</span>{% endif %}</span>
   </a>
   {% endfor %}
   {% else %}
