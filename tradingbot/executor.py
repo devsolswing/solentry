@@ -231,6 +231,27 @@ def _tx_status(rpc, signature: str) -> str | None:
         return None
 
 
+def _tx_receipt_confirmed(rpc, signature: str) -> bool | None:
+    """Definitive check via the full transaction receipt: True
+    when the chain holds the transaction and it succeeded, False
+    when it holds it and it failed, None when there is no receipt
+    (not landed yet, or the client cannot ask). Only used after
+    the status cache stops listing the signature — its window is
+    only ~300 slots, so a slow confirmation can age out of it
+    while the transaction has in fact landed."""
+    get_tx = getattr(rpc, "get_transaction", None)
+    if get_tx is None:
+        return None
+    try:
+        receipt = get_tx(signature)
+    except Exception:
+        return None
+    if not receipt:
+        return None
+    meta = receipt.get("meta") or {}
+    return meta.get("err") is None
+
+
 def _recheck_confirmed(rpc, signature: str) -> bool:
     """Final on-chain re-check after the main confirmation window
     closed: wait briefly, then check the chain a few more times.
@@ -238,7 +259,10 @@ def _recheck_confirmed(rpc, signature: str) -> bool:
     status ends the re-check at once (the chain processed it and
     it did not succeed). A slow devnet RPC can lag behind the
     chain by seconds — this is what stops a landed transaction
-    from being reported as a failure."""
+    from being reported as a failure. When the status cache has
+    dropped the signature entirely, the receipt itself is the
+    last word: a transaction the chain holds with no error has
+    landed, whatever the cache says."""
     for delay in (3.0, 2.0, 2.0):
         time.sleep(delay)
         status = _tx_status(rpc, signature)
@@ -246,7 +270,7 @@ def _recheck_confirmed(rpc, signature: str) -> bool:
             return True
         if status == "failed":
             return False
-    return False
+    return _tx_receipt_confirmed(rpc, signature) is True
 
 
 def _is_node_rejection(exc: Exception) -> bool:

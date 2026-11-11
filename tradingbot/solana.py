@@ -608,18 +608,52 @@ class SolanaRpcClient:
         chain reports a processing error, None when the chain has
         not seen it yet — or when the status check itself failed
         transiently. A wobbly RPC is never mistaken for a failed
-        transaction: the caller keeps polling on None."""
+        transaction: the caller keeps polling on None.
+
+        The real getSignatureStatuses result is {"context": ...,
+        "value": [...]} — the status list lives under "value".
+        Reading result[0] on that shape raised KeyError on EVERY
+        check, so no transaction was ever seen as confirmed and
+        every landed send (and buy) was reported as "not
+        confirmed". A bare list is also accepted, for fakes."""
         try:
             result = self._call("getSignatureStatuses", [[signature]])
         except Exception:
             return None
-        if result and result[0]:
-            status = result[0]
-            if status.get("err") is not None:
-                return "failed"
-            if status.get("confirmationStatus") in ("confirmed", "finalized"):
-                return "confirmed"
+        entries = None
+        if isinstance(result, dict):
+            entries = result.get("value")
+        elif isinstance(result, list):
+            entries = result
+        if not entries:
+            return None
+        status = entries[0]
+        if not status:
+            return None
+        if status.get("err") is not None:
+            return "failed"
+        if status.get("confirmationStatus") in ("confirmed", "finalized"):
+            return "confirmed"
         return None
+
+    def get_transaction(self, signature: str) -> dict | None:
+        """The full transaction receipt for a signature, or None
+        when the chain has no record of it. The definitive check
+        when getSignatureStatuses no longer lists the signature —
+        its cache only holds ~300 slots, so a transaction that
+        took a while to confirm can age out of it while still
+        having landed. A receipt whose meta has no error means
+        the transaction landed, whatever the status cache says."""
+        try:
+            result = self._call(
+                "getTransaction",
+                [signature, {"encoding": "json",
+                             "maxSupportedTransactionVersion": 0}])
+        except Exception:
+            return None
+        if not isinstance(result, dict):
+            return None
+        return result
 
     def confirm_transaction(self, signature: str, attempts: int = 15,
                             delay_seconds: float = 2.0) -> bool:

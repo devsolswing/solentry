@@ -20,6 +20,8 @@ from tradingbot.solana import (
     ASSOCIATED_TOKEN_PROGRAM,
     TOKEN_2022_PROGRAM,
     TOKEN_PROGRAM,
+    RpcError,
+    SolanaRpcClient,
     base58_decode,
     build_create_associated_token_account_instruction,
     build_token_transfer_instruction,
@@ -64,6 +66,12 @@ class FakeTokenRpc:
     sol_balance = SOL_BALANCE
     confirm_result = True
     tx_status_result = "confirmed"
+    # A preflight rejection to raise from send_transaction
+    # (without recording a send), and a getTransaction receipt
+    # to return — both None by default, so existing tests are
+    # unaffected.
+    send_error = None
+    receipt = None
 
     def __init__(self, url, http_post=None, timeout=20):
         self.url = url
@@ -98,6 +106,8 @@ class FakeTokenRpc:
         return "11111111111111111111111111111111"
 
     def send_transaction(self, signed_b64):
+        if self.send_error is not None:
+            raise self.send_error
         self.send_calls.append(signed_b64)
         return FAKESIG
 
@@ -106,6 +116,9 @@ class FakeTokenRpc:
 
     def transaction_status(self, signature):
         return self.tx_status_result
+
+    def get_transaction(self, signature):
+        return self.receipt
 
 
 class TestTokenInstructions(unittest.TestCase):
@@ -276,6 +289,8 @@ class TestTokenSendFlow(unittest.TestCase):
         FakeTokenRpc.sol_balance = SOL_BALANCE
         FakeTokenRpc.confirm_result = True
         FakeTokenRpc.tx_status_result = "confirmed"
+        FakeTokenRpc.send_error = None
+        FakeTokenRpc.receipt = None
         self.ticker_patch = mock.patch.object(
             routes, "fetch_mint_identities",
             return_value={MINT: {"name": "Gate", "symbol": "GATE"}})
@@ -430,6 +445,74 @@ class TestTokenSendFlow(unittest.TestCase):
         self.assertEqual(row["status"], "sent")
         self.assertTrue(row["signature"].startswith("fakesig"))
 
+    def test_receipt_fallback_reports_landed_send(self):
+        # The status cache has dropped the signature entirely
+        # (its window is only ~300 slots), but the receipt says
+        # the transaction landed: the send is reported as sent,
+        # not failed. This is the live Gate send: the app said
+        # "transaction not confirmed" for a transaction that had
+        # landed, because the status check itself was broken.
+        FakeTokenRpc.confirm_result = False
+        FakeTokenRpc.tx_status_result = None
+        FakeTokenRpc.receipt = {"slot": 1, "meta": {"err": None}}
+        self._post_token_send()
+        intent = self._intent()
+        self.client.post(
+            f"/wallet/send/{intent['id']}/confirm",
+            data={"csrf_token": csrf(
+                self.client, f"/wallet/send/{intent['id']}/confirm")})
+        db = self.app.config["DB"]
+        row = db.execute("SELECT * FROM send_intents WHERE id = ?",
+                         (intent["id"],)).fetchone()
+        self.assertEqual(row["status"], "sent")
+        self.assertTrue(row["signature"].startswith("fakesig"))
+
+    def test_receipt_showing_failure_reports_failed_send(self):
+        # The status cache is empty and the receipt says the
+        # transaction failed on-chain: the send is failed, and
+        # no signature is recorded.
+        FakeTokenRpc.confirm_result = False
+        FakeTokenRpc.tx_status_result = None
+        FakeTokenRpc.receipt = {"slot": 1, "meta": {"err":
+                                                    {"InstructionError":
+                                                     [0, "Custom"]}}}
+        self._post_token_send()
+        intent = self._intent()
+        self.client.post(
+            f"/wallet/send/{intent['id']}/confirm",
+            data={"csrf_token": csrf(
+                self.client, f"/wallet/send/{intent['id']}/confirm")})
+        db = self.app.config["DB"]
+        row = db.execute("SELECT * FROM send_intents WHERE id = ?",
+                         (intent["id"],)).fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIsNone(row["signature"])
+        self.assertIn("not confirmed", row["error"])
+
+    def test_send_preflight_rejection_reports_rejected(self):
+        # The node refuses the transaction in preflight: a real
+        # failure, reported with the node's own error — and the
+        # chain is not re-checked, because a rejected transaction
+        # cannot have landed. Nothing is sent.
+        FakeTokenRpc.send_error = RpcError(
+            "rpc error response: sendTransaction: -32002 "
+            "Transaction simulation failed: Blockhash not found")
+        self._post_token_send()
+        intent = self._intent()
+        self.client.post(
+            f"/wallet/send/{intent['id']}/confirm",
+            data={"csrf_token": csrf(
+                self.client, f"/wallet/send/{intent['id']}/confirm")})
+        db = self.app.config["DB"]
+        row = db.execute("SELECT * FROM send_intents WHERE id = ?",
+                         (intent["id"],)).fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIsNone(row["signature"])
+        self.assertIn("transaction rejected", row["error"])
+        self.assertIn("simulation failed", row["error"])
+        self.assertEqual(
+            sum(len(i.send_calls) for i in FakeTokenRpc.instances), 0)
+
     def test_coin_page_send_window_offers_token_send(self):
         with mock.patch.object(
                 routes, "fetch_prices_for_mints",
@@ -453,6 +536,67 @@ class TestTokenSendFlow(unittest.TestCase):
         self.assertIn('name="token" value="SOL"', html)
         self.assertIn("Amount (SOL)", html)
         self.assertIn("Review send", html)
+
+
+class TestRealStatusShape(unittest.TestCase):
+    """The real RPC client's status check, against a real-shaped
+    getSignatureStatuses response. The live 10% Gate send was
+    reported as "transaction not confirmed" for a transaction
+    that had landed, because transaction_status read result[0]
+    on the {"context": ..., "value": [...]} shape — a KeyError
+    on EVERY check, so no landed transaction was ever seen as
+    confirmed. The fakes return a bare status string and never
+    exercised the real shape, which is why the suite stayed
+    green while the live path was broken."""
+
+    def _client_with_result(self, result):
+        def fake_post(url, payload):
+            return {"jsonrpc": "2.0", "id": 1, "result": result}
+        return SolanaRpcClient("https://example.invalid",
+                               http_post=fake_post)
+
+    def _status(self, confirmation_status, err=None):
+        return {"slot": 1, "confirmations": 5, "err": err,
+                "confirmationStatus": confirmation_status}
+
+    def test_confirmed_reads_from_value_list(self):
+        client = self._client_with_result(
+            {"context": {"slot": 1},
+             "value": [self._status("confirmed")]})
+        self.assertEqual(client.transaction_status("sig"), "confirmed")
+
+    def test_finalized_reads_from_value_list(self):
+        client = self._client_with_result(
+            {"context": {"slot": 1},
+             "value": [self._status("finalized")]})
+        self.assertEqual(client.transaction_status("sig"), "confirmed")
+
+    def test_failed_reads_from_value_list(self):
+        client = self._client_with_result(
+            {"context": {"slot": 1},
+             "value": [self._status(
+                 "finalized",
+                 err={"InstructionError": [0, "Custom"]})]})
+        self.assertEqual(client.transaction_status("sig"), "failed")
+
+    def test_null_entry_is_unknown_not_failed(self):
+        # The signature has aged out of the status cache (its
+        # window is only ~300 slots): unknown, never a failure.
+        client = self._client_with_result(
+            {"context": {"slot": 1}, "value": [None]})
+        self.assertIsNone(client.transaction_status("sig"))
+
+    def test_bare_list_tolerated_for_fakes(self):
+        client = self._client_with_result([self._status("confirmed")])
+        self.assertEqual(client.transaction_status("sig"), "confirmed")
+
+    def test_rpc_error_is_unknown_not_failed(self):
+        def failing_post(url, payload):
+            return {"jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32603, "message": "oops"}}
+        client = SolanaRpcClient("https://example.invalid",
+                                 http_post=failing_post)
+        self.assertIsNone(client.transaction_status("sig"))
 
 
 if __name__ == "__main__":

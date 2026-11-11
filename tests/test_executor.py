@@ -580,6 +580,46 @@ class TestConfirmationRecheck(ExecutorBase):
         self.assertEqual(rpc.confirm_calls, 0)
         self.assertEqual(rpc.sent, [])
 
+    def test_receipt_fallback_reports_landed_buy(self):
+        """The status cache has dropped the signature entirely,
+        but the receipt says the transaction landed: the buy is
+        executed, not failed."""
+
+        class ReceiptRpc(FakePumpRpc):
+            def confirm_transaction(self, signature):
+                return False
+
+            def transaction_status(self, signature):
+                return None
+
+            def get_transaction(self, signature):
+                return {"slot": 1, "meta": {"err": None}}
+
+        rpc = ReceiptRpc(self.pubkey, self.mint, curve=make_curve())
+        result = self._buy(rpc)
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(result["signature"], FAKE_SIGNATURE)
+
+    def test_receipt_showing_failure_reports_failed_buy(self):
+        """The status cache is empty and the receipt says the
+        transaction failed on-chain: the buy is skipped."""
+
+        class FailedReceiptRpc(FakePumpRpc):
+            def confirm_transaction(self, signature):
+                return False
+
+            def transaction_status(self, signature):
+                return None
+
+            def get_transaction(self, signature):
+                return {"slot": 1, "meta": {"err": {"InstructionError":
+                                                    [0, "Custom"]}}}
+
+        rpc = FailedReceiptRpc(self.pubkey, self.mint, curve=make_curve())
+        result = self._buy(rpc)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("not confirmed", result["reason"])
+
 
 class TestDestinationRestriction(unittest.TestCase):
     def test_transfer_instruction_refused(self):
