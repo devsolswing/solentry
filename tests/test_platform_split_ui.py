@@ -215,8 +215,14 @@ class TestModeSeparation(SplitBase):
 
     def test_wallet_page_branches_by_mode(self):
         self._choose_mode("paper")
-        self.assertIn("Paper balance", self._html("/wallet"))
-        self.assertNotIn("Send history", self._html("/wallet"))
+        paper = self._html("/wallet")
+        # The old "Paper balance: $X CAD cash" summary line is
+        # gone (2026-11-11 compact): the paper cash is the
+        # portfolio total in the balance box. This class buys
+        # $10 of paper SOL in setUp, so $90.00 cash remains.
+        self.assertIn('data-live-cash="90.0"', paper)
+        self.assertIn("Demo trading (paper)", paper)
+        self.assertNotIn("Send history", paper)
         self._choose_mode("devnet")
         wallet = self._html("/wallet")
         self.assertNotIn("Deposit", wallet)

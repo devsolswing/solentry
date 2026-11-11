@@ -127,7 +127,7 @@ class TestHomeHeaderAndBalanceExact(HomeMockupBase):
     def test_balance_pct_is_proportioned_to_the_total(self):
         css = _css()
         pct = _rule(css, ".home-total-pct")
-        self.assertIn("clamp(20px, 3dvh, 26px)", pct)
+        self.assertIn("clamp(16px, 2.4dvh, 20px)", pct)
 
 
 class TestHoldingsRowExact(HomeMockupBase):
@@ -158,7 +158,9 @@ class TestHoldingsRowExact(HomeMockupBase):
         self._buy_sol()
         html = self._html("/wallet")
         self.assertNotIn("holdings-1h-label", html)
-        self.assertNotIn(">1h</span>", html.split("HOLDINGS")[1])
+        # The holdings list follows the balance box directly (no
+        # HOLDINGS heading anymore) — the 1h % still has no label.
+        self.assertNotIn(">1h</span>", html.split("holdings-panel")[1])
 
     def test_sparkline_span_is_always_present_with_the_coin_id(self):
         # A row with no sparkline yet still renders the span (empty
@@ -189,7 +191,7 @@ class TestHoldingsWindowSizesExact(HomeMockupBase):
         css = _css()
         row = _rule(css, ".holdings-row")
         self.assertIn("font-size: 16px", row)
-        self.assertIn("padding: 7px 10px", row)
+        self.assertIn("padding: 6px 8px", row)
 
     def test_coin_icons_are_32px(self):
         css = _css()
@@ -231,12 +233,17 @@ class TestHoldingsWindowSizesExact(HomeMockupBase):
         self.assertIn('height="16"', made)
         self.assertIn('viewBox="0 0 64 16"', made)
 
-    def test_row_gap_and_heading_match_the_photo(self):
+    def test_row_gap_matches_the_photo_and_no_holdings_heading(self):
+        # Compact build (2026-11-11): the HOLDINGS heading is gone
+        # — the coin list follows the balance box immediately — but
+        # the 6px row gap stays.
         css = _css()
         self.assertIn("gap: 6px",
                       _rule(css, ".holdings-panel .coin-list"))
-        self.assertIn("font-size: 14px",
-                      _rule(css, ".home-screen .section-title"))
+        self._choose_mode("paper")
+        html = self._html("/wallet")
+        self.assertNotIn("HOLDINGS", html)
+        self.assertNotIn("All coins", html)
 
 
 class TestSparkline1h(unittest.TestCase):

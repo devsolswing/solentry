@@ -82,24 +82,23 @@
     </div>
   </div>
 
-  {# Holdings (owner's screenshot): one row per coin the user
-     actually holds — the coin's real token image (or the
-     ticker-initial icon until the image wiring lands), name +
-     ticker, a small 1hr line-chart sparkline (only when at least
-     2 real prices exist in the last hour — never faked; the span
-     stays in the DOM, empty, while the chart builds, so the 60s
-     refresh can fill it), the price per coin with the amount held
-     underneath it, and the 1-hour % change. Rows tap through to
-     the coin detail page. The price is rendered server-side with
-     decimals that fit its size (live.js ticks prices at a fixed
-     4 decimals, which would render a sub-$0.0001 price as
+  {# Holdings (owner, 2026-11-11): one row per coin the user
+     actually holds, listed IMMEDIATELY under the balance box —
+     no headings, no summary lines, no borders. Rows look like
+     the bot cards on the Bots page: circular icon, name over the ticker in
+     small type, a small 1hr line-chart sparkline (only when at
+     least 2 real prices exist in the last hour — never faked; the
+     span stays in the DOM, empty, while the chart builds, so the
+     60s refresh can fill it), the price per coin with the amount
+     held underneath it, and the 1-hour % change. Rows tap through
+     to the coin detail page. The price is rendered server-side
+     with decimals that fit its size (live.js ticks prices at a
+     fixed 4 decimals, which would render a sub-$0.0001 price as
      $0.0000, so the price does not carry data-live-price; the
      1h% still ticks live). The per-coin $ value is kept in the
      DOM, hidden, so live.js still recomputes the paper
      portfolio total from it — the screenshot shows the amount
      under the price, not the $ value. #}
-  <h2 class="section-title">HOLDINGS <a class="section-link" href="{{ url_for('dashboard') }}">All coins →</a></h2>
-  <p class="muted small holdings-summary">{% if mode == 'paper' %}Paper balance: ${{ "%.2f"|format(paper_cash) }} CAD cash · {% endif %}{% if coin_rows %}{{ coin_rows|length }} coin{{ 's' if coin_rows|length != 1 else '' }} · total <span data-live-total-value>${{ "%.2f"|format(holdings_value) }}</span>{% else %}No coins held yet in {{ mode_label }}.{% endif %}</p>
   <div class="coin-list-panel holdings-panel">
     <div class="coin-list">
       {% for row in coin_rows %}
@@ -109,7 +108,7 @@
         {% else %}
         <span class="coin-ico" aria-hidden="true">{{ row.ticker[:1] }}</span>
         {% endif %}
-        <span class="coin-name"><span class="holdings-name"><strong>{{ row.name }}</strong> <span class="coin-ticker muted">({{ row.ticker }})</span></span></span>
+        <span class="coin-name"><span class="holdings-name"><strong>{{ row.name }}</strong><span class="coin-ticker muted">({{ row.ticker }})</span></span></span>
         <span class="holdings-spark" data-sparkline-coin="{{ row.coin_id }}" aria-hidden="true">{% if row.sparkline_svg %}{{ row.sparkline_svg|safe }}{% endif %}</span>
         <span class="holdings-price-block"><span class="holdings-price">{% if row.price is not none %}{% if row.price >= 1 %}${{ "{:,.2f}".format(row.price) }}{% elif row.price >= 0.01 %}${{ "%.4f"|format(row.price) }}{% else %}${{ "%.8f"|format(row.price) }}{% endif %}{% else %}—{% endif %}</span><span class="holdings-amount muted">{{ "{:,.4f}".format(row.held) }} {{ row.ticker }}</span><span class="holdings-value-live" hidden><span data-live-value="{{ row.coin_id }}" data-live-amount="{{ row.held }}">{% if row.value is not none %}${{ "%.2f"|format(row.value) }}{% else %}value unavailable{% endif %}</span></span></span>
         <span class="holdings-1h{% if row.change_1h is not none %} {{ 'up' if row.change_1h >= 0 else 'down' }}{% else %} muted{% endif %}"><span data-live-change-1h="{{ row.coin_id }}" data-live-decimals="2">{% if row.change_1h is not none %}{% if row.change_1h >= 0 %}+{% endif %}{{ "%.2f"|format(row.change_1h) }}%{% else %}—{% endif %}</span></span>

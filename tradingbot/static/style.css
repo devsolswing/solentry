@@ -374,8 +374,6 @@ body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
 .send-receive-row { margin: 0 0 8px; }
 .send-receive-btn { flex: 1; text-align: center; padding: 10px; font-size: 15px; }
 .home-screen .section-title { margin: 8px 0 6px; }
-.holdings-summary { margin: 2px 0 6px; }
-.holdings-panel { flex: 0 1 50dvh; min-height: 140px; max-height: 50dvh; overflow-y: auto; }
 
 /* Trading fees (home page): a closed <details> is one line, so the
    home page still fits on one screen; open, it lists the user's
@@ -432,16 +430,16 @@ body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
 }
 
 /* ------------------------------------------------------------------ */
-/* Home lift: everything lifted up, holdings take HALF the screen.   */
-/* This supersedes the 1/4-screen fine-print holdings of the home    */
-/* redo: each held coin is a NORMAL-SIZE coin button (name + ticker  */
-/* + value + 1hr %), the action buttons sit in one row right under  */
-/* the fox logo, and the page still fits one phone screen — only     */
-/* the holdings list scrolls internally. The portfolio chart moved   */
-/* off the home page to make room (the full chart is one tap away    */
-/* on the P&L page via "Full chart ›"); the total and 24h change    */
-/* stay. The holdings panel is 50dvh on tall screens and shrinks    */
-/* (flex-shrink) on short ones so nothing is ever clipped.          */
+/* Home lift: everything lifted up, holdings take the remaining
+   space (compact build, 2026-11-11, supersedes the 50dvh
+   half-screen panel). Each held coin is a NORMAL-SIZE coin button
+   (name + ticker + value + 1hr %), the action buttons sit in one
+   row right under the fox logo, and the page still fits one phone
+   screen — the holdings list scrolls internally only if it
+   genuinely overflows a small screen. The candlestick chart is
+   back in the balance card (2026-11-10) with duration options;
+   the total and 24h change stay. The holdings panel flexes to
+   fill the freed space.                                           */
 /* ------------------------------------------------------------------ */
 body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 .home-top { margin: 0 0 4px; }
@@ -658,3 +656,41 @@ button.bot-card { font: inherit; text-align: left; cursor: pointer; -webkit-appe
   .bots-screen .home-logo .fox-logo { width: 72px; height: 72px; }
   .bots-screen .home-wordmark { font-size: 36px; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Home compact (owner, 2026-11-11): Page 3 fits one screen.          */
+/* Lift everything up, shrink the balance box by about a third       */
+/* (the chart keeps its 100px height), nothing under the chart —     */
+/* the coin list follows the balance box immediately, borderless,     */
+/* rows like the Page 6 bot cards (circular icon, name over the       */
+/* ticker in small type, 1hr sparkline fitting smoothly, price +     */
+/* amount, 1h % far right). Home-only classes here — never .bot-*,   */
+/* .bots-*, preset, or any other page's rules.                        */
+/* ------------------------------------------------------------------ */
+.home-top { margin: 0 0 2px; }
+.home-actions-row { margin: 4px 0 6px; }
+.home-actions-row .buy-btn, .home-actions-row .sell-btn, .home-actions-row .send-receive-btn { flex: 1 1 0; padding: 10px 2px; font-size: 16px; text-align: center; }
+/* Balance box: tighter padding, smaller label/total/% — the box
+   drops by about a third. The chart SVG stays 100px tall. */
+.home-total { margin: 2px 0 4px; padding: 6px 12px; }
+.home-total .portfolio-mode { font-size: 12px; }
+.home-balance-label { font-size: 13px; }
+.home-range-btn { padding: 2px 7px; font-size: 11px; }
+.home-currency summary { font-size: 13px; }
+.home-total .portfolio-total { font-size: clamp(24px, 4dvh, 32px); color: #fff; }
+.home-total-row .portfolio-total { margin: 0; }
+.home-total-pct { font-size: clamp(16px, 2.4dvh, 20px); }
+.home-total-cad { font-size: 13px; margin: 0; }
+.home-chart { margin-top: 4px; }
+/* Holdings: no panel border, no row borders, no dividers — the
+   list is clean. The panel takes the remaining space and scrolls
+   internally only if the list genuinely overflows a small screen. */
+.holdings-panel { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; border: none; background: transparent; padding: 0; }
+.holdings-row { font-size: 16px; padding: 6px 8px; border: none; background: transparent; border-radius: 0; }
+.holdings-row .coin-name { flex: 1 1 auto; min-width: 0; }
+.holdings-row .coin-ticker { display: block; font-size: 12px; }
+/* The support ID line and the two cards below the list stay, but
+   tightened so the whole page still fits one screen. */
+.home-screen > p.muted.small { margin: 2px 0; }
+.fees-card { margin: 6px 0; padding: 8px 12px; }
+.trenches-card { margin: 6px 0 0; padding: 10px 14px; }

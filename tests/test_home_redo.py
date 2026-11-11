@@ -154,29 +154,36 @@ class TestHomeHasNoX(HomeRedoBase):
 
 
 class TestHoldingsHalfPanel(HomeRedoBase):
-    def test_holdings_panel_is_half_screen_and_scrolls(self):
-        # Home lift (supersedes the 1/4-screen fine-print panel):
-        # the holdings list takes HALF the screen and scrolls
-        # internally; on short screens it may shrink so the page
-        # still fits one screen, never beyond half.
+    def test_holdings_panel_fills_remaining_space(self):
+        # Compact build (2026-11-11, supersedes the 50dvh
+        # half-screen panel): the holdings panel takes the
+        # remaining space, borderless, and scrolls internally
+        # only if the list genuinely overflows a small screen.
         css = open("tradingbot/static/style.css").read()
-        self.assertIn(".holdings-panel { flex: 0 1 50dvh;", css)
-        self.assertIn("max-height: 50dvh;", css)
-        self.assertIn("overflow-y: auto;", css)
+        self.assertIn(
+            ".holdings-panel { flex: 1 1 auto; min-height: 0; "
+            "max-height: none; overflow-y: auto; border: none; "
+            "background: transparent; padding: 0; }", css)
+        self.assertNotIn("flex: 0 1 50dvh", css)
+        self.assertNotIn("max-height: 50dvh", css)
 
     def test_holdings_rows_are_normal_size_with_value_and_1h(self):
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
         self.assertIn("holdings-row", html)
-        self.assertIn("holdings-summary", html)
+        # Compact build (2026-11-11): no HOLDINGS heading, no
+        # "All coins" link, no holdings-summary line — the list
+        # follows the balance box immediately.
+        self.assertNotIn("HOLDINGS", html)
+        self.assertNotIn("All coins", html)
+        self.assertNotIn("holdings-summary", html)
         self.assertIn("Solana", html)
         self.assertIn("(SOL)", html)
         # 1 SOL bought at the mocked $10 price: the 3.65% fee leaves
         # 0.9635 SOL worth $9.63.
         self.assertIn("0.9635 SOL", html)
         self.assertIn("$9.63", html)
-        self.assertIn("1 coin", html)
         # Normal-size rows now carry the 1-hour % (mocked +2.5%)
         # next to the amount + value.
         self.assertIn("holdings-1h", html)
@@ -188,10 +195,14 @@ class TestHoldingsHalfPanel(HomeRedoBase):
         self.assertNotIn("coin-change", html)
 
     def test_home_still_shows_paper_balance(self):
+        # The holdings-summary line ("Paper balance: $X CAD cash")
+        # is gone (2026-11-11 compact): the paper cash is the
+        # portfolio total in the balance box.
         self._choose_mode("paper")
         html = self._html("/wallet")
-        self.assertIn("Paper balance", html)
-        self.assertIn("$100.00 CAD cash", html)
+        self.assertIn("$100.00 CAD", html)
+        self.assertIn('data-live-cash="100.0"', html)
+        self.assertIn("Demo trading (paper)", html)
 
     def test_home_has_send_and_receive(self):
         self._choose_mode("paper")

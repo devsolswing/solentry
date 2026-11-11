@@ -235,10 +235,15 @@ class TestHomePage(UiBase):
         self.assertIn("fox-red-480.jpg", html)
         self.assertNotIn("data:image/jpeg;base64,", html)
         self.assertIn("SolEntry fox logo", html)
-        self.assertIn("HOLDINGS", html)
+        # No HOLDINGS heading and no "Paper balance" summary line
+        # any more (2026-11-11 compact): the list follows the
+        # balance box immediately, and the paper cash is the
+        # portfolio total in the balance box.
+        self.assertNotIn("HOLDINGS", html)
         self.assertIn("holdings-panel", html)
         self.assertIn("Support ID", html)
-        self.assertIn("Paper balance", html)
+        self.assertIn("$100.00 CAD", html)
+        self.assertIn('data-live-cash="100.0"', html)
         self.assertIn("Trenches", html)
         self.assertIn('href="/trenches"', html)
         self.assertIn("Logs", html)
@@ -360,7 +365,9 @@ class TestHomePage(UiBase):
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
-        self.assertIn("HOLDINGS", html)
+        # No HOLDINGS heading any more (2026-11-11 compact): the
+        # list follows the balance box immediately.
+        self.assertNotIn("HOLDINGS", html)
         self.assertIn("Solana", html)
         self.assertIn("SOL", html)
         self.assertIn("holdings-row", html)

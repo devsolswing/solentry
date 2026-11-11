@@ -168,25 +168,28 @@ class TestWalletIsHomepage(HomeBase):
         self.assertNotIn("How do you want to trade?", self._html("/wallet"))
 
     def test_wallet_holdings_normal_size_name_ticker_amount_value_1h(self):
-        # Home lift: holdings are a HALF-screen scrollable list of
-        # NORMAL-SIZE coin buttons — real name + ticker, amount held,
-        # value, and the 1-hour % from the feed. The old 24h % and
-        # P&L columns still live on the coins page and the coin
-        # detail page; the home rows do not carry them.
+        # Home lift: holdings are a scrollable list of NORMAL-SIZE
+        # coin buttons — real name + ticker, amount held, value,
+        # and the 1-hour % from the feed. The old 24h % and P&L
+        # columns still live on the coins page and the coin detail
+        # page; the home rows do not carry them. Compact build
+        # (2026-11-11): no HOLDINGS heading, no "All coins" link,
+        # no holdings-summary line — the list follows the balance
+        # box immediately.
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
-        self.assertIn("HOLDINGS", html)
+        self.assertNotIn("HOLDINGS", html)
+        self.assertNotIn("All coins", html)
+        self.assertNotIn("holdings-summary", html)
         self.assertIn("Solana", html)
         self.assertIn("SOL", html)
         self.assertIn("holdings-row", html)
         self.assertIn("holdings-panel", html)
-        self.assertIn("holdings-summary", html)
         # 1 SOL bought at the mocked $10 price: the 3.65% fee leaves
         # 0.9635 SOL worth $9.63.
         self.assertIn("0.9635 SOL", html)
         self.assertIn("$9.63", html)
-        self.assertIn("1 coin", html)
         # 1-hour % (mocked +2.5%) on the row.
         self.assertIn("holdings-1h", html)
         self.assertIn("+2.50%", html)
@@ -215,8 +218,13 @@ class TestWalletIsHomepage(HomeBase):
 
     def test_wallet_paper_and_real_branches(self):
         self._choose_mode("paper")
-        self.assertIn("Paper balance", self._html("/wallet"))
-        self.assertNotIn("Send history", self._html("/wallet"))
+        paper = self._html("/wallet")
+        # The old "Paper balance: $X CAD cash" summary line is
+        # gone (2026-11-11 compact): the paper cash is the
+        # portfolio total in the balance box.
+        self.assertIn("$100.00 CAD", paper)
+        self.assertIn('data-live-cash="100.0"', paper)
+        self.assertNotIn("Send history", paper)
         self._choose_mode("devnet")
         wallet = self._html("/wallet")
         self.assertNotIn("Deposit", wallet)
