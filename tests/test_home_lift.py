@@ -15,12 +15,13 @@ holdings:
   fetch_prices_for_mints). Snapshot fallback carries change_1h
   None.
 - The portfolio chart moved off the home page to make room; the
-  total, the 24h change and a "Full chart ›" link to the P&L page
-  stay. The candlestick build (2026-11-10) brings a COMPACT chart
-  back into the balance card — candlestick view with duration
-  options and the candle/line toggle, candles from recorded
-  snapshots only, never faked — while the holdings list stays
-  half-screen. The main screen still has NO back-button X.
+  total and the 24h change stay. The candlestick build (2026-11-10)
+  brings a COMPACT chart back into the balance card — candlestick
+  view with duration options and the candle/line toggle, candles
+  from recorded snapshots only, never faked — while the holdings
+  list stays half-screen. The old "Full chart ›" link to the P&L
+  page is gone with that page (Logs build, 2026-11-10). The main
+  screen still has NO back-button X.
 No SOL moves in these tests; sends are never confirmed.
 """
 
@@ -204,8 +205,11 @@ class TestHomeLiftLayout(HomeLiftBase):
         self.assertIn("home-chart-durations", html)
         for label in ("1h", "1d", "1w", "1m", "1y", "All"):
             self.assertIn(f">{label}<", html)
-        self.assertIn("Full chart ›", html)
-        self.assertIn('href="/pnl"', html)
+        # The chart lives on the home page itself — the old "Full
+        # chart ›" link to the deleted P&L page is gone, never a
+        # dead link.
+        self.assertNotIn("Full chart ›", html)
+        self.assertNotIn('href="/pnl"', html)
         # The total and the 24h change still show.
         self.assertIn("TOTAL PORTFOLIO VALUE", html)
         # No snapshots yet, so no candles — the page says so

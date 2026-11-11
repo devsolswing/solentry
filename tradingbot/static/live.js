@@ -32,15 +32,14 @@
   var totalPnlEls = collect('[data-live-total-pnl]');
   var portfolioEls = collect('[data-live-total-portfolio]');
 
-  /* Trading-fee totals (fees.py): the app-wide total next to the
-     flag and the per-user total in the fees dropdown refresh every
-     5 seconds while the page is open, from one lightweight
-     GET /api/fees per tick (both figures in one request — no second
-     connection, and the live price feed's socket is untouched).
-     The poll stops when the page is hidden or closed, so it never
-     runs in the background. A failed fetch or a missing figure
-     shows "—", never a guessed number. */
-  var appFeeEls = collect('[data-fees-app-total]');
+  /* Trading-fee total (fees.py): the per-user total in the fees
+     dropdown refreshes every 5 seconds while the page is open,
+     from one lightweight GET /api/fees per tick (and the live
+     price feed's socket is untouched). The poll stops when the
+     page is hidden or closed, so it never runs in the background.
+     A failed fetch or a missing figure shows "—", never a guessed
+     number. The home page shows ONLY the user's own fees — no
+     app-wide total (James, 2026-11-10). */
   var userFeeEls = collect('[data-fees-user-total]');
   var FEES_POLL_MS = 5000;
   var feesTimer = null;
@@ -57,15 +56,12 @@
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
         if (!data || !data.ok) {
-          setFeeTotal(appFeeEls, null);
           setFeeTotal(userFeeEls, null);
           return;
         }
-        setFeeTotal(appFeeEls, data.app_total_sol);
         setFeeTotal(userFeeEls, data.user_total_sol);
       })
       .catch(function () {
-        setFeeTotal(appFeeEls, null);
         setFeeTotal(userFeeEls, null);
       });
   }
@@ -80,7 +76,7 @@
       feesTimer = null;
     }
   }
-  if (appFeeEls.length || userFeeEls.length) {
+  if (userFeeEls.length) {
     startFeesPoll();
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) stopFeesPoll();

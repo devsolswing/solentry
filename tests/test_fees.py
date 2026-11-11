@@ -318,9 +318,12 @@ class TestFeeHomePage(unittest.TestCase):
         self.assertIn("0.0000 SOL", html)
         self.assertIn("No fees paid yet", html)
         self.assertIn('data-live-price="SOL"', html)
+        # The Treasury wallet address is never shown on the home
+        # page (James, 2026-11-10) — the dropdown names the wallet,
+        # not its address.
         treasury = fees_mod.get_or_create_treasury_wallet(
             self.db, self.app.config["TRADINGBOT_CONFIG"])
-        self.assertIn(treasury, html)
+        self.assertNotIn(treasury, html)
 
     def test_home_lists_fee_payments(self):
         fees_mod.record_fee(self.db, self.user_id, None, "SOL", "buy",
@@ -424,33 +427,43 @@ class TestAppWideTotal(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/login", resp.headers["Location"])
 
-    def test_home_shows_app_total_next_to_flag(self):
+    def test_home_shows_only_own_fees(self):
+        # Correction (James, 2026-11-10): NO app-wide total on the
+        # home page and NO Treasury wallet address there — the home
+        # page shows each user only their OWN fees, in the dropdown.
         fees_mod.record_fee(self.db, self.user_id, None, "SOL", "buy",
                             "paper", 0.01, fee_usd=1.0)
         fees_mod.record_fee(self.db, self.bob_id, None, "SOL", "sell",
                             "real", 0.02, fee_lamports=20_000_000,
                             signature="sig2")
         html = self.client.get("/wallet").get_data(as_text=True)
-        # App-wide total next to the flag; the user's own total in
-        # the dropdown — both as live-updated spans.
+        # The flag stays; the app-wide total and its live span are
+        # gone, and no other user's fees leak in.
         self.assertIn("🇨🇦", html)
-        self.assertIn("App fees:", html)
-        self.assertIn('data-fees-app-total', html)
-        self.assertIn('data-fees-user-total', html)
-        self.assertIn("0.0300 SOL", html)
+        self.assertNotIn("App fees:", html)
+        self.assertNotIn("data-fees-app-total", html)
+        self.assertNotIn("0.0300 SOL", html)
+        # The user's own total in the dropdown, as a live span.
+        self.assertIn("data-fees-user-total", html)
         self.assertIn("0.0100 SOL", html)
+        # The Treasury wallet address is never shown on the home
+        # page — the dropdown names the wallet, not its address.
+        self.assertIn("SolEntry Treasury wallet.", html)
+        self.assertNotIn("SolEntry Treasury wallet (", html)
 
     def test_live_js_polls_fees_every_five_seconds(self):
         js = open("tradingbot/static/live.js").read()
-        # One lightweight GET /api/fees per tick, both figures.
+        # One lightweight GET /api/fees per tick, the user's own
+        # total only — the home page shows no app-wide total.
         self.assertIn("/api/fees", js)
         self.assertIn("setInterval(fetchFees, FEES_POLL_MS)", js)
         self.assertIn("FEES_POLL_MS = 5000", js)
+        self.assertNotIn("data-fees-app-total", js)
+        self.assertNotIn("app_total_sol", js)
         # Stops when the page is hidden or closed.
         self.assertIn("visibilitychange", js)
         self.assertIn("pagehide", js)
-        # Updates both figures; "—" when a figure is unavailable.
-        self.assertIn("data-fees-app-total", js)
+        # Updates the user's figure; "—" when it is unavailable.
         self.assertIn("data-fees-user-total", js)
         self.assertIn("'—'", js)
 

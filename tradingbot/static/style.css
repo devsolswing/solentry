@@ -12,6 +12,16 @@ a { color: #ffd700; }
 /* Page ID: the page's number in the top-left corner, same spot on
    every page. Small gold pill on black, readable on a phone. */
 .page-id { font-size: 11px; font-weight: 700; color: #ffd700; background: #000; border: 1px solid #ffb300; border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+/* Page picker: the Page N chip is a clickable button (a <details>
+   dropdown, so it needs no JS and works on the login page too).
+   Pressing it lists every page by number + name; tapping an entry
+   loads that page. */
+.page-id-picker { position: relative; }
+.page-id-picker summary { list-style: none; cursor: pointer; }
+.page-id-picker summary::-webkit-details-marker { display: none; }
+.page-picker { position: absolute; top: calc(100% + 6px); left: 0; background: #160b08; border: 1px solid #ffb300; border-radius: 8px; min-width: 230px; max-height: 70vh; overflow-y: auto; z-index: 50; padding: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6); }
+.page-picker-item { display: block; padding: 8px 10px; color: #ffd700; text-decoration: none; border-radius: 6px; font-size: 14px; white-space: nowrap; }
+.page-picker-item:hover, .page-picker-item:focus { background: #2a0f08; }
 /* Slim link to the Trenches page on the Bots page — a plain link,
    not a card, so it can never be mistaken for the Trenches bot. */
 .trenches-link { display: block; color: #ffd700; text-decoration: none; font-size: 14px; padding: 6px 2px; }

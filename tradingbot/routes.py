@@ -45,7 +45,7 @@ from . import networks as networks_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
 from . import pnl as pnl_mod
-from .page_numbers import page_number_for
+from .page_numbers import page_list, page_number_for
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
 from .charts import (CHART_RANGES, fetch_market_chart, fetch_ohlc,
@@ -364,16 +364,17 @@ def _mode_label(mode: str) -> str:
         else "Demo trading (paper)"
 
 
-def _activity_for_mode(db, user_id: int, mode: str):
+def _activity_for_mode(db, user_id: int, mode: str, limit: int = 20):
     """Recent activity for one mode only. Trading rows are tagged
     'paper' or 'real' and never cross over; account rows (mode='')
-    belong to neither trading mode and show in both."""
+    belong to neither trading mode and show in both. `limit` caps
+    the rows (20 for the dashboard snippet, 100 for the Logs page)."""
     wanted = "real" if mode == "devnet" else "paper"
     return db.execute(
         "SELECT kind, detail, created_at FROM activity "
         "WHERE user_id = ? AND (mode = ? OR mode = '') "
-        "ORDER BY id DESC LIMIT 20",
-        (user_id, wanted)).fetchall()
+        "ORDER BY id DESC LIMIT ?",
+        (user_id, wanted, limit)).fetchall()
 
 
 def _real_holdings_view(db, user_id: int) -> list:
@@ -771,6 +772,9 @@ def register_routes(app: Flask) -> None:
                 # None on popups, confirm screens and API/action
                 # endpoints, where no label renders.
                 "page_number": page_number_for(request.endpoint),
+                # The page picker: every numbered page, in order,
+                # from the same single source of truth.
+                "page_list": page_list(),
                 # The post-sign-in Demo / Real chooser: shown on any
                 # logged-in page until the user picks (the wallet is
                 # the landing page, so that is where it appears
@@ -1428,22 +1432,18 @@ def register_routes(app: Flask) -> None:
         activity = _activity_for_mode(db, user["id"], mode)
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
         # Trading fees (3.65% of every trade, fees.py): this user's
-        # total paid in SOL, their fee payments (newest first), the
-        # SolEntry Treasury wallet address, and the live SOL price
-        # for display. The fee total starts at zero for everyone —
-        # trades that predate the fee are never charged.
-        treasury_pubkey = fees_mod.get_or_create_treasury_wallet(
-            db, _cfg(app))
+        # total paid in SOL and their fee payments (newest first),
+        # plus the live SOL price for display. The fee total starts
+        # at zero for everyone — trades that predate the fee are
+        # never charged. The home page shows ONLY the user's own
+        # fees: no app-wide total, and the Treasury wallet address
+        # is never shown here (James, 2026-11-10).
         fees_rows = fees_mod.user_fees(db, user["id"], limit=20)
         for _row in fees_rows:
             _row["fee_sol_display"] = fees_mod.fee_row_sol(
                 _row, sol_price)
         fees_total_sol = fees_mod.user_fee_total_sol(
             db, user["id"], sol_price_usd=sol_price)
-        # The app-wide live balance shown next to the 🇨🇦 flag on
-        # the homepage: ALL 3.65% fees collected from every user.
-        app_fees_total_sol = fees_mod.app_fee_total_sol(
-            db, sol_price_usd=sol_price)
         trenches_rows, trenches_error = (
             _trenches_list() if include_trenches else ([], None))
         return {"wallet": wallet if mode == "devnet" else None,
@@ -1469,8 +1469,6 @@ def register_routes(app: Flask) -> None:
                 if signing_bot else "",
                 "fees_total_sol": fees_total_sol,
                 "fees_rows": fees_rows,
-                "treasury_pubkey": treasury_pubkey,
-                "app_fees_total_sol": app_fees_total_sol,
                 "sol_price_usd": sol_price,
                 "popup_coin": popup_coin,
                 "trenches_rows": trenches_rows,
@@ -2302,125 +2300,27 @@ def register_routes(app: Flask) -> None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Sold", lines, True, coin_id_resolved, label)
     # ------------------------------------------------------------------
-    # P&L dashboard: balance, current coins with per-coin P&L, and a
-    # P&L chart built ONLY from recorded snapshots (never invented
-    # history). Ranges: All-time, 1 year, 1 month, 1 week, 1 day,
-    # 1 hour. The on-chain SOL balance is shown alongside the paper
-    # portfolio, labelled plainly, so any difference is visible.
+    # Logs: the user's activity/trade log (latest 100, newest first,
+    # active mode only) plus the losing-buy analysis (paper mode
+    # only, moved here from the deleted P&L page). Page 11.
     # ------------------------------------------------------------------
-    @app.route("/pnl")
+    @app.route("/logs")
     @login_required
-    def pnl():
+    def logs():
         user = _current_user(app)
-        range_key = (request.args.get("range") or "all").strip()
-        if range_key not in pnl_mod.RANGES:
-            range_key = "all"
-        prices = get_prices()
-        price_map = {c: e.get("price")
-                     for c, e in prices["prices"].items()}
         db = _db(app)
         mode = _active_mode(db, user["id"])
-        wallet = _wallet(app, user["id"])
-        real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
-        sol_price = prices["prices"].get("SOL", {}).get("price")
-        real_sol_usd = (real_sol * sol_price
-                        if real_sol is not None and sol_price else None)
-        if mode == "devnet":
-            # Real mode: real holdings only (manual real_holdings +
-            # bot-managed real positions), the on-chain wallet, and a
-            # chart of the recorded wallet SOL balance over time.
-            # The paper portfolio is never shown here.
-            real_rows = _real_holdings_view(db, user["id"])
-            mint_ids = [h["coin_id"] for h in real_rows
-                        if h["coin_id"] not in price_map]
-            if mint_ids:
-                try:
-                    for mint, price in fetch_prices_for_mints(
-                            mint_ids).items():
-                        price_map[mint] = price
-                except Exception:
-                    pass
-            # Bad-tick guard, as in _coin_rows: drop any price the
-            # live feed rejects, so a bad print can never inflate
-            # the real-holdings total on this page.
-            _feed = app.config.get("LIVE_FEED")
-            if _feed is not None:
-                price_map = {c: p for c, p in price_map.items()
-                             if p is None or _feed.would_accept(c, p)}
-            holdings = []
-            for h in real_rows:
-                raw_price = price_map.get(h["coin_id"])
-                price = float(raw_price) if raw_price is not None else None
-                amount = float(h["amount"])
-                avg = float(h["avg_price"])
-                if price is not None:
-                    value = amount * price
-                    pnl_value = (price - avg) * amount
-                else:
-                    value = amount * avg
-                    pnl_value = None
-                holdings.append({"coin_id": h["coin_id"], "amount": amount,
-                                 "avg_price": avg, "price": price,
-                                 "value": value, "pnl": pnl_value})
-            holdings_value = sum(h["value"] for h in holdings)
-            totals = {"cash_usd": 0.0, "holdings": holdings,
-                      "holdings_value_usd": holdings_value,
-                      "total_value_usd": holdings_value}
-            points, has_data = pnl_mod.chart_points_real(
-                db, user["id"], range_key)
-            return render_template(
-                "pnl.html", range_key=range_key,
-                ranges=pnl_mod.RANGES, totals=totals,
-                real_sol=real_sol, real_sol_usd=real_sol_usd,
-                sol_price=sol_price, start_cash=0.0,
-                total_pnl=holdings_value,
-                points=points, has_data=has_data,
-                chart_svg=pnl_mod.chart_svg(points, unit="SOL "),
-                prices_source=prices["source"],
-                prices_as_of=prices["as_of"],
-                mode=mode, mode_label=_mode_label(mode),
-                analysis=None)
-        # Paper mode: the paper portfolio only. The real wallet is
-        # never shown here — switch to Real trading to see it.
-        held = db.execute(
-            "SELECT DISTINCT coin_id FROM paper_holdings WHERE user_id = ?",
-            (user["id"],)).fetchall()
-        trenches_mints = [r["coin_id"] for r in held
-                          if r["coin_id"] not in price_map]
-        if trenches_mints:
-            try:
-                for mint, price in fetch_prices_for_mints(
-                        trenches_mints).items():
-                    price_map[mint] = price
-            except Exception:
-                pass
-        # Bad-tick guard, as in _coin_rows: drop any price the live
-        # feed rejects, so a bad print can never inflate the paper
-        # portfolio total on this page.
-        _feed = app.config.get("LIVE_FEED")
-        if _feed is not None:
-            price_map = {c: p for c, p in price_map.items()
-                         if p is None or _feed.would_accept(c, p)}
-        totals = pnl_mod.portfolio_totals(db, user["id"], price_map)
-        start_cash = _cfg(app).paper_start_cash
-        points, has_data = pnl_mod.chart_points(db, user["id"], range_key)
+        activity = _activity_for_mode(db, user["id"], mode, limit=100)
         # Losing-buy analysis (paper trades only): every paper trade
-        # paired FIFO per coin, with the buy-time signals and the exit
-        # reason — shown as a section on this page, not a separate
-        # page. Only recorded data; anything never recorded shows as
-        # unavailable, never guessed.
-        analysis = analysis_mod.analyze_paper_trades(db, user["id"])
+        # paired FIFO per coin — shown as a section on this page.
+        # Only recorded data; anything never recorded shows as
+        # unavailable, never guessed. Real mode has no paper trades,
+        # so the analysis is paper-only by construction.
+        analysis = (analysis_mod.analyze_paper_trades(db, user["id"])
+                    if mode == "paper" else None)
         return render_template(
-            "pnl.html", range_key=range_key,
-            ranges=pnl_mod.RANGES, totals=totals,
-            real_sol=None, real_sol_usd=None,
-            sol_price=sol_price, start_cash=start_cash,
-            total_pnl=totals["total_value_usd"] - start_cash,
-            points=points, has_data=has_data,
-            chart_svg=pnl_mod.chart_svg(points),
-            prices_source=prices["source"], prices_as_of=prices["as_of"],
-            mode=mode, mode_label=_mode_label(mode),
-            analysis=analysis)
+            "logs.html", activity=activity, analysis=analysis,
+            mode=mode, mode_label=_mode_label(mode))
 
     # ------------------------------------------------------------------
     # Wallet: view / send (two-step) / deposit

@@ -1,7 +1,13 @@
-"""P&L dashboard: snapshots, chart ranges, per-coin P&L, and the
-pump.fun trading wallet link. Charts are built only from recorded
-snapshots — tests prove empty ranges report no data and no history
-is invented."""
+"""P&L data: snapshots, chart ranges, per-coin P&L, and the pump.fun
+trading wallet link. Charts are built only from recorded snapshots —
+tests prove empty ranges report no data and no history is invented.
+
+NOTE (2026-11-10): the /pnl page itself was deleted; its contents
+moved — the portfolio chart lives on the home page (candlestick,
+snapshots only), the activity log + losing-buy analysis live on the
+Logs page (/logs, Page 11). This module now tests the pnl.py data
+layer and the mode separation on the home page, plus that /pnl is
+really gone."""
 
 import hashlib
 import os
@@ -151,38 +157,33 @@ class TestHoldingsPnl(PnlBase):
 
 
 class TestPnlPage(PnlBase):
-    def test_requires_login(self):
+    def test_pnl_route_is_gone(self):
+        # The P&L page was deleted 2026-11-10 (its chart moved to
+        # the home page; its log + analysis moved to /logs). The
+        # route must 404 in both modes, logged in or out — never
+        # redirect to a login page for a page that no longer exists.
         self.client.get("/logout")
-        resp = self.client.get("/pnl")
-        self.assertEqual(resp.status_code, 302)
-        self.assertIn("/login", resp.headers["Location"])
+        self.assertEqual(self.client.get("/pnl").status_code, 404)
+        login(self.client, "alice")
+        self.assertEqual(self.client.get("/pnl").status_code, 404)
+        self.client.post("/mode", data={
+            "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
+        self.assertEqual(self.client.get("/pnl").status_code, 404)
 
-    def test_empty_dashboard_says_no_data_yet(self):
+    def test_home_shows_mode_portfolio_not_the_other(self):
         # Paper mode shows the paper portfolio only — the real
         # on-chain balance must not leak into it.
-        resp = self.client.get("/pnl")
-        html = resp.get_data(as_text=True)
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("No data yet", html)
-        self.assertIn("All-time", html)
-        self.assertIn("1 hour", html)
+        html = self.client.get("/wallet").get_data(as_text=True)
         self.assertIn("$100.00 CAD", html)  # paper portfolio value
         self.assertNotIn("2.0000 SOL", html)
         # Real mode shows the on-chain balance only — no paper value.
         self.client.post("/mode", data={
-            "csrf_token": csrf(self.client, "/pnl"), "mode": "devnet"})
-        html = self.client.get("/pnl").get_data(as_text=True)
+            "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
+        html = self.client.get("/wallet").get_data(as_text=True)
         self.assertIn("2.0000 SOL", html)  # mocked on-chain balance
-        self.assertIn("No data yet", html)
         self.assertNotIn("$100.00 CAD", html)
 
-    def test_unknown_range_falls_back_to_all(self):
-        resp = self.client.get("/pnl?range=bogus")
-        html = resp.get_data(as_text=True)
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("No data yet", html)
-
-    def test_paper_buy_records_snapshot_and_page_shows_it(self):
+    def test_paper_buy_records_snapshot_and_home_shows_it(self):
         token = csrf(self.client, "/dashboard")
         resp = self.client.post("/coins/SOL/buy", data={
             "csrf_token": token, "usd": "10", "bot_id": ""},
@@ -197,10 +198,11 @@ class TestPnlPage(PnlBase):
         # — the 3.65% fee is a cost, so the total is under $100.
         self.assertAlmostEqual(rows[0]["total_value_usd"], 99.635,
                                places=1)
-        resp = self.client.get("/pnl?range=all")
-        html = resp.get_data(as_text=True)
+        # The home page now shows the portfolio total (the old /pnl
+        # page is gone): $99.635 rounds to $99.64 CAD.
+        html = self.client.get("/wallet").get_data(as_text=True)
         self.assertIn("SOL", html)
-        self.assertNotIn("No data yet", html)
+        self.assertIn("$99.64 CAD", html)
 
     def test_silent_loop_evaluation_records_snapshot(self):
         self.db.execute(

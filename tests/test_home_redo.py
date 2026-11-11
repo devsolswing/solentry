@@ -10,8 +10,11 @@ Rules under test:
   page still fits one phone screen (only the holdings list scrolls).
   Home has Send and Receive buttons; Receive opens a window with
   the app wallet address + copy. The portfolio chart moved off the
-  home page to make room for the half-screen list; the total, the
-  24h change and a "Full chart ›" link to the P&L page stay.
+  home page to make room for the half-screen list; the total and
+  the 24h change stay (the candlestick build later brought a
+  compact chart back into the balance card, and the old "Full chart
+  ›" link to the P&L page is gone with that page — see the Logs
+  build, 2026-11-10).
 - The X (back) button is GONE from the home screen: on the homepage
   it looped (back -> login page -> instant redirect to /wallet, so
   the homepage kept re-applying itself). It stays on Bots and

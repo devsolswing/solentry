@@ -185,18 +185,22 @@ class TestModeSeparation(SplitBase):
         self.assertNotIn("100.0000", dash)
         self.assertIn("Nova", self._html("/bots"))
         self.assertNotIn("Luna", self._html("/bots"))
-        pnl = self._html("/pnl")
-        self.assertNotIn("Balance — paper portfolio", pnl)
-        self.assertIn("Real app wallet", pnl)
+        # The home page must not leak the paper portfolio into real
+        # mode (the old /pnl page, where this was checked, is gone).
+        home = self._html("/wallet")
+        self.assertIn("Real trading — devnet", home)
+        self.assertNotIn("$99.64 CAD", home)
 
     def test_real_data_hidden_in_paper_mode(self):
         self._choose_mode("paper")
         self.assertNotIn("Nova", self._html("/bots"))
         self.assertNotIn("Nova", self._html("/dashboard"))
         self.assertIn("Luna", self._html("/bots"))
-        pnl = self._html("/pnl")
-        self.assertIn("Balance — paper portfolio", pnl)
-        self.assertNotIn("Real app wallet", pnl)
+        # The home page shows the paper portfolio in paper mode
+        # (the old /pnl page, where this was checked, is gone).
+        home = self._html("/wallet")
+        self.assertIn("Demo trading (paper)", home)
+        self.assertIn("$99.64 CAD", home)
 
     def test_activity_rows_are_mode_tagged_and_filtered(self):
         rows = self.db.execute(
@@ -526,7 +530,7 @@ class TestCoinPopup(SplitBase):
 
 class TestHud(SplitBase):
     def test_hud_on_every_main_page(self):
-        for path in ("/dashboard", "/bots", "/wallet", "/pnl", "/settings"):
+        for path in ("/dashboard", "/bots", "/wallet", "/logs", "/settings"):
             html = self._html(path)
             self.assertIn("hud-item", html, path)
             # Four-button nav: Home / Bots / Wallet / Settings.

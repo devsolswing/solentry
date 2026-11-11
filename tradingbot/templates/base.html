@@ -44,9 +44,9 @@
 {% if current_user %}
 {# Bottom navigation: four buttons — Home, Bots, Wallet, Settings —
    each to its page, with the active one highlighted. The Paper /
-   Devnet switch lives in the topbar. P&amp;L is one tap away from the
-   home chart (the ">" arrow); the Coins page is one tap away from
-   the home holdings panel and the Logs button. #}
+   Devnet switch lives in the topbar. The Logs page is one tap away
+   from the Log button on the home screen; the Coins page is one tap
+   away from the home holdings panel. #}
 <nav class="hud" aria-label="Pages">
   <a class="hud-item{{ ' active' if request.path == '/wallet' else '' }}" href="{{ url_for('wallet') }}"><span class="hud-ico" aria-hidden="true">⌂</span><span>Home</span></a>
   <a class="hud-item{{ ' active' if request.path.startswith('/bots') else '' }}" href="{{ url_for('bots') }}"><span class="hud-ico" aria-hidden="true">🤖</span><span>Bots</span></a>

@@ -23,7 +23,7 @@ PAGE_NUMBERS = {
     "bot_edit": 8,
     "bot_create": 9,
     "trenches": 10,
-    "pnl": 11,
+    "logs": 11,
     "settings": 12,
     "wallet_details": 13,
     "wallet_send": 14,
@@ -32,6 +32,53 @@ PAGE_NUMBERS = {
     "forgot_answer": 17,
     "forgot_reset": 18,
 }
+
+# Display names for the page picker (the "Page N" chip opens it).
+# Same source of truth as PAGE_NUMBERS — no template hardcodes a
+# name or a number.
+PAGE_NAMES = {
+    "login": "Login",
+    "signup": "Sign up",
+    "wallet": "Home",
+    "dashboard": "Coins",
+    "coin_detail": "Coin detail",
+    "bots": "Bots list",
+    "bot_detail": "Bot detail",
+    "bot_edit": "Edit bot",
+    "bot_create": "builderBot chatbox",
+    "trenches": "Trenches",
+    "logs": "Logs",
+    "settings": "Settings",
+    "wallet_details": "Wallet details",
+    "wallet_send": "Send",
+    "admin_donations": "Admin donations",
+    "forgot_password": "Forgot password",
+    "forgot_answer": "Forgot answer",
+    "forgot_reset": "Forgot reset",
+}
+
+# Where the picker takes the user for each page. Most pages link to
+# themselves; the detail pages have no single URL (they need a coin
+# or a bot), so their picker entries load the nearest list page
+# instead — Coins for a coin detail, Bots for a bot detail or edit.
+PAGE_TARGETS = {
+    "coin_detail": "dashboard",
+    "bot_detail": "bots",
+    "bot_edit": "bots",
+}
+
+
+def page_list():
+    """Every numbered page, in number order, for the picker:
+    [{"number", "endpoint", "name", "target"}]. "target" is the
+    endpoint the picker entry links to (see PAGE_TARGETS)."""
+    out = []
+    for endpoint, number in sorted(PAGE_NUMBERS.items(),
+                                   key=lambda kv: kv[1]):
+        out.append({"number": number, "endpoint": endpoint,
+                    "name": PAGE_NAMES[endpoint],
+                    "target": PAGE_TARGETS.get(endpoint, endpoint)})
+    return out
 
 # Endpoints that render another page, not their own: the coins page
 # with a coin popup open is the coins page (dashboard), so it carries

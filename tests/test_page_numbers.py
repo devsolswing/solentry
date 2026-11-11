@@ -116,7 +116,7 @@ class TestPageNumbersRender(unittest.TestCase):
             ("/coins/SOL/detail", 5), ("/bots", 6),
             (f"/bots/{ids['trenches']}", 7),
             (f"/bots/{ids['trenches']}/edit", 8),
-            ("/bots/create", 9), ("/trenches", 10), ("/pnl", 11),
+            ("/bots/create", 9), ("/trenches", 10), ("/logs", 11),
             ("/settings", 12), ("/wallet/details", 13),
             ("/wallet/send", 14), ("/admin/donations", 15),
         ]

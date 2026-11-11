@@ -1,1 +1,16 @@
-{% if page_number is not none %}<span class="page-id">Page {{ page_number }}</span>{% endif %}
+{% if page_number is not none %}
+{# Page ID chip — now a clickable button: pressing it opens the page
+   picker, listing every page by number + name (from page_numbers.py,
+   the single source of truth). A <details> dropdown needs no JS, so
+   it works on every page including login. Tapping an entry loads
+   that page (detail pages load their list page — see
+   page_numbers.PAGE_TARGETS). #}
+<details class="page-id-picker">
+  <summary class="page-id">Page {{ page_number }}</summary>
+  <div class="page-picker" role="menu" aria-label="Go to page">
+    {% for p in page_list %}
+    <a class="page-picker-item" href="{{ url_for(p.target) }}">Page {{ p.number }} — {{ p.name }}</a>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}

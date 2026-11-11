@@ -4,7 +4,7 @@
 {% block content %}
 <div class="home-screen">
   <div class="home-top">
-    <a class="btn ghost small" href="{{ url_for('dashboard') }}#activity">Logs</a>
+    <a class="btn ghost small" href="{{ url_for('logs') }}">Logs</a>
   </div>
 
   <div class="home-logo">
@@ -20,9 +20,9 @@
   </div>
 
   <div class="card portfolio-head home-total">
-    <p class="portfolio-mode">TOTAL PORTFOLIO VALUE <span class="wallet-flag" title="Canada">🇨🇦</span> <span class="muted small">· App fees: <b><span data-fees-app-total>{{ "%.4f"|format(app_fees_total_sol) }} SOL</span></b></span></p>
+    <p class="portfolio-mode">TOTAL PORTFOLIO VALUE <span class="wallet-flag" title="Canada">🇨🇦</span></p>
     <p class="portfolio-total" data-balance{% if mode == 'paper' %} data-live-total-portfolio data-live-cash="{{ paper_cash }}"{% endif %}>{% if mode == 'paper' %}${{ "{:,.2f}".format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "{:,.2f}".format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable right now{% endif %}{% endif %}</p>
-    <p class="change-24h">{% if change_24h %}<span class="{{ 'up' if change_24h.delta >= 0 else 'down' }}">{% if change_24h.delta >= 0 %}+{% endif %}{% if mode == 'paper' %}${{ "{:,.2f}".format(change_24h.delta) }}{% else %}{{ "%.4f"|format(change_24h.delta) }} SOL{% endif %} ({{ "%+.2f"|format(change_24h.pct) }}%)</span>{% else %}<span class="muted">—</span>{% endif %} <a class="chart-more" href="{{ url_for('pnl') }}" aria-label="Full P&amp;L chart">Full chart ›</a></p>
+    <p class="change-24h">{% if change_24h %}<span class="{{ 'up' if change_24h.delta >= 0 else 'down' }}">{% if change_24h.delta >= 0 %}+{% endif %}{% if mode == 'paper' %}${{ "{:,.2f}".format(change_24h.delta) }}{% else %}{{ "%.4f"|format(change_24h.delta) }} SOL{% endif %} ({{ "%+.2f"|format(change_24h.pct) }}%)</span>{% else %}<span class="muted">—</span>{% endif %}</p>
     <div class="home-chart" id="home-chart" data-chart-block data-chart-range="{{ chart_range }}">
       <div class="home-chart-durations" role="group" aria-label="Chart duration">
         {% for key, label in home_range_labels.items() %}
@@ -49,7 +49,7 @@
      still fits on one screen. #}
   <details class="card fees-card" id="fees">
     <summary><span class="fees-total">Fees paid to SolEntry: <b><span data-fees-user-total>{{ "%.4f"|format(fees_total_sol) }} SOL</span></b></span> <span class="muted small">· SOL <span data-live-price="SOL">{% if sol_price_usd is not none %}${{ "%.4f"|format(sol_price_usd) }}{% else %}—{% endif %}</span></span></summary>
-    <p class="muted small">Every trade pays 3.65% to the SolEntry Treasury wallet (<span class="addr">{{ treasury_pubkey }}</span>). Fees are in SOL.</p>
+    <p class="muted small">Every trade pays 3.65% to the SolEntry Treasury wallet. Fees are in SOL.</p>
     {% if fees_rows %}
     <ul class="fees-list">
       {% for fee in fees_rows %}

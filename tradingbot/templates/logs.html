@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Logs — SolEntry{% endblock %}
+{% block content %}
+<h1>📋 Logs</h1>
+<p class="mode-banner"><strong>{{ mode_label }}</strong> — only {{ mode_label }} activity is shown here.</p>
+
+<div class="card">
+  <h2>Activity — {{ mode_label }}</h2>
+  {% if activity %}
+  <p class="muted small">Latest {{ activity|length }} entries, newest first.</p>
+  <ul>{% for a in activity %}<li><span class="muted small">{{ a.created_at }}</span> — <strong>{{ a.kind }}</strong>: {{ a.detail }}</li>{% endfor %}</ul>
+  {% else %}
+  <p class="muted">No activity yet in {{ mode_label }} — trades, buys and sells, and silent-bot events show up here as they happen.</p>
+  {% endif %}
+</div>
+
+{% include "_analysis.html" %}
+{% endblock %}

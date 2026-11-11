@@ -238,11 +238,11 @@ class TestSummary(AnalysisBase):
 
 
 class TestAnalysisPage(AnalysisBase):
-    def test_pnl_page_shows_analysis_section(self):
+    def test_logs_page_shows_analysis_section(self):
         self._trade("MINTA", "buy", 10, 1.00, "2026-11-09T10:00:00Z")
         self._trade("MINTA", "sell", 10, 0.50, "2026-11-09T10:05:00Z",
                     exit_reason="stop_loss")
-        resp = self.client.get("/pnl")
+        resp = self.client.get("/logs")
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Losing-buy analysis", html)
@@ -253,16 +253,16 @@ class TestAnalysisPage(AnalysisBase):
         self.assertIn("Winning buys (0)", html)
 
     def test_no_separate_analysis_route(self):
-        # The analysis lives on /pnl as a section — there is no
+        # The analysis lives on /logs as a section — there is no
         # separate page or route for it.
-        resp = self.client.get("/pnl/analysis")
+        resp = self.client.get("/logs/analysis")
         self.assertEqual(resp.status_code, 404)
-        html = self.client.get("/pnl").get_data(as_text=True)
-        self.assertNotIn("/pnl/analysis", html)
+        html = self.client.get("/logs").get_data(as_text=True)
+        self.assertNotIn("/logs/analysis", html)
 
-    def test_pnl_requires_login(self):
+    def test_logs_requires_login(self):
         self.client.get("/logout")
-        resp = self.client.get("/pnl")
+        resp = self.client.get("/logs")
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/login", resp.headers["Location"])
 

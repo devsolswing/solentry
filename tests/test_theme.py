@@ -92,7 +92,7 @@ class TestOneTheme(ThemeBase):
         self.assertIn('stroke="#ffd700"', src)
 
     def test_main_pages_render_with_theme_shell(self):
-        for path in ("/dashboard", "/bots", "/wallet", "/pnl",
+        for path in ("/dashboard", "/bots", "/wallet", "/logs",
                      "/settings"):
             html = self._html(path)
             self.assertIn('class="topbar"', html, path)

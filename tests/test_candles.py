@@ -572,8 +572,11 @@ class TestHomeChart(CandleBase):
         self.assertIn('aria-label="Candlestick chart"', html)
         self.assertIn('aria-label="Price chart"', html)
         self.assertIn('data-chart-toggle', html)
-        # The Full chart link and the holdings list stay.
-        self.assertIn("Full chart ›", html)
+        # The home chart and the holdings list stay. The old "Full
+        # chart ›" link to the deleted P&L page is gone, never a
+        # dead link.
+        self.assertNotIn("Full chart ›", html)
+        self.assertNotIn('href="/pnl"', html)
         self.assertIn("holdings-panel", html)
 
     def test_home_chart_duration_selects_the_range(self):

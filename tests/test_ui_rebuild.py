@@ -239,7 +239,9 @@ class TestHomePage(UiBase):
         self.assertIn("Trenches", html)
         self.assertIn('href="/trenches"', html)
         self.assertIn("Logs", html)
-        self.assertIn('href="/dashboard#activity"', html)
+        # The Logs button opens the dedicated Logs page (Page 11),
+        # not the old dashboard activity anchor.
+        self.assertIn('href="/logs"', html)
 
     def test_home_buy_sell_buttons_open_quick_trade(self):
         self._choose_mode("paper")
@@ -260,16 +262,18 @@ class TestHomePage(UiBase):
                             ("/settings", "Settings")):
             self.assertIn(f'href="{href}"', html, href)
             self.assertIn(f">{label}</span>", html, label)
-        # The old five-tab labels are gone from the nav.
-        self.assertNotIn("Coins</a>", html)
-        self.assertNotIn("P&amp;L</a>", html)
+        # The old five-tab labels are gone from the NAV (the page
+        # picker lists "Coins" as a page name — that is not a tab).
+        nav = html.split('<nav class="hud"')[1].split("</nav>")[0]
+        self.assertNotIn("Coins</a>", nav)
+        self.assertNotIn("P&amp;L</a>", nav)
         # The mode switch lives in the topbar, not a fifth tab.
         self.assertIn('action="/mode"', html)
 
     def test_home_nav_links_all_resolve(self):
         self._choose_mode("paper")
         for path in ("/wallet", "/bots", "/wallet/details", "/settings",
-                     "/pnl", "/dashboard", "/trenches"):
+                     "/logs", "/dashboard", "/trenches"):
             resp = self.client.get(path)
             self.assertEqual(resp.status_code, 200, path)
 
@@ -287,7 +291,9 @@ class TestHomePage(UiBase):
         # "chart moved off home"): the user ordered a chart back in
         # the home balance area, as a candlestick chart with duration
         # options. The old portfolio-chart / chart-ranges classes
-        # stay gone; the full chart still lives on the P&L page.
+        # stay gone; the full chart lives on the home page itself.
+        # The old "Full chart ›" link to the P&L page is gone with
+        # that page (Logs build, 2026-11-10) — never a dead link.
         self._choose_mode("paper")
         html = self._html("/wallet?range=1h")
         self.assertIn('href="/wallet?range=1h"', html)
@@ -295,9 +301,8 @@ class TestHomePage(UiBase):
         self.assertIn("home-chart-durations", html)
         self.assertNotIn("chart-ranges", html)
         self.assertNotIn("portfolio-chart", html)
-        # The "Full chart ›" link opens the P&L page.
-        self.assertIn("Full chart ›", html)
-        self.assertIn('href="/pnl"', html)
+        self.assertNotIn("Full chart ›", html)
+        self.assertNotIn('href="/pnl"', html)
 
     def test_home_24h_change_dash_without_snapshots(self):
         self._choose_mode("paper")
@@ -305,7 +310,7 @@ class TestHomePage(UiBase):
         self.assertIn("change-24h", html)
         # No recorded snapshots yet: no invented change. The compact
         # home chart says there is not enough history yet instead of
-        # drawing a chart; the full chart lives on the P&L page.
+        # drawing a chart; the full chart lives on the home page.
         self.assertIn("—", html)
         self.assertNotIn("No chart data yet", html)
 
