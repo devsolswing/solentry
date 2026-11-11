@@ -57,8 +57,11 @@ class TestLoginPage(unittest.TestCase):
         self.assertIn("Forgot username?", html)
         self.assertIn('href="/forgot-password"', html)
         self.assertIn("Forgot password?", html)
-        self.assertIn('id="fox-back"', html)
-        self.assertIn(">Back</button>", html)
+        # Back is gone: a Create Account button goes to Sign up.
+        self.assertNotIn('id="fox-back"', html)
+        self.assertNotIn(">Back</button>", html)
+        self.assertIn('href="/signup"', html)
+        self.assertIn(">Create Account</a>", html)
         self.assertIn('id="fox-donate"', html)
         self.assertIn(">Donate</button>", html)
         self.assertIn('id="passkey-login-btn"', html)

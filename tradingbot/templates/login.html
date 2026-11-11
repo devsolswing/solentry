@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}SolEntry — Login{% endblock %}
-{% block header %}<header class="topbar"><div class="top-left">{% include "_page_id.html" %}</div></header>{% endblock %}
+{% block header %}<header class="topbar fox-topbar"><div class="top-left">{% include "_page_id.html" %}</div></header>{% endblock %}
 {% block footer %}{% endblock %}
 {% block content %}
 <div class="fox-auth">
@@ -36,7 +36,7 @@
     <button class="fox-btn fox-btn-gold" type="submit">Login</button>
   </form>
 
-  <button class="fox-btn fox-btn-red" type="button" id="fox-back">Back</button>
+  <a class="fox-btn fox-btn-red" href="{{ url_for('signup') }}">Create Account</a>
   <button class="fox-btn fox-btn-donate" type="button" id="fox-donate">Donate</button>
 
   <button type="button" class="fox-passkey" id="passkey-login-btn">Sign in with passkey</button>
@@ -90,16 +90,6 @@
     eye.classList.toggle('off', show);
     eye.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
     pw.focus();
-  });
-  // Back: return to the previous screen; with no history (a fresh
-  // visit to the login page) go to Sign up instead — the only other
-  // logged-out page, so a new user can create an account.
-  document.getElementById('fox-back').addEventListener('click', function () {
-    if (window.history.length > 1) {
-      window.history.back();
-    } else {
-      window.location.href = {{ url_for('signup') | tojson }};
-    }
   });
   // Donate: reveal the donate card (Connect Wallet + amount + send)
   // and scroll it into view; tapping again hides it.

@@ -459,29 +459,46 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 /* username text is the same gold, bold, system font as the           */
 /* screenshot's "Dev_SolEntry" — #ffd700, weight 800.               */
 /* ------------------------------------------------------------------ */
-.fox-auth { max-width: 480px; margin: 0 auto; padding: 6px 14px 28px; background: #000; }
-.fox-brand { display: flex; align-items: center; gap: 14px; margin: 8px 0 4px; }
-.fox-logo { width: 104px; height: 104px; flex: 0 0 auto; object-fit: cover; border-radius: 50%; border: 3px solid #ffd700; box-shadow: 0 0 18px rgba(255, 200, 0, .45); }
-.fox-wordmark { font-size: clamp(44px, 15vw, 62px); font-weight: 900; font-style: italic; letter-spacing: -2px; line-height: 1; margin: 0; background: linear-gradient(100deg, #ffb300 0%, #ffd700 50%, #ffb300 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 8px rgba(255, 170, 0, .4)); }
-.fox-rule { height: 2px; border: none; margin: 10px 0 16px; background: linear-gradient(90deg, #ffd700 0%, #ff7a18 45%, #ff2d20 100%); }
-.fox-field { position: relative; margin: 12px 0 0; }
-.fox-field input { width: 100%; padding: 14px 48px 14px 46px; background: #000; color: #ffd700; border: 2px solid #ffb300; border-radius: 12px; font-size: 17px; font-weight: 800; box-shadow: 0 0 12px rgba(255, 170, 0, .25); }
+/* Auth pages (Login / Sign up / Forgot username) — ONE screen, NO
+   scrolling, exactly like the owner's screenshots. The column is
+   exactly the viewport minus the fixed 40px topbar; every vertical
+   size is viewport-relative (dvh/clamp), and the hero is the only
+   flexible element — it shrinks to absorb a short viewport (or a
+   flash message / Turnstile widget) so every field and button stays
+   visible and tappable. Nothing here touches long pages: they keep
+   scrolling exactly as before. */
+.fox-topbar { height: 40px; padding-top: 0; padding-bottom: 0; }
+.fox-auth { max-width: 480px; margin: -16px auto -40px; padding: 6px 14px 8px; background: #000; height: calc(100vh - 40px); height: calc(100dvh - 40px); display: flex; flex-direction: column; overflow: hidden; }
+.fox-auth > * { flex-shrink: 0; }
+.fox-auth > .fox-hero { flex: 1 1 0; min-height: 40px; }
+/* A flash message (e.g. failed login) sits above the column: shrink
+   the column by its height so the page still does not scroll. */
+.wrap:has(> .flash) .fox-auth { height: calc(100vh - 40px - 57px); height: calc(100dvh - 40px - 57px); }
+.fox-brand { display: flex; align-items: center; gap: 14px; margin: 1dvh 0 0.5dvh; }
+.fox-auth .fox-logo { width: clamp(64px, 11dvh, 104px); height: clamp(64px, 11dvh, 104px); }
+.fox-wordmark { font-size: clamp(36px, 7.5dvh, 62px); font-weight: 900; font-style: italic; letter-spacing: -2px; line-height: 1; margin: 0; background: linear-gradient(100deg, #ffb300 0%, #ffd700 50%, #ffb300 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 8px rgba(255, 170, 0, .4)); }
+.fox-rule { height: 2px; border: none; margin: 1dvh 0; background: linear-gradient(90deg, #ffd700 0%, #ff7a18 45%, #ff2d20 100%); }
+.fox-field { position: relative; margin: 1dvh 0 0; }
+.fox-field input { width: 100%; padding: clamp(9px, 1.5dvh, 14px) 48px clamp(9px, 1.5dvh, 14px) 46px; background: #000; color: #ffd700; border: 2px solid #ffb300; border-radius: 12px; font-size: 17px; font-weight: 800; box-shadow: 0 0 12px rgba(255, 170, 0, .25); }
 .fox-field input::placeholder { color: #9a9a9a; font-weight: 400; }
 .fox-field input:focus { outline: none; border-color: #ffd700; box-shadow: 0 0 16px rgba(255, 200, 0, .5); }
 .fox-field .fox-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); font-size: 19px; color: #ffd700; }
 .fox-field .fox-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; font-size: 20px; cursor: pointer; padding: 6px; line-height: 1; color: #ffd700; }
 .fox-field .fox-eye.off::after { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; background: #ff2d20; transform: rotate(-45deg); }
-.fox-forgot { display: block; margin: 6px 0 0; color: #ff2d20; font-size: 15px; text-decoration: underline; text-underline-offset: 3px; }
+.fox-forgot { display: block; margin: 0.6dvh 0 0; color: #ff2d20; font-size: 15px; text-decoration: underline; text-underline-offset: 3px; }
 .fox-forgot:active { color: #fff; }
-.fox-btn { display: block; width: 100%; padding: 14px; font-size: 22px; font-weight: 800; border-radius: 14px; cursor: pointer; margin-top: 14px; text-align: center; text-decoration: none; }
+.fox-btn { display: block; width: 100%; padding: clamp(9px, 1.6dvh, 14px); font-size: clamp(18px, 2.6dvh, 22px); font-weight: 800; border-radius: 14px; cursor: pointer; margin-top: 1.2dvh; text-align: center; text-decoration: none; }
 .fox-btn:active { transform: scale(.98); filter: brightness(1.2); }
 .fox-btn-gold { color: #1a0505; background: linear-gradient(180deg, #ffd700 0%, #f5a623 55%, #e8a020 100%); border: 2px solid #ffcf3d; box-shadow: 0 0 18px rgba(255, 170, 0, .5); }
 .fox-btn-red { color: #ff2d20; background: #4a0505; border: 2px solid #ff2d20; }
 .fox-btn-donate { color: #ffd700; background: #000; border: 2px solid #ffb300; }
-.fox-passkey { display: block; width: 100%; margin: 14px 0 0; background: none; border: none; color: #ffd700; font-size: 15px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
-.fox-hero { display: flex; align-items: center; gap: 10px; margin-top: 22px; }
-.fox-hero img { width: 46%; flex: 0 0 auto; display: block; }
-.fox-tagline { color: #ff2d20; font-size: clamp(28px, 9vw, 38px); font-weight: 900; font-style: italic; line-height: 1.05; margin: 0; }
-.fox-reveal { text-align: center; margin: 18px 0; }
+.fox-passkey { display: block; width: 100%; margin: 1dvh 0 0; background: none; border: none; color: #ffd700; font-size: 15px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+/* The donate card is hidden until Donate is tapped; when shown it
+   becomes a fixed bottom sheet so it never makes the page scroll. */
+.fox-auth .se-card { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 60; max-width: 456px; margin: 0 auto; max-height: 72vh; max-height: 72dvh; overflow-y: auto; }
+.fox-hero { display: flex; align-items: flex-end; gap: 10px; padding-top: 1dvh; }
+.fox-hero img { height: 100%; max-height: 100%; width: auto; max-width: 46%; flex: 0 0 auto; display: block; object-fit: contain; }
+.fox-tagline { color: #ff2d20; font-size: clamp(22px, 4.5dvh, 38px); font-weight: 900; font-style: italic; line-height: 1.05; margin: 0; }
+.fox-reveal { text-align: center; margin: 2dvh 0; }
 .fox-reveal .fox-username { color: #ffd700; font-size: 28px; font-weight: 800; }
-.fox-note { color: #b9a99a; font-size: 13px; text-align: center; margin: 10px 0 0; }
+.fox-note { color: #b9a99a; font-size: 13px; text-align: center; margin: 1dvh 0 0; }

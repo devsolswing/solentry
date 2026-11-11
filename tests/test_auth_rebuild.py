@@ -6,6 +6,8 @@ revealing whether an email is registered. Wrong answers lock the
 account like wrong passwords.
 """
 
+import os
+import re
 import tempfile
 import unittest
 
@@ -174,6 +176,68 @@ class TestForgotUsername(AuthRebuildTestCase):
         self.assertIn("Account recovery is not set up for this account.",
                       html)
         self.assertNotIn("carol", html)
+
+
+class TestAuthOneScreen(AuthRebuildTestCase):
+    """Follow-up: Pages 1 and 2 fit on ONE screen with no scrolling,
+    and the fox images ship in the repo so the live app serves them.
+    Long pages are untouched and keep scrolling."""
+
+    def css(self):
+        path = os.path.join(self.app.static_folder, "style.css")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def rule(self, css, selector):
+        m = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(m, "%s rule missing from style.css"
+                             % selector)
+        return m.group(1)
+
+    def test_auth_pages_use_fixed_topbar(self):
+        for path in ("/login", "/signup", "/forgot-username"):
+            resp = self.client.get(path)
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn('class="topbar fox-topbar"',
+                          resp.get_data(as_text=True))
+
+    def test_auth_column_is_exactly_one_screen(self):
+        body = self.rule(self.css(), ".fox-auth")
+        self.assertIn("height: calc(100dvh - 40px)", body)
+        self.assertIn("display: flex", body)
+        self.assertIn("overflow: hidden", body)
+
+    def test_hero_is_the_only_flexible_element(self):
+        body = self.rule(self.css(), ".fox-auth > .fox-hero")
+        self.assertIn("flex: 1 1 0", body)
+        self.assertIn("min-height: 40px", body)
+        img = self.rule(self.css(), ".fox-hero img")
+        self.assertIn("max-height: 100%", img)
+
+    def test_logo_is_viewport_relative(self):
+        body = self.rule(self.css(), ".fox-auth .fox-logo")
+        self.assertIn("clamp(", body)
+        self.assertIn("dvh", body)
+
+    def test_fox_images_exist_in_the_repo(self):
+        for name in ("fox-red-480.jpg", "fox-gold-480.jpg"):
+            path = os.path.join(self.app.static_folder, name)
+            self.assertTrue(os.path.exists(path), "%s missing" % name)
+            with open(path, "rb") as f:
+                head = f.read(3)
+            self.assertEqual(head, b"\xff\xd8\xff",
+                             "%s is not a JPEG" % name)
+
+    def test_auth_pages_reference_both_foxes(self):
+        for path in ("/login", "/signup", "/forgot-username"):
+            html = self.client.get(path).get_data(as_text=True)
+            self.assertIn("fox-red-480.jpg", html)
+            self.assertIn("fox-gold-480.jpg", html)
+
+    def test_long_pages_still_scroll(self):
+        css = self.css()
+        self.assertNotIn("overflow", self.rule(css, "body"))
+        self.assertNotIn("overflow", self.rule(css, ".wrap"))
 
 
 if __name__ == "__main__":

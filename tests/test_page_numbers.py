@@ -89,7 +89,10 @@ class TestPageNumbersRender(unittest.TestCase):
                             html.index('class="brand"'),
                             "page ID must come before the brand")
         else:
-            start = html.index('<header class="topbar">')
+            # The auth pages carry an extra fox-topbar class on the
+            # header (fixed 40px topbar so Pages 1 and 2 fit on one
+            # screen); match the header by its class prefix.
+            start = html.index('<header class="topbar')
             end = html.index("</header>", start)
             self.assertIn(chip, html[start:end],
                           "page ID must sit in the topbar header")
