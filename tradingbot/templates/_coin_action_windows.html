@@ -124,7 +124,19 @@
     <p class="popup-head"><button class="popup-close" type="button" data-overlay-close aria-label="Close">✕</button></p>
     <h2>Send {{ coin.name }} ({{ coin.ticker }})</h2>
     {% if coin_network.is_solana %}
-    <p class="muted small">Network: <strong>{{ network_label }}</strong> — this sends SOL{% if coin.ticker != "SOL" %}, not {{ coin.ticker }}{% endif %}. SolEntry sends SOL only.</p>
+    {% if coin.is_mint %}
+    <p class="muted small">Network: <strong>{{ network_label }}</strong> — this sends {{ coin.ticker }} to the address you enter. Any Solana address works.</p>
+    <p class="muted">Step 1 of 2 — enter the details. Nothing moves yet; the next screen asks you to confirm, then takes you back to this coin.</p>
+    <form method="post" action="{{ url_for('wallet_send') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="token" value="{{ coin.coin_id }}">
+      <input type="hidden" name="return_to" value="coin:{{ coin.coin_id }}">
+      <label>Destination address<input name="destination" required placeholder="Solana address"></label>
+      <label>Amount ({{ coin.ticker }})<input type="number" name="amount" step="any" min="0" required placeholder="0.1"></label>
+      <button class="btn big" type="submit">Review send →</button>
+    </form>
+    {% else %}
+    <p class="muted small">Network: <strong>{{ network_label }}</strong> — this sends SOL. SolEntry sends SOL only for this coin.</p>
     <p class="muted">Step 1 of 2 — enter the details. Nothing moves yet; the next screen asks you to confirm, then takes you back to this coin.</p>
     <form method="post" action="{{ url_for('wallet_send') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -134,6 +146,7 @@
       <label>Amount (SOL)<input type="number" name="amount" step="any" min="0" required placeholder="0.1"></label>
       <button class="btn big" type="submit">Review send →</button>
     </form>
+    {% endif %}
     {% else %}
     <p class="refusal"><strong>Can't send {{ coin.name }} from here.</strong> {{ send_refusal }}</p>
     {% endif %}

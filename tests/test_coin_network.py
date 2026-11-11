@@ -205,8 +205,11 @@ class TestCoinDetailNetwork(CoinNetworkBase):
         send = self._overlay(html, "coin-send-overlay")
         self.assertIn("Solana (devnet)", send)
         self.assertIn("Review send", send)
-        # The send is SOL, not the mint token — the window says so.
-        self.assertIn("this sends SOL, not So11…", send)
+        # The send is the mint token now, not SOL — the window
+        # says so, and the form posts the mint as the token.
+        self.assertIn("this sends So11…", send)
+        self.assertIn(f'name="token" value="{MINT}"', send)
+        self.assertNotIn("SolEntry sends SOL only", send)
 
     def test_server_refuses_btc_send_post(self):
         before = self._intent_count()

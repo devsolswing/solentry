@@ -314,6 +314,18 @@ def _send_and_confirm(rpc, signed_b64: str,
     return None, "transaction not confirmed"
 
 
+def send_and_confirm(rpc, signed_b64: str,
+                     signature: str | None = None) -> tuple:
+    """Send a locally-signed transaction and wait for it to land —
+    the shared helper for any send (trades and user-initiated
+    sends alike). Returns (signature, None) when it landed,
+    else (None, reason). A transaction the chain confirms is
+    always reported as a success, even when the send call or the
+    first confirmation checks failed transiently — see
+    _send_and_confirm."""
+    return _send_and_confirm(rpc, signed_b64, signature)
+
+
 def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                  db, cfg: Config, rpc, signing_bot: dict) -> dict:
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)

@@ -21,9 +21,13 @@ import urllib.request
 
 SYSTEM_PROGRAM = "11111111111111111111111111111111"
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 RENT_SYSVAR = "SysvarRent111111111111111111111111111111111"
 LAMPORTS_PER_SOL = 1_000_000_000
+# A token account is 165 bytes — the rent-exempt minimum for one is
+# queried live (getMinimumBalanceForRentExemption), never hardcoded.
+TOKEN_ACCOUNT_SIZE = 165
 
 # ---------------------------------------------------------------------------
 # base58 (Bitcoin alphabet, as Phantom exports)
@@ -303,6 +307,66 @@ def find_associated_token_address(owner_b58: str, mint_b58: str,
     return address
 
 
+def build_token_transfer_instruction(source_ata_b58: str,
+                                     dest_ata_b58: str, authority_b58: str,
+                                     amount_base_units: int,
+                                     token_program_b58: str = TOKEN_PROGRAM
+                                     ) -> dict:
+    """One SPL Token `transfer` instruction (build_message format).
+
+    Data: [3] (transfer discriminator) + amount as u64 little-endian.
+    Accounts: the source token account (writable), the destination
+    token account (writable), then the owner/authority (signer).
+    Works for the legacy Token program and Token-2022 alike — the
+    caller passes the mint's own token program.
+    """
+    if amount_base_units <= 0:
+        raise ValueError("token amount must be positive")
+    return {
+        "program_id": token_program_b58,
+        "accounts": [
+            {"pubkey": source_ata_b58, "is_signer": False,
+             "is_writable": True},
+            {"pubkey": dest_ata_b58, "is_signer": False,
+             "is_writable": True},
+            {"pubkey": authority_b58, "is_signer": True,
+             "is_writable": False},
+        ],
+        "data": bytes([3]) + amount_base_units.to_bytes(8, "little"),
+    }
+
+
+def build_create_associated_token_account_instruction(
+        payer_b58: str, ata_b58: str, owner_b58: str, mint_b58: str,
+        token_program_b58: str = TOKEN_PROGRAM) -> dict:
+    """One Associated Token Program `create` instruction
+    (build_message format).
+
+    Data: empty (the create instruction takes no data). Accounts,
+    in the program's expected order: the funding account (signer,
+    writable), the associated token account to create (writable),
+    the wallet that will own it (readonly), the mint (readonly),
+    the System program, the token program, and the Rent sysvar
+    (all readonly).
+    """
+    return {
+        "program_id": ASSOCIATED_TOKEN_PROGRAM,
+        "accounts": [
+            {"pubkey": payer_b58, "is_signer": True, "is_writable": True},
+            {"pubkey": ata_b58, "is_signer": False, "is_writable": True},
+            {"pubkey": owner_b58, "is_signer": False, "is_writable": False},
+            {"pubkey": mint_b58, "is_signer": False, "is_writable": False},
+            {"pubkey": SYSTEM_PROGRAM, "is_signer": False,
+             "is_writable": False},
+            {"pubkey": token_program_b58, "is_signer": False,
+             "is_writable": False},
+            {"pubkey": RENT_SYSVAR, "is_signer": False,
+             "is_writable": False},
+        ],
+        "data": b"",
+    }
+
+
 def build_transfer_instruction(fee_payer_b58: str, to_b58: str,
                                lamports: int) -> dict:
     """One SystemProgram transfer instruction (build_message format).
@@ -468,6 +532,35 @@ class SolanaRpcClient:
         if not result or "value" not in result:
             raise RpcError("bad getTokenAccountBalance result")
         return int(result["value"]["amount"])
+
+    def get_token_account(self, pubkey: str) -> dict | None:
+        """A token account's balance and decimals, as {"amount":
+        int (base units), "decimals": int} — or None when the
+        account does not exist on-chain. A missing account is a
+        normal answer (an address that never held this token has
+        no token account); any other RPC failure is raised, so a
+        down RPC is never mistaken for an empty balance."""
+        try:
+            result = self._call("getTokenAccountBalance", [pubkey])
+        except RpcError as exc:
+            if "could not find account" in str(exc):
+                return None
+            raise
+        if not result or "value" not in result:
+            raise RpcError("bad getTokenAccountBalance result")
+        value = result["value"]
+        return {"amount": int(value["amount"]),
+                "decimals": int(value["decimals"])}
+
+    def get_minimum_balance_for_rent_exemption(self, data_size: int) -> int:
+        """The rent-exempt minimum for an account of `data_size`
+        bytes, in lamports — queried live, never hardcoded."""
+        result = self._call("getMinimumBalanceForRentExemption",
+                            [data_size])
+        if result is None:
+            raise RpcError(
+                "bad getMinimumBalanceForRentExemption result")
+        return int(result)
 
     def get_token_largest_accounts(self, mint: str) -> list:
         """Largest token accounts for a mint (public RPC, no key).

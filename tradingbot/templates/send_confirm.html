@@ -3,12 +3,12 @@
 {% block content %}
 <div class="card narrow">
   <h1>Confirm this send</h1>
-  <p class="muted">Step 2 of 2 — check everything. This is the last stop before SOL moves.</p>
+  <p class="muted">Step 2 of 2 — check everything. This is the last stop before anything moves.</p>
   <table>
     <tr><th>Destination</th><td class="addr">{{ intent.destination }}</td></tr>
-    <tr><th>Amount</th><td>{{ "%.4f"|format(intent.amount_lamports / 1000000000) }} {{ intent.token }}</td></tr>
+    <tr><th>Amount</th><td>{{ display_amount }} {{ display_token }}</td></tr>
     <tr><th>Network</th><td>{{ network }}</td></tr>
-    <tr><th>Fee</th><td>≈ 0.000005 SOL (network fee, estimated)</td></tr>
+    <tr><th>Fee</th><td>{{ fee_note }}</td></tr>
   </table>
   <form method="post" action="{{ url_for('wallet_send_confirm', intent_id=intent.id) }}{% if return_to %}?return_to={{ return_to }}{% endif %}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

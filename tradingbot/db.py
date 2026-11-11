@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS send_intents (
     status TEXT NOT NULL DEFAULT 'pending',
     signature TEXT,
     error TEXT,
+    mint TEXT NOT NULL DEFAULT '',
+    amount_base_units INTEGER NOT NULL DEFAULT 0,
+    decimals INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
@@ -502,6 +505,13 @@ _MIGRATIONS = (
     ("trade_fees", "treasury_lamports", "INTEGER"),
     ("trade_fees", "burn_lamports", "INTEGER"),
     ("trade_fees", "pump_fee_lamports", "INTEGER"),
+    # Token sends (general SPL send): the mint, the amount in the
+    # mint's base units, and the mint's decimals (so the amount can
+    # be rendered back in token units). '' / 0 / 0 for SOL sends
+    # and for rows recorded before token sends existed.
+    ("send_intents", "mint", "TEXT NOT NULL DEFAULT ''"),
+    ("send_intents", "amount_base_units", "INTEGER NOT NULL DEFAULT 0"),
+    ("send_intents", "decimals", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

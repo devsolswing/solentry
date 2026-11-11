@@ -48,11 +48,12 @@ from . import pnl as pnl_mod
 from .page_numbers import page_list, page_number_for
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
+from . import token_send as token_send_mod
 from .charts import (CHART_RANGES, fetch_market_chart, fetch_ohlc,
                      fetch_trade_flow, high_low_24h,
                      mint_candles_from_feed, search_coins)
 from .config import Config
-from .executor import execute_real_trade
+from .executor import execute_real_trade, send_and_confirm
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, clear_price_cache, get_prices
@@ -733,6 +734,132 @@ def _unlisted_coin_row(coin_id_resolved: str, price, prices: dict) -> dict:
             "change_24h": prices["prices"].get(
                 coin_id_resolved, {}).get("change_24h"),
             "pnl": None, "is_mint": coin_id_resolved not in COINS}
+
+
+def _token_ticker(mint: str) -> str:
+    """The display ticker for a mint: the feed's real symbol when
+    DexScreener names it, else a truncated address — never a
+    fabricated name."""
+    try:
+        identities = fetch_mint_identities([mint])
+    except Exception:
+        identities = {}
+    info = identities.get(mint) or {}
+    symbol = info.get("symbol")
+    if symbol:
+        return str(symbol)
+    return mint[:4] + "…"
+
+
+def _token_send_fee_note(app, wallet_pubkey: str, intent) -> str:
+    """The fee line for a token send's confirm screen: the network
+    fee, plus the token-account rent when the recipient has no
+    token account for the mint yet. Best effort — when the chain
+    cannot be checked, the note says the rent may apply instead
+    of guessing a number."""
+    try:
+        client = SolanaRpcClient(_cfg(app).rpc_url)
+        inspection = token_send_mod.inspect_token(
+            client, wallet_pubkey, intent["mint"], intent["destination"])
+    except Exception:
+        return ("Network fee + token account rent if needed, paid "
+                "from your SOL.")
+    if inspection["create_ata"]:
+        total = (token_send_mod.TX_FEE_LAMPORTS
+                 + inspection["rent_lamports"])
+        return (f"≈ {lamports_to_sol(total):.5f} SOL (network fee + "
+                "token account rent, estimated)")
+    return "≈ 0.000005 SOL (network fee, estimated)"
+
+
+def _confirm_token_send(app, user, intent, return_to, return_coin_id):
+    """The confirm step for a token send intent: re-check the
+    on-chain balance, build + sign + send the token transaction,
+    and record the outcome. The daily SOL cap does not apply —
+    no SOL value is sent, only the network fee and the token
+    account rent, both paid from the app wallet's SOL. Returns
+    the redirect response, as the SOL confirm does."""
+    db = _db(app)
+    mint = intent["mint"]
+    ticker = intent["token"]
+    amount_base_units = int(intent["amount_base_units"])
+    ui_amount = token_send_mod.format_token_amount(
+        amount_base_units, int(intent["decimals"]))
+
+    def _fail(reason: str):
+        db.execute(
+            "UPDATE send_intents SET status = 'failed', error = ? "
+            "WHERE id = ?", (reason[:200], intent["id"]))
+        db.commit()
+        _log(app, user["id"], "send_failed",
+             f"Token send failed: {reason}"[:120], "real")
+        flash("Send failed: " + reason[:200])
+
+    def _done():
+        if return_coin_id:
+            return redirect(url_for("coin_detail", coin_id=return_coin_id))
+        return redirect(url_for("dashboard" if return_to else "wallet"))
+
+    wallet = _wallet(app, user["id"])
+    if not wallet:
+        _fail("No app wallet.")
+        return _done()
+    client = SolanaRpcClient(_cfg(app).rpc_url)
+    try:
+        inspection = token_send_mod.inspect_token(
+            client, wallet["pubkey"], mint, intent["destination"])
+    except token_send_mod.TokenSendRefusal as exc:
+        _fail(str(exc))
+        return _done()
+    if amount_base_units > inspection["balance"]:
+        _fail("Amount is more than you hold of this token now.")
+        return _done()
+    required_sol = (token_send_mod.TX_FEE_LAMPORTS
+                    + inspection["rent_lamports"])
+    try:
+        sol_balance = client.get_balance_lamports(wallet["pubkey"])
+    except Exception:
+        _fail("Could not check your SOL balance right now — try again.")
+        return _done()
+    if sol_balance < required_sol:
+        _fail("Not enough SOL for the network fee.")
+        return _done()
+    try:
+        instructions = token_send_mod.build_token_send_instructions(
+            inspection, amount_base_units)
+    except token_send_mod.TokenSendRefusal as exc:
+        _fail(str(exc))
+        return _done()
+    try:
+        # The key is decrypted into a mutable buffer, used for one
+        # signature, and wiped IN PLACE the moment signing is done —
+        # before the transaction is even sent, as in the SOL send.
+        with temporary_secret(wallet["encrypted_secret"],
+                              _cfg(app).encryption_key) as secret:
+            seed = bytearray(secret[:32])
+            try:
+                blockhash = client.get_latest_blockhash()
+                signed_b64, signature = token_send_mod.sign_token_send(
+                    seed, wallet["pubkey"], instructions, blockhash)
+            finally:
+                wipe_secret(seed)
+    except Exception as exc:
+        _fail(str(exc)[:200])
+        return _done()
+    tx_sig, reason = send_and_confirm(client, signed_b64, signature)
+    if tx_sig is None:
+        _fail(reason or "transaction not confirmed")
+        return _done()
+    db.execute(
+        "UPDATE send_intents SET status = 'sent', signature = ? "
+        "WHERE id = ?", (tx_sig, intent["id"]))
+    db.commit()
+    _remove_real_holding(db, user["id"], mint, float(ui_amount))
+    _log(app, user["id"], "send",
+         f"Sent {ui_amount} {ticker} to {intent['destination'][:8]}... "
+         f"signature {tx_sig[:12]}...", "real")
+    flash("Send submitted. Signature: " + tx_sig)
+    return _done()
 
 
 def register_routes(app: Flask) -> None:
@@ -2427,8 +2554,20 @@ def register_routes(app: Flask) -> None:
             (user["id"],)).fetchone()["pumpfun_wallet"]
         intents = db.execute(
             "SELECT id, destination, amount_lamports, token, status, "
-            "signature, created_at FROM send_intents WHERE user_id = ? "
+            "signature, created_at, mint, amount_base_units, decimals "
+            "FROM send_intents WHERE user_id = ? "
             "ORDER BY id DESC LIMIT 20", (user["id"],)).fetchall()
+        # The history table shows each send in the units it was
+        # sent in: SOL for SOL sends, token units for token sends.
+        intents = [dict(row) for row in intents]
+        for item in intents:
+            if item["mint"]:
+                item["display_amount"] = \
+                    token_send_mod.format_token_amount(
+                        item["amount_base_units"], item["decimals"])
+            else:
+                item["display_amount"] = "%.4f" % lamports_to_sol(
+                    item["amount_lamports"])
         return render_template(
             "wallet_detail.html", **data, intents=intents,
             pumpfun_wallet=pumpfun_wallet,
@@ -2474,21 +2613,30 @@ def register_routes(app: Flask) -> None:
         if request.method == "POST":
             _csrf_check()
             destination = (request.form.get("destination") or "").strip()
-            token = (request.form.get("token") or "SOL").strip().upper()
-            try:
-                amount = float(request.form.get("amount") or 0)
-            except ValueError:
-                flash("Amount must be a number.")
-                return redirect(url_for("wallet_send"))
-            if token != "SOL":
-                flash("Only SOL sends are supported in v1.")
+            # "SOL" case-insensitively; a mint address is kept
+            # exactly as pasted — base58 is case-sensitive, and
+            # upper-casing a mint would corrupt it.
+            token_raw = (request.form.get("token") or "SOL").strip()
+            token = "SOL" if token_raw.upper() == "SOL" else token_raw
+            amount_text = (request.form.get("amount") or "").strip()
+            # SOL, or a token mint address — anything else (a ticker
+            # like "USDC", a name) is not a sendable asset here.
+            is_token = token != "SOL" and is_valid_address(token)
+            if token != "SOL" and not is_token:
+                flash("Only SOL or a token mint address can be sent.")
                 return redirect(url_for("wallet_send"))
             if not is_valid_address(destination):
                 flash("That destination address is not valid.")
                 return redirect(url_for("wallet_send"))
-            if amount <= 0:
-                flash("Amount must be more than 0.")
-                return redirect(url_for("wallet_send"))
+            if token == "SOL":
+                try:
+                    amount = float(amount_text or 0)
+                except ValueError:
+                    flash("Amount must be a number.")
+                    return redirect(url_for("wallet_send"))
+                if amount <= 0:
+                    flash("Amount must be more than 0.")
+                    return redirect(url_for("wallet_send"))
             # The coin detail page's Send posts here with
             # return_to=coin:<id>. A coin that is not a Solana asset
             # is refused here too — the template hides the form, but
@@ -2505,29 +2653,72 @@ def register_routes(app: Flask) -> None:
                     flash(refusal)
                     return redirect(url_for("coin_detail",
                                             coin_id=coin_id))
-            lamports = sol_to_lamports(amount)
             db = _db(app)
-            # Anti-bot / wallet protection: at most 10 sends an hour,
-            # and a daily cap (default 5 SOL) — a compromised session
-            # cannot drain a wallet in one day.
+            # Anti-bot / wallet protection: at most 10 sends an hour
+            # — a compromised session cannot drain a wallet in one
+            # day. Shared by SOL and token sends alike.
             if not rate_limit_mod.record_hit(
                     db, f"send:user:{user['id']}",
                     MAX_SENDS_PER_USER, SEND_USER_WINDOW_SECONDS):
                 flash("Too many sends this hour. Please try again "
                       "later.")
                 return redirect(url_for("wallet_send"))
-            if _sent_sol_today(db, user["id"]) + amount > \
-                    _cfg(app).daily_send_limit_sol:
-                flash(f"Daily send limit is "
-                      f"{_cfg(app).daily_send_limit_sol:g} SOL — this "
-                      f"send would go over it.")
-                return redirect(url_for("wallet_send"))
-            cur = db.execute(
-                "INSERT INTO send_intents (user_id, destination, "
-                "amount_lamports, token, status, created_at) "
-                "VALUES (?, ?, ?, ?, 'pending', ?)",
-                (user["id"], destination, lamports, token, _now()))
-            db.commit()
+            if is_token:
+                # Token send: the amount is validated against the
+                # wallet's REAL on-chain balance for this mint —
+                # never only against the app's holdings table, so a
+                # holding the app never recorded is still sendable.
+                # No daily SOL cap: no SOL value is sent, only the
+                # network fee and the token-account rent.
+                wallet = _wallet(app, user["id"])
+                if not wallet:
+                    flash("No app wallet yet.")
+                    return redirect(url_for("wallet_send"))
+                client = SolanaRpcClient(_cfg(app).rpc_url)
+                try:
+                    inspection = token_send_mod.inspect_token(
+                        client, wallet["pubkey"], token, destination)
+                except token_send_mod.TokenSendRefusal as exc:
+                    flash(str(exc))
+                    return redirect(url_for("wallet_send"))
+                try:
+                    amount_base_units = \
+                        token_send_mod.amount_to_base_units(
+                            amount_text, inspection["decimals"])
+                except token_send_mod.TokenSendRefusal as exc:
+                    flash(str(exc))
+                    return redirect(url_for("wallet_send"))
+                if amount_base_units > inspection["balance"]:
+                    flash("Amount is more than you hold of this token "
+                          f"({token_send_mod.format_token_amount(inspection['balance'], inspection['decimals'])} "
+                          f"{_token_ticker(token)}).")
+                    return redirect(url_for("wallet_send"))
+                cur = db.execute(
+                    "INSERT INTO send_intents (user_id, destination, "
+                    "amount_lamports, token, status, created_at, mint, "
+                    "amount_base_units, decimals) "
+                    "VALUES (?, ?, 0, ?, 'pending', ?, ?, ?, ?)",
+                    (user["id"], destination, _token_ticker(token),
+                     _now(), token, amount_base_units,
+                     inspection["decimals"]))
+                db.commit()
+            else:
+                lamports = sol_to_lamports(amount)
+                # The daily cap (default 5 SOL) applies to SOL value
+                # sent — token sends carry no SOL value, so they do
+                # not count toward it.
+                if _sent_sol_today(db, user["id"]) + amount > \
+                        _cfg(app).daily_send_limit_sol:
+                    flash(f"Daily send limit is "
+                          f"{_cfg(app).daily_send_limit_sol:g} SOL — this "
+                          f"send would go over it.")
+                    return redirect(url_for("wallet_send"))
+                cur = db.execute(
+                    "INSERT INTO send_intents (user_id, destination, "
+                    "amount_lamports, token, status, created_at) "
+                    "VALUES (?, ?, ?, ?, 'pending', ?)",
+                    (user["id"], destination, lamports, token, _now()))
+                db.commit()
             # Step 1 done: the user must confirm on the next screen.
             # return_to=coins (from the coin popup's Send) carries
             # through, so the completed send lands back on the coins
@@ -2577,6 +2768,13 @@ def register_routes(app: Flask) -> None:
                         "coin_detail", coin_id=return_coin_id))
                 return redirect(url_for("dashboard" if return_to else
                                         "wallet"))
+            # A token send goes through its own confirm step
+            # (on-chain balance re-check, token transaction,
+            # long-poll + re-check confirmation). The daily SOL
+            # cap does not apply to it — no SOL value is sent.
+            if intent["mint"]:
+                return _confirm_token_send(app, user, intent,
+                                           return_to, return_coin_id)
             # Daily cap, re-checked at confirm time: the intent may
             # have been created yesterday or before other sends.
             if _sent_sol_today(db, user["id"],
@@ -2640,7 +2838,28 @@ def register_routes(app: Flask) -> None:
                                         coin_id=return_coin_id))
             return redirect(url_for("dashboard" if return_to else
                                     "wallet"))
+        # The confirm step restates destination, amount and token
+        # in plain words. SOL renders as before (lamports → SOL, 4
+        # decimals); a token renders in token units from its base
+        # units and decimals, with its ticker — never as SOL.
+        if intent["mint"]:
+            display_amount = token_send_mod.format_token_amount(
+                intent["amount_base_units"], intent["decimals"])
+            display_token = intent["token"]
+            wallet = _wallet(app, user["id"])
+            fee_note = (_token_send_fee_note(
+                app, wallet["pubkey"], intent) if wallet else
+                "Network fee + token account rent if needed, paid "
+                "from your SOL.")
+        else:
+            display_amount = "%.4f" % lamports_to_sol(
+                intent["amount_lamports"])
+            display_token = intent["token"]
+            fee_note = "≈ 0.000005 SOL (network fee, estimated)"
         return render_template("send_confirm.html", intent=intent,
+                               display_amount=display_amount,
+                               display_token=display_token,
+                               fee_note=fee_note,
                                return_to=return_to,
                                return_coin_id=return_coin_id,
                                # The Network row in the template was

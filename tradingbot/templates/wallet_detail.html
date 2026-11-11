@@ -60,8 +60,8 @@
   <div class="cards">
     <div class="card">
       <h2>⬆ Send</h2>
-      <p>Send SOL to any address. You always confirm on the next screen before anything moves.</p>
-      <a class="btn" href="{{ url_for('wallet_send') }}">Send SOL</a>
+      <p>Send SOL or any token you hold to any address. You always confirm on the next screen before anything moves.</p>
+      <a class="btn" href="{{ url_for('wallet_send') }}">Send</a>
     </div>
     <div class="card">
       <h2>↩ Withdraw</h2>
@@ -76,7 +76,7 @@
     <table>
       <tr><th>When</th><th>To</th><th>Amount</th><th>Status</th><th>Signature</th></tr>
       {% for i in intents %}
-      <tr><td>{{ i.created_at }}</td><td>{{ i.destination[:8] }}…</td><td>{{ "%.4f"|format(i.amount_lamports / 1000000000) }} {{ i.token }}</td><td>{{ i.status }}</td><td>{{ (i.signature or '')[:12] }}</td></tr>
+      <tr><td>{{ i.created_at }}</td><td>{{ i.destination[:8] }}…</td><td>{{ i.display_amount }} {{ i.token }}</td><td>{{ i.status }}</td><td>{{ (i.signature or '')[:12] }}</td></tr>
       {% endfor %}
     </table>
     {% else %}<p class="muted">No sends yet.</p>{% endif %}

@@ -91,12 +91,12 @@ def send_refusal(coin_id: str, app_network: str = "devnet") -> str | None:
     if info["multi_chain"]:
         return (
             f"{name} exists on many networks (Solana, Ethereum, and "
-            f"others). SolEntry only sends SOL on the {label} network, "
+            f"others). SolEntry only sends on the {label} network, "
             f"so {name} can't be sent from here. Nothing was sent.")
     if info["known"]:
         return (
             f"{name} lives on the {info['network']} network. SolEntry "
-            f"only sends SOL on the {label} network, so {name} can't "
+            f"only sends on the {label} network, so {name} can't "
             "be sent from here. Nothing was sent.")
     return ("Unknown coin — the network could not be determined, so "
             "the send was refused rather than guessed. Nothing was "

@@ -1,14 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Send SOL — Trading Bot{% endblock %}
+{% block title %}Send — Trading Bot{% endblock %}
 {% block content %}
 <div class="card narrow">
-  <h1>Send SOL</h1>
+  <h1>Send</h1>
   <p class="muted">Step 1 of 2 — enter the details. Nothing moves yet; the next screen asks you to confirm.</p>
   <form method="post" action="{{ url_for('wallet_send') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Destination address<input name="destination" required placeholder="Solana address"></label>
-    <label>Amount (SOL)<input type="number" name="amount" step="any" min="0" required placeholder="0.1"></label>
-    <input type="hidden" name="token" value="SOL">
+    <label>Token<input name="token" value="SOL" required placeholder="SOL or a token mint address"></label>
+    <label>Amount<input type="number" name="amount" step="any" min="0" required placeholder="0.1"></label>
+    <p class="muted small">SOL by default. To send a token instead, paste its mint address in Token and enter the amount in that token — any token you hold, to any Solana address. No trading fee on a send; only the network fee (plus the token-account rent when the destination has no account for the token yet) is paid from your SOL.</p>
     <button class="btn big" type="submit">Review send →</button>
   </form>
   <p><a href="{{ url_for('wallet') }}">← Back to wallet</a></p>
