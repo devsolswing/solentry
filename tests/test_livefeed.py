@@ -19,7 +19,8 @@ from unittest import mock
 
 import tradingbot.routes as routes
 from helpers import make_client, signup
-from tradingbot.livefeed import LiveFeed, parse_kraken_ticker
+from tradingbot.livefeed import KRAKEN_PAIRS, LiveFeed, parse_kraken_ticker
+from tradingbot.prices import COINS
 from tradingbot.routes import _coin_rows
 from tradingbot.silent_loop import run_once
 
@@ -124,10 +125,76 @@ class TestValidation(unittest.TestCase):
 
 class TestKrakenParsing(unittest.TestCase):
     def test_ticker_frame(self):
-        raw = json.dumps([123, {"c": ["83.26", "1.5"], "o": "86.00"},
+        # Real Kraken shape: "o" is ["open today", "open 24h"] —
+        # the 24h change is last vs element [1].
+        raw = json.dumps([123, {"c": ["83.26", "1.5"],
+                                "o": ["86.50", "86.00"]},
                           "ticker", "SOL/USD"])
         self.assertEqual(parse_kraken_ticker(raw),
                          ("SOL", 83.26, (83.26 / 86.00 - 1.0) * 100.0))
+
+    def test_zec_ticker_frame(self):
+        # ZEC is the proof case for the full-universe feed: its
+        # Kraken tick is the real CEX price, not a thin Solana
+        # wrapped copy.
+        raw = json.dumps([15990792,
+                          {"c": ["995.90", "1.46"],
+                           "o": ["1050.00", "1044.01"]},
+                          "ticker", "ZEC/USD"])
+        self.assertEqual(parse_kraken_ticker(raw),
+                         ("ZEC", 995.90, (995.90 / 1044.01 - 1.0) * 100.0))
+
+    def test_doge_echo_is_xdg(self):
+        # Kraken calls DOGE "XDG": a DOGE/USD subscription is
+        # accepted but echoed as XDG/USD, so the map key must be
+        # XDG/USD.
+        raw = json.dumps([123, {"c": ["0.15", "1"],
+                                "o": ["0.15", "0.14"]},
+                          "ticker", "XDG/USD"])
+        self.assertEqual(parse_kraken_ticker(raw),
+                         ("DOGE", 0.15, (0.15 / 0.14 - 1.0) * 100.0))
+
+    def test_real_kraken_frame_parses(self):
+        # A verbatim real frame (captured live 2026-11-11): the
+        # old parser returned None for this — float() on the
+        # two-element "o" list — so the feed silently delivered
+        # no Kraken tick at all. This test pins the real shape.
+        raw = json.dumps([119930888,
+                          {"a": ["74441.90000", 0, "0.39346109"],
+                           "b": ["74441.80000", 0, "0.03317549"],
+                           "c": ["74441.90000", "0.00295054"],
+                           "v": ["1988.74315469", "2416.18552500"],
+                           "p": ["73941.68266", "73909.83055"],
+                           "t": [136305, 156895],
+                           "l": ["73113.60000", "73113.60000"],
+                           "h": ["74754.10000", "74754.10000"],
+                           "o": ["73699.40000", "73637.60000"]},
+                          "ticker", "XBT/USD"])
+        self.assertEqual(
+            parse_kraken_ticker(raw),
+            ("BTC", 74441.9, (74441.9 / 73637.6 - 1.0) * 100.0))
+
+    def test_every_known_coin_has_a_kraken_pair(self):
+        # The live feed must tick every coin the app lists: a
+        # symbol in COINS with no Kraken pair would have no live
+        # source and its Buy/Sell price would go stale again.
+        self.assertEqual(set(KRAKEN_PAIRS.values()), set(COINS))
+        self.assertEqual(len(KRAKEN_PAIRS), len(COINS))
+
+    def test_kraken_open_subscribes_all_pairs(self):
+        sent = []
+
+        class FakeWs:
+            def send(self, raw):
+                sent.append(json.loads(raw))
+
+        feed = LiveFeed()
+        feed._on_kraken_open(FakeWs())
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["event"], "subscribe")
+        self.assertEqual(sent[0]["subscription"], {"name": "ticker"})
+        self.assertEqual(set(sent[0]["pair"]), set(KRAKEN_PAIRS))
+        self.assertIn("ZEC/USD", sent[0]["pair"])
 
     def test_non_ticker_frames_ignored(self):
         self.assertIsNone(parse_kraken_ticker(json.dumps(
@@ -347,6 +414,42 @@ class TestWebSocket(LiveFeedBase):
                     break
             self.assertIsNotNone(tick, "no tick pushed")
             self.assertEqual(tick["price"], 10.5)
+            self.assertEqual(tick["source"], "kraken")
+        finally:
+            ws.close()
+
+    def test_subscribe_zec_snapshot_then_tick(self):
+        """ZEC over the app socket: a browser on the ZEC Buy/Sell
+        page subscribes to ZEC and gets the Kraken tick — snapshot
+        first, then pushed ticks as they arrive. This is the path
+        the coin page's big price updates from."""
+        import websocket
+
+        port = _free_port()
+        self._start_server(port)
+        self.feed.ingest("ZEC", 1000.0, "kraken", change_24h=-4.6)
+        ws = websocket.create_connection(
+            f"ws://127.0.0.1:{port}/ws/live",
+            timeout=10,
+            cookie=f"session={self._session_cookie()}")
+        try:
+            ws.send(json.dumps({"subscribe": ["ZEC"]}))
+            ws.settimeout(10)
+            snapshot = json.loads(ws.recv())
+            self.assertEqual(snapshot["type"], "snapshot")
+            self.assertEqual(snapshot["ticks"]["ZEC"]["price"], 1000.0)
+            self.assertEqual(snapshot["ticks"]["ZEC"]["source"], "kraken")
+            self.feed.ingest("ZEC", 1001.5, "kraken")
+            deadline = time.time() + 10
+            tick = None
+            while time.time() < deadline:
+                msg = json.loads(ws.recv())
+                if msg.get("type") == "tick" \
+                        and msg.get("coin_id") == "ZEC":
+                    tick = msg
+                    break
+            self.assertIsNotNone(tick, "no ZEC tick pushed")
+            self.assertEqual(tick["price"], 1001.5)
             self.assertEqual(tick["source"], "kraken")
         finally:
             ws.close()

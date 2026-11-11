@@ -19,6 +19,61 @@ COINS = {
     "BONK": {"name": "Bonk", "coingecko": "bonk", "symbol": "BONK"},
     "JUP": {"name": "Jupiter", "coingecko": "jupiter-exchange-solana",
             "symbol": "JUP"},
+    # The full live universe (2026-11-11): every symbol here has a
+    # Kraken USD pair in livefeed.KRAKEN_PAIRS, so the live feed
+    # ticks it every few seconds — the Buy/Sell page price for any
+    # of these comes from the socket, not a 60s CoinGecko cache.
+    # Before this, only the 8 above existed: any other coin (ZEC
+    # was the proof case) fell through to thin Solana wrapped
+    # copies on DexScreener — five different "ZEC" mints priced
+    # $268–$1,650 while the real ZEC traded ~$1,000 — and its
+    # page price never updated at all. All CoinGecko ids below
+    # were verified live against the API on 2026-11-11.
+    "ZEC": {"name": "Zcash", "coingecko": "zcash", "symbol": "ZEC"},
+    "XRP": {"name": "XRP", "coingecko": "ripple", "symbol": "XRP"},
+    "ADA": {"name": "Cardano", "coingecko": "cardano", "symbol": "ADA"},
+    "LTC": {"name": "Litecoin", "coingecko": "litecoin",
+            "symbol": "LTC"},
+    "DOT": {"name": "Polkadot", "coingecko": "polkadot",
+            "symbol": "DOT"},
+    "LINK": {"name": "Chainlink", "coingecko": "chainlink",
+             "symbol": "LINK"},
+    "AVAX": {"name": "Avalanche", "coingecko": "avalanche-2",
+             "symbol": "AVAX"},
+    "ATOM": {"name": "Cosmos", "coingecko": "cosmos", "symbol": "ATOM"},
+    "XLM": {"name": "Stellar", "coingecko": "stellar", "symbol": "XLM"},
+    "ALGO": {"name": "Algorand", "coingecko": "algorand",
+             "symbol": "ALGO"},
+    "NEAR": {"name": "NEAR Protocol", "coingecko": "near",
+             "symbol": "NEAR"},
+    "UNI": {"name": "Uniswap", "coingecko": "uniswap", "symbol": "UNI"},
+    "AAVE": {"name": "Aave", "coingecko": "aave", "symbol": "AAVE"},
+    "XTZ": {"name": "Tezos", "coingecko": "tezos", "symbol": "XTZ"},
+    "ETC": {"name": "Ethereum Classic", "coingecko": "ethereum-classic",
+            "symbol": "ETC"},
+    "BCH": {"name": "Bitcoin Cash", "coingecko": "bitcoin-cash",
+            "symbol": "BCH"},
+    "FIL": {"name": "Filecoin", "coingecko": "filecoin",
+            "symbol": "FIL"},
+    "HBAR": {"name": "Hedera", "coingecko": "hedera-hashgraph",
+             "symbol": "HBAR"},
+    "SUI": {"name": "Sui", "coingecko": "sui", "symbol": "SUI"},
+    "APT": {"name": "Aptos", "coingecko": "aptos", "symbol": "APT"},
+    "SEI": {"name": "Sei", "coingecko": "sei-network", "symbol": "SEI"},
+    "INJ": {"name": "Injective", "coingecko": "injective-protocol",
+            "symbol": "INJ"},
+    "TIA": {"name": "Celestia", "coingecko": "celestia",
+            "symbol": "TIA"},
+    "ONDO": {"name": "Ondo", "coingecko": "ondo-finance",
+             "symbol": "ONDO"},
+    "RENDER": {"name": "Render", "coingecko": "render-token",
+               "symbol": "RENDER"},
+    "TAO": {"name": "Bittensor", "coingecko": "bittensor",
+            "symbol": "TAO"},
+    "WIF": {"name": "dogwifhat", "coingecko": "dogwifcoin",
+            "symbol": "WIF"},
+    "POPCAT": {"name": "Popcat", "coingecko": "popcat",
+               "symbol": "POPCAT"},
 }
 
 # Baked snapshot, fetched live from CoinGecko at build time.
@@ -54,8 +109,14 @@ def _fetch_live() -> dict | None:
     out = {}
     for symbol, info in COINS.items():
         entry = raw.get(info["coingecko"])
+        # One coin the feed does not name is skipped, not fatal:
+        # with 36 ids, one renamed id must never take the whole
+        # price list down to the baked snapshot. A coin with no
+        # entry gets no price — the page shows "—", never a
+        # guessed number. Only a feed that answers for no coin at
+        # all falls back to the snapshot.
         if not entry or "usd" not in entry:
-            return None
+            continue
         out[symbol] = {
             "price": float(entry["usd"]),
             "change_24h": entry.get("usd_24h_change"),
@@ -64,7 +125,7 @@ def _fetch_live() -> dict | None:
             # — never guessed.
             "change_1h": entry.get("usd_1h_change"),
         }
-    return out
+    return out or None
 
 
 def clear_price_cache() -> None:

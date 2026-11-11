@@ -2,8 +2,10 @@
 validates every tick, and serves the app's own WebSocket.
 
 Upstream sources (all free, no key):
-- Kraken public WebSocket (wss://ws.kraken.com) — ticker for BTC, ETH,
-  SOL in USD. The majors feed. Verified working from this server.
+- Kraken public WebSocket (wss://ws.kraken.com) — ticker for every
+  coin in prices.COINS in USD (36 pairs, ZEC/USD included). The
+  live tick source for the whole coin list, not just the majors.
+  Verified live 2026-11-11: all 36 pairs subscribe and tick.
 - DexScreener REST (api.dexscreener.com) — polled every 5s for the
   pump.fun mints the app is watching (held coins + coins a browser
   subscribed to). DexScreener has no public price stream, so polling
@@ -77,7 +79,30 @@ STALE_AFTER_SECONDS = 30.0
 
 # --- upstream sources -----------------------------------------------------
 KRAKEN_WS_URL = "wss://ws.kraken.com"
-KRAKEN_PAIRS = {"XBT/USD": "BTC", "ETH/USD": "ETH", "SOL/USD": "SOL"}
+# Every symbol in prices.COINS, keyed by Kraken's own pair name —
+# the WebSocket subscription sends these keys, and ticker messages
+# echo the same name back, so parse_kraken_ticker maps it to the
+# app's symbol. Two Kraken quirks live here: BTC is "XBT/USD" and
+# DOGE is "XDG/USD" on Kraken (a DOGE/USD subscription is accepted
+# but echoed as XDG/USD, so the key must be XDG/USD). Verified
+# live 2026-11-11: all 36 pairs subscribe and tick (ZEC/USD ticks
+# every few seconds at the real CEX price, ~$1,000 — not the
+# $268–$1,650 thin Solana wrapped copies DexScreener shows).
+KRAKEN_PAIRS = {
+    "XBT/USD": "BTC", "ETH/USD": "ETH", "SOL/USD": "SOL",
+    "USDC/USD": "USDC", "XDG/USD": "DOGE",
+    "PEPE/USD": "PEPE", "BONK/USD": "BONK", "JUP/USD": "JUP",
+    "ZEC/USD": "ZEC", "XRP/USD": "XRP", "ADA/USD": "ADA",
+    "LTC/USD": "LTC", "DOT/USD": "DOT", "LINK/USD": "LINK",
+    "AVAX/USD": "AVAX", "ATOM/USD": "ATOM", "XLM/USD": "XLM",
+    "ALGO/USD": "ALGO", "NEAR/USD": "NEAR", "UNI/USD": "UNI",
+    "AAVE/USD": "AAVE", "XTZ/USD": "XTZ", "ETC/USD": "ETC",
+    "BCH/USD": "BCH", "FIL/USD": "FIL", "HBAR/USD": "HBAR",
+    "SUI/USD": "SUI", "APT/USD": "APT", "SEI/USD": "SEI",
+    "INJ/USD": "INJ", "TIA/USD": "TIA", "ONDO/USD": "ONDO",
+    "RENDER/USD": "RENDER", "TAO/USD": "TAO", "WIF/USD": "WIF",
+    "POPCAT/USD": "POPCAT",
+}
 DEXSCREENER_POLL_SECONDS = 5.0
 HELD_MINTS_REFRESH_SECONDS = 60.0
 JUPITER_CHECK_SECONDS = 60.0
@@ -91,8 +116,15 @@ def parse_kraken_ticker(raw: str):
     or None when the message is not a ticker for a pair we watch.
 
     Kraken ticker frames look like:
-    [channel_id, {"c": ["last", "lot vol"], "o": "open 24h", ...},
-     "ticker", "XBT/USD"]. 24h change is last vs the 24h open.
+    [channel_id, {"c": ["last", "lot vol"],
+                  "o": ["open today", "open 24h"], ...},
+     "ticker", "XBT/USD"]. 24h change is last vs the 24h open
+    ("o"[1]). NOTE: "o" is a two-element LIST in every real Kraken
+    message — the old code did float(data["o"]) on the list, which
+    raised TypeError on every single tick, so the Kraken feed
+    silently delivered nothing (found live 2026-11-11: 115 real
+    frames parsed, 0 accepted). A plain string/number "o" is still
+    accepted, so older recorded frames keep parsing.
     """
     try:
         msg = json.loads(raw)
@@ -106,8 +138,11 @@ def parse_kraken_ticker(raw: str):
     data = msg[1] or {}
     try:
         last = float((data.get("c") or [None])[0])
-        open24 = float(data.get("o"))
-    except (TypeError, ValueError):
+        open24 = data.get("o")
+        if isinstance(open24, (list, tuple)):
+            open24 = open24[1] if len(open24) > 1 else open24[0]
+        open24 = float(open24)
+    except (TypeError, ValueError, IndexError):
         return None
     if not math.isfinite(last) or last <= 0 or not math.isfinite(open24) \
             or open24 <= 0:

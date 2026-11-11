@@ -2623,16 +2623,32 @@ def register_routes(app: Flask) -> None:
         """One live price tick for the coin detail page's live chart.
 
         The page polls this once a second while it is open (and
-        pauses while the tab is hidden). Prices are never invented:
-        a known coin comes from the CoinGecko feed — cached up to
-        60 seconds server-side, so the returned as_of says when
-        that price was actually fetched — and a mint comes fresh
-        from the DexScreener trenches feed on each tick. When no
-        price is available the response says so (ok false) and the
-        page keeps showing the last real price and its time. This
-        is a read of the same feeds the coins list already uses —
-        no trade, no signing, nothing moves."""
+        pauses while the tab is hidden). Prices are never invented.
+        The live feed goes FIRST: a fresh validated tick (Kraken
+        for every listed coin — ZEC included — DexScreener poll
+        for watched mints) is the most current price the app has,
+        fresher than the 60s-cached CoinGecko price. A stale feed
+        tick (older than 30s) is never served as fresh — it falls
+        through to the per-source fetch below, which carries its
+        own honest as_of. A known coin with no feed tick comes
+        from the CoinGecko feed — cached up to 60 seconds
+        server-side, so the returned as_of says when that price
+        was actually fetched — and a mint comes fresh from the
+        DexScreener trenches feed on each tick. When no price is
+        available the response says so (ok false) and the page
+        keeps showing the last real price and its time. This is a
+        read of the same feeds the coins list already uses — no
+        trade, no signing, nothing moves."""
         upper = (coin_id or "").upper()
+        feed = app.config.get("LIVE_FEED")
+        if feed is not None:
+            key = upper if upper in COINS else coin_id
+            tick = feed.snapshot([key]).get(key)
+            if tick is not None and not tick["stale"]:
+                return jsonify({"ok": True, "coin_id": key,
+                                "price": tick["price"],
+                                "source": tick["source"],
+                                "as_of": tick["as_of"]})
         if upper in COINS:
             price, source, as_of = _paper_price(upper)
             if price is None:
