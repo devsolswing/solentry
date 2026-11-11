@@ -4,7 +4,9 @@ Schema:
   users, wallets (encrypted secret), paper_portfolio, paper_holdings,
   paper_trades, bots, bot_proposals, send_intents, activity,
   login_attempts (rate limiting), passkey_credentials (WebAuthn),
-  webauthn_challenges (single-use ceremony challenges).
+  webauthn_challenges (single-use ceremony challenges), trade_ledger,
+  treasury_wallet (the SolEntry Treasury wallet, one row), trade_fees
+  (one row per 3.65% fee charged).
 """
 
 from __future__ import annotations
@@ -315,6 +317,40 @@ CREATE TABLE IF NOT EXISTS trade_ledger (
     exit_reason TEXT NOT NULL DEFAULT '',
     mode TEXT NOT NULL DEFAULT 'paper',
     created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
+
+-- The app's SolEntry Treasury wallet: ONE row (id=1), created once
+-- at first use, key AES-256-GCM encrypted like a user wallet. It
+-- receives the 3.65% fee from every trade, from every user.
+CREATE TABLE IF NOT EXISTS treasury_wallet (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pubkey TEXT NOT NULL,
+    encrypted_secret TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per fee charged: 3.65% of a trade. fee_sol is the SOL the
+-- fee was worth (real trades: exact lamports in the same tx;
+-- paper trades: the USD fee converted at the trade-time SOL price,
+-- or NULL when no SOL price was available — the display converts
+-- at the live price instead, never a guessed rate). signature is
+-- unique and NULL for paper trades, so a real trade recorded twice
+-- is one fee, never two.
+CREATE TABLE IF NOT EXISTS trade_fees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    bot_id INTEGER,
+    coin TEXT NOT NULL,
+    side TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'paper',
+    fee_sol REAL,
+    fee_usd REAL,
+    fee_lamports INTEGER,
+    signature TEXT UNIQUE,
+    trade_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id),
     FOREIGN KEY (bot_id) REFERENCES bots (id)
 );

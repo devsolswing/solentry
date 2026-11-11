@@ -31,6 +31,64 @@
   var totalValueEls = collect('[data-live-total-value]');
   var totalPnlEls = collect('[data-live-total-pnl]');
   var portfolioEls = collect('[data-live-total-portfolio]');
+
+  /* Trading-fee totals (fees.py): the app-wide total next to the
+     flag and the per-user total in the fees dropdown refresh every
+     5 seconds while the page is open, from one lightweight
+     GET /api/fees per tick (both figures in one request — no second
+     connection, and the live price feed's socket is untouched).
+     The poll stops when the page is hidden or closed, so it never
+     runs in the background. A failed fetch or a missing figure
+     shows "—", never a guessed number. */
+  var appFeeEls = collect('[data-fees-app-total]');
+  var userFeeEls = collect('[data-fees-user-total]');
+  var FEES_POLL_MS = 5000;
+  var feesTimer = null;
+
+  function fmtSol(v) { return v.toFixed(4) + ' SOL'; }
+  function setFeeTotal(els, value) {
+    els.forEach(function (el) {
+      el.textContent = (typeof value === 'number' && isFinite(value))
+        ? fmtSol(value) : '—';
+    });
+  }
+  function fetchFees() {
+    fetch('/api/fees', { credentials: 'same-origin' })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (!data || !data.ok) {
+          setFeeTotal(appFeeEls, null);
+          setFeeTotal(userFeeEls, null);
+          return;
+        }
+        setFeeTotal(appFeeEls, data.app_total_sol);
+        setFeeTotal(userFeeEls, data.user_total_sol);
+      })
+      .catch(function () {
+        setFeeTotal(appFeeEls, null);
+        setFeeTotal(userFeeEls, null);
+      });
+  }
+  function startFeesPoll() {
+    if (feesTimer) return;
+    fetchFees();
+    feesTimer = setInterval(fetchFees, FEES_POLL_MS);
+  }
+  function stopFeesPoll() {
+    if (feesTimer) {
+      clearInterval(feesTimer);
+      feesTimer = null;
+    }
+  }
+  if (appFeeEls.length || userFeeEls.length) {
+    startFeesPoll();
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) stopFeesPoll();
+      else startFeesPoll();
+    });
+    window.addEventListener('pagehide', stopFeesPoll);
+  }
+
   var chart = document.getElementById('live-chart');
   var statusEl = document.getElementById('live-status');
 

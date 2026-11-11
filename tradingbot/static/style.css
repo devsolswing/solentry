@@ -359,6 +359,16 @@ body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
 .home-screen .section-title { margin: 8px 0 6px; }
 .holdings-summary { margin: 2px 0 6px; }
 .holdings-panel { flex: 0 1 50dvh; min-height: 140px; max-height: 50dvh; overflow-y: auto; }
+
+/* Trading fees (home page): a closed <details> is one line, so the
+   home page still fits on one screen; open, it lists the user's
+   fee payments to the app. */
+.fees-card { margin: 8px 0; padding: 10px 12px; text-align: left; }
+.fees-card summary { cursor: pointer; }
+.fees-card .addr { display: inline; padding: 2px 4px; font-size: 11px; border-width: 1px; }
+.fees-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.fees-list li { border-top: 1px solid rgba(255, 179, 0, .35); padding: 6px 0; font-size: 14px; }
+.fees-list .fees-amount { float: right; font-weight: bold; }
 .holdings-row { font-size: 16px; padding: 11px 10px; }
 .holdings-row .coin-ico { flex: 0 0 34px; width: 34px; height: 34px; font-size: 15px; }
 .holdings-name { display: block; font-size: 15px; }

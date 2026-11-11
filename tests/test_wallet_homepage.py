@@ -182,9 +182,10 @@ class TestWalletIsHomepage(HomeBase):
         self.assertIn("holdings-row", html)
         self.assertIn("holdings-panel", html)
         self.assertIn("holdings-summary", html)
-        # 1 SOL bought at the mocked $10 price: 1.0000 SOL · $10.00.
-        self.assertIn("1.0000 SOL", html)
-        self.assertIn("$10.00", html)
+        # 1 SOL bought at the mocked $10 price: the 3.65% fee leaves
+        # 0.9635 SOL worth $9.63.
+        self.assertIn("0.9635 SOL", html)
+        self.assertIn("$9.63", html)
         self.assertIn("1 coin", html)
         # 1-hour % (mocked +2.5%) on the row.
         self.assertIn("holdings-1h", html)
@@ -329,7 +330,8 @@ class TestCoinDetail(HomeBase):
 
 class TestDetailTradingSol(HomeBase):
     def test_paper_buy_in_sol_converts_at_sol_price(self):
-        # 1 SOL at the mocked $10 SOL price buys $10 of SOL.
+        # 1 SOL at the mocked $10 SOL price buys $10 of SOL — the
+        # 3.65% fee leaves 0.9635 SOL held.
         resp = self.client.post("/coins/SOL/buy", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
             "amount_sol": "1", "bot_id": ""})
@@ -341,13 +343,13 @@ class TestDetailTradingSol(HomeBase):
             "SELECT amount FROM paper_holdings WHERE coin_id = 'SOL'"
         ).fetchone()
         self.assertIsNotNone(holding)
-        self.assertAlmostEqual(holding["amount"], 1.0)
+        self.assertAlmostEqual(holding["amount"], 0.9635, places=9)
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
         self.assertAlmostEqual(cash, 100.0 - 10.0)
 
     def test_paper_sell_in_sol_converts_at_prices(self):
-        self._buy_sol()  # 1 SOL at $10
+        self._buy_sol()  # 1 SOL at $10 -> 0.9635 SOL held
         resp = self.client.post("/coins/SOL/sell", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
             "amount_sol": "0.5"})
@@ -356,7 +358,7 @@ class TestDetailTradingSol(HomeBase):
         holding = self.db.execute(
             "SELECT amount FROM paper_holdings WHERE coin_id = 'SOL'"
         ).fetchone()
-        self.assertAlmostEqual(holding["amount"], 0.5)
+        self.assertAlmostEqual(holding["amount"], 0.4635, places=9)
 
     def test_paper_sell_all_sells_whole_holding(self):
         self._buy_sol()
@@ -370,7 +372,9 @@ class TestDetailTradingSol(HomeBase):
         ).fetchone())
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        self.assertAlmostEqual(cash, 100.0)
+        # Sell all 0.9635 SOL at $10: gross $9.635, fee $0.3517,
+        # net $9.2833, on top of the $90 cash left after the buy.
+        self.assertAlmostEqual(cash, 99.2833225, places=6)
 
     def test_sell_all_with_nothing_held_refuses_plainly(self):
         resp = self.client.post("/coins/SOL/sell", data={

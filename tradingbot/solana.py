@@ -299,6 +299,29 @@ def find_associated_token_address(owner_b58: str, mint_b58: str) -> str:
     return address
 
 
+def build_transfer_instruction(fee_payer_b58: str, to_b58: str,
+                               lamports: int) -> dict:
+    """One SystemProgram transfer instruction (build_message format).
+
+    Data: [2, 0, 0, 0] (transfer discriminator) + lamports u64 LE.
+    Accounts: the fee payer (signer, writable), then the
+    destination (writable). The executor is the only caller, and it
+    only ever builds this for the 3.65% trading fee to the SolEntry
+    Treasury wallet — see executor._check_instructions_only_allowed.
+    """
+    if lamports <= 0:
+        raise ValueError("lamports must be positive")
+    return {
+        "program_id": SYSTEM_PROGRAM,
+        "accounts": [
+            {"pubkey": fee_payer_b58, "is_signer": True,
+             "is_writable": True},
+            {"pubkey": to_b58, "is_signer": False, "is_writable": True},
+        ],
+        "data": bytes([2, 0, 0, 0]) + lamports.to_bytes(8, "little"),
+    }
+
+
 def build_message(fee_payer_b58: str, instructions: list,
                   blockhash_b58: str) -> bytes:
     """Generic legacy message for any list of instructions.

@@ -619,6 +619,56 @@ but the ticker never can; held mints show their real name + symbol
 from the DexScreener feed when it names them, and the honest
 "Pump.fun token …" label when it does not.
 
+## Trading fees (3.65% of every trade)
+
+Every trade — paper and real — pays a **3.65% fee** to the app's
+**SolEntry Treasury** wallet. The fee is charged going forward
+only: trades that happened before the fee landed are never charged,
+and every user's fee total starts at zero.
+
+- **The treasury wallet** is one wallet for the whole app, generated
+  once at first use (a fresh keypair, AES-256-GCM encrypted at
+  rest, `treasury_wallet` table, id=1 — same pattern as the
+  donation wallet). Only its public address is ever shown. It
+  starts empty: fees accrue from real trades only.
+- **Paper trades:** the fee is deducted from the trade value in the
+  paper ledger (a $10 buy buys $9.635 of coins; a sell returns the
+  proceeds minus 3.65%) and recorded in `trade_fees` with its SOL
+  equivalent at the trade-time SOL price. The fee is shown in the
+  buy/sell confirmation and the trade log.
+- **Real (devnet) trades:** the fee is taken in SOL in the **same
+  transaction** as the trade itself — one System-program transfer
+  of exactly the computed fee to the treasury wallet, appended
+  after the pump.fun buy/sell instruction. Either the whole
+  transaction confirms (trade + fee) or neither happens, so a fee
+  is never taken from a trade that did not execute, and never
+  twice for one trade (fee rows are unique per trade signature).
+  The signing bot's destination restriction keeps exactly one
+  exception for this: a System-program instruction is allowed only
+  when it is the fee transfer — one instruction, to the treasury
+  wallet, for exactly the computed fee. Any other transfer,
+  destination, or amount is still refused (see
+  `executor._check_instructions_only_allowed`).
+- **Home page:** the fees section shows the logged-in user's total
+  fees paid in SOL as a clickable dropdown listing their fee
+  payments (coin, fee in SOL, date, signature where it is a real
+  trade), with the live SOL price beside the total ("—" when the
+  feed has no SOL price, never guessed). Next to the 🇨🇦 flag in
+  the wallet area sits a **live balance of ALL fees paid to the
+  app** — the running app-wide total of 3.65% fees collected from
+  every user, in SOL. Both figures refresh **every 5 seconds**
+  while the homepage is open, from one lightweight `GET /api/fees`
+  per tick (both figures in one request); the poll stops when the
+  page is hidden or closed, and a failed fetch shows "—", never a
+  guessed number. Deleting a bot does not erase its fees: the fee
+  rows stay (detached from the deleted bot) so the user's total
+  and the app-wide total still count what was actually paid.
+- **Mainnet rule:** when the app launches on mainnet, after
+  selling a coin the proceeds are converted to SOL and held as
+  SOL — never cash, never USDC. On devnet this is already how
+  sells settle: pump.fun pays SOL to the seller's wallet, so there
+  is no cash leg to convert.
+
 ## Security rules (do not weaken)
 
 - Never log, print, or return a private key, password, session secret,

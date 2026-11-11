@@ -193,7 +193,10 @@ class TestPnlPage(PnlBase):
             "SELECT * FROM portfolio_snapshots WHERE user_id = ?",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1)
-        self.assertAlmostEqual(rows[0]["total_value_usd"], 100.0, places=1)
+        # $10 buy: cash $90 + 0.09635 SOL at $100 ($9.635) = $99.635
+        # — the 3.65% fee is a cost, so the total is under $100.
+        self.assertAlmostEqual(rows[0]["total_value_usd"], 99.635,
+                               places=1)
         resp = self.client.get("/pnl?range=all")
         html = resp.get_data(as_text=True)
         self.assertIn("SOL", html)

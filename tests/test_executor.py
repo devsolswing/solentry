@@ -32,8 +32,8 @@ from tradingbot.executor import (_check_instructions_only_allowed,
 from tradingbot.security import encrypt_secret
 from tradingbot.signing_bot import get_signing_bot
 from tradingbot.silent_loop import run_once
-from tradingbot.solana import (TOKEN_PROGRAM, base58_decode, base58_encode,
-                               generate_keypair)
+from tradingbot.solana import (SYSTEM_PROGRAM, TOKEN_PROGRAM, base58_decode,
+                               base58_encode, generate_keypair)
 
 BUY_DISCRIMINATOR = bytes.fromhex("66063d1201daebea")
 SELL_DISCRIMINATOR = bytes.fromhex("33e685a4017f83ad")
@@ -234,7 +234,10 @@ class TestExecutorBuy(ExecutorBase):
     def test_buy_executes_and_signs(self):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
         curve = pumpfun.parse_bonding_curve(make_curve())
-        expected = pumpfun.buy_quote(curve, 95, 1_000_000_000)
+        # 1.0 SOL in: the 3.65% fee (36,500,000 lamports) goes to the
+        # SolEntry Treasury wallet, and only 0.9635 SOL is swapped
+        # for tokens.
+        expected = pumpfun.buy_quote(curve, 95, 963_500_000)
         rpc.fill_tokens = expected
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
                                     "buy", 1.0, 100.0, self.db, self.cfg,
@@ -242,6 +245,8 @@ class TestExecutorBuy(ExecutorBase):
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         self.assertEqual(result["signing_bot"], self.support_id)
+        self.assertEqual(result["fee_lamports"], 36_500_000)
+        self.assertAlmostEqual(result["fee_sol"], 0.0365)
         self.assertAlmostEqual(result["coin_amount"], expected / 1e6)
         self.assertEqual(len(rpc.sent), 1)
         parsed = parse_signed_tx(rpc.sent[0])
@@ -251,14 +256,15 @@ class TestExecutorBuy(ExecutorBase):
         self._verify_signature(parsed)
         programs = {i["program_id"] for i in parsed["instructions"]}
         self.assertEqual(programs, {pumpfun.PUMP_PROGRAM,
-                                    pumpfun.ASSOCIATED_TOKEN_PROGRAM})
+                                    pumpfun.ASSOCIATED_TOKEN_PROGRAM,
+                                    SYSTEM_PROGRAM})
         buy = [i for i in parsed["instructions"]
                if i["program_id"] == pumpfun.PUMP_PROGRAM][0]
         self.assertEqual(buy["data"][:8], BUY_DISCRIMINATOR)
         self.assertEqual(int.from_bytes(buy["data"][8:16], "little"),
                          expected)
         self.assertEqual(int.from_bytes(buy["data"][16:24], "little"),
-                         1_000_000_000 * 10100 // 10000 + 1)
+                         963_500_000 * 10100 // 10000 + 1)
 
     def test_sell_executes_and_signs(self):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve(),

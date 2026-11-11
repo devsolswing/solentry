@@ -20,7 +20,7 @@
   </div>
 
   <div class="card portfolio-head home-total">
-    <p class="portfolio-mode">TOTAL PORTFOLIO VALUE <span class="wallet-flag" title="Canada">🇨🇦</span></p>
+    <p class="portfolio-mode">TOTAL PORTFOLIO VALUE <span class="wallet-flag" title="Canada">🇨🇦</span> <span class="muted small">· App fees: <b><span data-fees-app-total>{{ "%.4f"|format(app_fees_total_sol) }} SOL</span></b></span></p>
     <p class="portfolio-total" data-balance{% if mode == 'paper' %} data-live-total-portfolio data-live-cash="{{ paper_cash }}"{% endif %}>{% if mode == 'paper' %}${{ "{:,.2f}".format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "{:,.2f}".format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable right now{% endif %}{% endif %}</p>
     <p class="change-24h">{% if change_24h %}<span class="{{ 'up' if change_24h.delta >= 0 else 'down' }}">{% if change_24h.delta >= 0 %}+{% endif %}{% if mode == 'paper' %}${{ "{:,.2f}".format(change_24h.delta) }}{% else %}{{ "%.4f"|format(change_24h.delta) }} SOL{% endif %} ({{ "%+.2f"|format(change_24h.pct) }}%)</span>{% else %}<span class="muted">—</span>{% endif %} <a class="chart-more" href="{{ url_for('pnl') }}" aria-label="Full P&amp;L chart">Full chart ›</a></p>
     <div class="home-chart" id="home-chart" data-chart-block data-chart-range="{{ chart_range }}">
@@ -41,6 +41,25 @@
     </div>
   </div>
   {% if support_id %}<p class="muted small">Your signing bot — Support ID: <b>{{ support_id }}</b> (for tech support — this ID cannot be changed)</p>{% endif %}
+  {# Trading fees (3.65% of every trade, fees.py): this user's total
+     paid in SOL, as a clickable dropdown listing their fee payments
+     to the app, with the live SOL price beside the total. The fee
+     total starts at zero — trades that predate the fee are never
+     charged. The dropdown stays closed by default so the home page
+     still fits on one screen. #}
+  <details class="card fees-card" id="fees">
+    <summary><span class="fees-total">Fees paid to SolEntry: <b><span data-fees-user-total>{{ "%.4f"|format(fees_total_sol) }} SOL</span></b></span> <span class="muted small">· SOL <span data-live-price="SOL">{% if sol_price_usd is not none %}${{ "%.4f"|format(sol_price_usd) }}{% else %}—{% endif %}</span></span></summary>
+    <p class="muted small">Every trade pays 3.65% to the SolEntry Treasury wallet (<span class="addr">{{ treasury_pubkey }}</span>). Fees are in SOL.</p>
+    {% if fees_rows %}
+    <ul class="fees-list">
+      {% for fee in fees_rows %}
+      <li><span class="fees-coin">{{ fee.coin }} · {{ fee.side }} · {{ fee.mode }}</span> <span class="fees-amount">{% if fee.fee_sol_display is not none %}{{ "%.6f"|format(fee.fee_sol_display) }} SOL{% else %}—{% endif %}</span><br><span class="muted small">{{ fee.created_at }}{% if fee.signature %} · <span class="addr">{{ fee.signature[:12] }}…</span>{% else %} · paper{% endif %}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted small">No fees paid yet — the first trade starts the count.</p>
+    {% endif %}
+  </details>
 
   <h2 class="section-title">HOLDINGS <a class="section-link" href="{{ url_for('dashboard') }}">All coins →</a></h2>
   <p class="muted small holdings-summary">{% if mode == 'paper' %}Paper balance: ${{ "%.2f"|format(paper_cash) }} CAD cash · {% endif %}{% if coin_rows %}{{ coin_rows|length }} coin{{ 's' if coin_rows|length != 1 else '' }} · total <span data-live-total-value>${{ "%.2f"|format(holdings_value) }}</span>{% else %}No coins held yet in {{ mode_label }}.{% endif %}</p>

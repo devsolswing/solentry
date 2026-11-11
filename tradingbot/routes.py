@@ -40,6 +40,7 @@ from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
 from . import candles as candles_mod
 from . import donations as donations_mod
+from . import fees as fees_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
@@ -1426,6 +1427,23 @@ def register_routes(app: Flask) -> None:
         portfolio_line_svg = candles_mod.line_svg(_candles)
         activity = _activity_for_mode(db, user["id"], mode)
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
+        # Trading fees (3.65% of every trade, fees.py): this user's
+        # total paid in SOL, their fee payments (newest first), the
+        # SolEntry Treasury wallet address, and the live SOL price
+        # for display. The fee total starts at zero for everyone —
+        # trades that predate the fee are never charged.
+        treasury_pubkey = fees_mod.get_or_create_treasury_wallet(
+            db, _cfg(app))
+        fees_rows = fees_mod.user_fees(db, user["id"], limit=20)
+        for _row in fees_rows:
+            _row["fee_sol_display"] = fees_mod.fee_row_sol(
+                _row, sol_price)
+        fees_total_sol = fees_mod.user_fee_total_sol(
+            db, user["id"], sol_price_usd=sol_price)
+        # The app-wide live balance shown next to the 🇨🇦 flag on
+        # the homepage: ALL 3.65% fees collected from every user.
+        app_fees_total_sol = fees_mod.app_fee_total_sol(
+            db, sol_price_usd=sol_price)
         trenches_rows, trenches_error = (
             _trenches_list() if include_trenches else ([], None))
         return {"wallet": wallet if mode == "devnet" else None,
@@ -1449,6 +1467,11 @@ def register_routes(app: Flask) -> None:
                 "chart_range": chart_range,
                 "support_id": signing_bot["support_id"]
                 if signing_bot else "",
+                "fees_total_sol": fees_total_sol,
+                "fees_rows": fees_rows,
+                "treasury_pubkey": treasury_pubkey,
+                "app_fees_total_sol": app_fees_total_sol,
+                "sol_price_usd": sol_price,
                 "popup_coin": popup_coin,
                 "trenches_rows": trenches_rows,
                 "trenches_error": trenches_error}
@@ -1783,6 +1806,24 @@ def register_routes(app: Flask) -> None:
                         "ticks": feed.snapshot(coins or None),
                         "as_of": _now()})
 
+    @app.route("/api/fees")
+    @login_required
+    def fees_snapshot():
+        """Live fee totals for the homepage 5-second poll: the
+        app-wide total of all 3.65% fees collected (every user) and
+        this user's own total, both in SOL, plus the live SOL price.
+        One lightweight request per tick covers both figures — the
+        totals are sums of recorded fee rows only, never guessed."""
+        db = _db(app)
+        user = _current_user(app)
+        sol_price = _sol_price_usd()
+        return jsonify({"ok": True,
+                        "app_total_sol": fees_mod.app_fee_total_sol(
+                            db, sol_price_usd=sol_price),
+                        "user_total_sol": fees_mod.user_fee_total_sol(
+                            db, user["id"], sol_price_usd=sol_price),
+                        "sol_price_usd": sol_price})
+
     sock = app.config["SOCK"]
 
     @sock.route("/ws/live")
@@ -2045,11 +2086,23 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)
+        # The 3.65% fee travelled in the same transaction as the
+        # buy (executor.py); record it once, keyed by the trade's
+        # signature, so it is never charged twice.
+        fee_sol = result.get("fee_sol")
+        if fee_sol is not None:
+            fees_mod.record_fee(db, user["id"], bot["id"],
+                                coin_id_resolved, "buy", "real", fee_sol,
+                                fee_lamports=result.get("fee_lamports"),
+                                signature=result.get("signature"))
+        fee_sentence = (
+            f" Fee (3.65%): {fee_sol:.4f} SOL to the SolEntry "
+            f"Treasury wallet." if fee_sol is not None else "")
         _log(app, user["id"], "real_buy",
              f"Bought {coin_amount:.4f} {coin_id_resolved} for "
              f"{amount_sol:.4f} SOL on pump.fun (devnet). Signature: "
              f"{str(result.get('signature', ''))[:12]}... Signing bot: "
-             f"{result.get('signing_bot', '')}.", "real")
+             f"{result.get('signing_bot', '')}.{fee_sentence}", "real")
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
@@ -2058,6 +2111,9 @@ def register_routes(app: Flask) -> None:
                  f"{amount_sol:.4f} SOL on pump.fun (devnet).",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
+        if fee_sol is not None:
+            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL to the "
+                         f"SolEntry Treasury wallet.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Bought", lines, True, coin_id_resolved, label)
@@ -2214,11 +2270,23 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)
+        # The 3.65% fee travelled in the same transaction as the
+        # sell (executor.py); record it once, keyed by the trade's
+        # signature, so it is never charged twice.
+        fee_sol = result.get("fee_sol")
+        if fee_sol is not None:
+            fees_mod.record_fee(db, user["id"], bot["id"],
+                                coin_id_resolved, "sell", "real", fee_sol,
+                                fee_lamports=result.get("fee_lamports"),
+                                signature=result.get("signature"))
+        fee_sentence = (
+            f" Fee (3.65%): {fee_sol:.4f} SOL to the SolEntry "
+            f"Treasury wallet." if fee_sol is not None else "")
         _log(app, user["id"], "real_sell",
              f"Sold {amount:.4f} {coin_id_resolved} on pump.fun "
              f"(devnet). Signature: "
              f"{str(result.get('signature', ''))[:12]}... Signing bot: "
-             f"{result.get('signing_bot', '')}.", "real")
+             f"{result.get('signing_bot', '')}.{fee_sentence}", "real")
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
@@ -2227,6 +2295,9 @@ def register_routes(app: Flask) -> None:
                  f"(devnet).",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
+        if fee_sol is not None:
+            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL to the "
+                         f"SolEntry Treasury wallet.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Sold", lines, True, coin_id_resolved, label)
@@ -2701,6 +2772,19 @@ def register_routes(app: Flask) -> None:
             return coin, None, "trenches feed"
         return None, None, None
 
+    def _fee_sentence(fee_info: list) -> str:
+        """The fee sentence for a buy/sell confirmation or log line,
+        e.g. " Fee (3.65%): $0.37 (≈ 0.0042 SOL)" — '' when no fee
+        was charged. No trailing period: the caller supplies the
+        sentence's end punctuation."""
+        if not fee_info:
+            return ""
+        fee = fee_info[0]
+        text = f" Fee (3.65%): ${fee['fee_usd']:.2f}"
+        if fee.get("fee_sol") is not None:
+            text += f" (≈ {fee['fee_sol']:.4f} SOL)"
+        return text
+
     def _paper_buy_for(app, user, coin: str, usd: float,
                        bot_id_raw: str) -> dict:
         """One paper buy. Returns {"ok", "message", ...}. The caller
@@ -2740,9 +2824,12 @@ def register_routes(app: Flask) -> None:
             return {"ok": False,
                     "message": "Price unavailable right now."}
         try:
+            fee_info: list = []
             amount, usd = ledger_buy(db, user["id"], coin_id, usd, price,
                                      _now(),
-                                     bot_id=bot["id"] if bot else None)
+                                     bot_id=bot["id"] if bot else None,
+                                     sol_price_usd=_sol_price_usd(),
+                                     fee_out=fee_info)
         except InsufficientCash:
             return {"ok": False, "message": "Not enough paper cash."}
         if bot is not None:
@@ -2753,6 +2840,7 @@ def register_routes(app: Flask) -> None:
         _log(app, user["id"], "paper_buy",
              f"Bought {amount:.4f} {coin_id} for ${usd:.2f} (paper, "
              f"price source: {source})"
+             f"{_fee_sentence(fee_info)}"
              + (f" — looked after by bot '{bot['name']}'." if bot else "."),
              "paper")
         _record_pnl_snapshot(
@@ -2762,7 +2850,8 @@ def register_routes(app: Flask) -> None:
         cash = _paper(app, user["id"])
         return {"ok": True,
                 "message": f"Bought {amount:.4f} {coin_id} for "
-                           f"${usd:.2f} (paper).",
+                           f"${usd:.2f} (paper)"
+                           f"{_fee_sentence(fee_info)}.",
                 "amount": amount, "usd": usd, "bot": bot, "cash": cash,
                 "coin": coin_id}
 
@@ -2780,14 +2869,18 @@ def register_routes(app: Flask) -> None:
             return {"ok": False,
                     "message": "Price unavailable right now."}
         try:
+            fee_info: list = []
             usd = ledger_sell(db, user["id"], coin_id, amount, price,
-                              _now(), exit_reason="manual sell")
+                              _now(), exit_reason="manual sell",
+                              sol_price_usd=_sol_price_usd(),
+                              fee_out=fee_info)
         except InsufficientHolding:
             return {"ok": False,
                     "message": "You don't hold that much."}
         _log(app, user["id"], "paper_sell",
              f"Sold {amount:.4f} {coin_id} for ${usd:.2f} (paper, "
-             f"price source: {source}).", "paper")
+             f"price source: {source})"
+             f"{_fee_sentence(fee_info)}.", "paper")
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
@@ -2795,7 +2888,8 @@ def register_routes(app: Flask) -> None:
         cash = _paper(app, user["id"])
         return {"ok": True,
                 "message": f"Sold {amount:.4f} {coin_id} for "
-                           f"${usd:.2f} (paper).",
+                           f"${usd:.2f} (paper)"
+                           f"{_fee_sentence(fee_info)}.",
                 "amount": amount, "usd": usd, "cash": cash,
                 "coin": coin_id}
 
@@ -3220,6 +3314,13 @@ def register_routes(app: Flask) -> None:
                    (bot_id, user_id))
         db.execute("DELETE FROM bot_positions WHERE bot_id = ? AND user_id = ?",
                    (bot_id, user_id))
+        # The bot's fee rows stay — the user still paid those fees
+        # to the app — but they are detached from the deleted bot
+        # (bot_id NULL), like the paper holdings that survive a bot
+        # delete. Deleting the rows instead would understate the
+        # user's fees-paid total and the app-wide total.
+        db.execute("UPDATE trade_fees SET bot_id = NULL WHERE bot_id = ?",
+                   (bot_id,))
         db.execute("DELETE FROM bots WHERE id = ? AND user_id = ?",
                    (bot_id, user_id))
 

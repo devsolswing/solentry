@@ -169,9 +169,10 @@ class TestHoldingsHalfPanel(HomeRedoBase):
         self.assertIn("holdings-summary", html)
         self.assertIn("Solana", html)
         self.assertIn("(SOL)", html)
-        # 1 SOL bought at the mocked $10 price.
-        self.assertIn("1.0000 SOL", html)
-        self.assertIn("$10.00", html)
+        # 1 SOL bought at the mocked $10 price: the 3.65% fee leaves
+        # 0.9635 SOL worth $9.63.
+        self.assertIn("0.9635 SOL", html)
+        self.assertIn("$9.63", html)
         self.assertIn("1 coin", html)
         # Normal-size rows now carry the 1-hour % (mocked +2.5%)
         # next to the amount + value.
