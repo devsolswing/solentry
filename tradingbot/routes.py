@@ -39,8 +39,10 @@ from . import assistant as assistant_mod
 from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
 from . import candles as candles_mod
+from . import coin_wallets as coin_wallets_mod
 from . import donations as donations_mod
 from . import fees as fees_mod
+from . import jupiter as jupiter_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
 from . import platforms as platforms_mod
@@ -56,6 +58,7 @@ from .charts import (CHART_RANGES, fetch_market_chart, fetch_ohlc,
                      mint_candles_from_feed, search_coins)
 from .config import Config
 from .executor import execute_real_trade, send_and_confirm
+from .jupiter_executor import execute_jupiter_swap
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, clear_price_cache, get_prices
@@ -2594,6 +2597,18 @@ def register_routes(app: Flask) -> None:
             (user["id"], "real" if mode == "devnet" else "paper")
             ).fetchall()
         wallet = _wallet(app, user["id"])
+        # First-trade wallet step + Jupiter: whether this coin has a
+        # wallet recorded (Buy stays disabled until it does), and
+        # whether the coin trades as a wrapped token on Solana.
+        # The wrapped lookup is the static map only — a page render
+        # must never wait on a token-API call.
+        coin_wallet = coin_wallets_mod.coin_wallet_state(
+            db, user["id"], coin_id_resolved,
+            wallet["pubkey"] if wallet else None,
+            coin_name=COINS.get(coin_id_resolved, {}).get("name"))
+        jupiter_wrapped = (
+            jupiter_mod.wrapped_info(coin_id_resolved)
+            if coin_id_resolved in COINS else None)
         return render_template(
             "coin_detail.html", coin=row, range_key=range_key,
             ranges=CHART_RANGES, candles_svg=candles_svg,
@@ -2609,6 +2624,8 @@ def register_routes(app: Flask) -> None:
             receive_address=wallet["pubkey"] if wallet else "",
             prices_source=prices["source"],
             prices_as_of=prices["as_of"],
+            coin_wallet=coin_wallet,
+            jupiter_wrapped=jupiter_wrapped,
             # Page 5 Send/Receive must account for the network: the
             # coin's chain, the plain refusal when it is not a Solana
             # asset, and the network this app sends on.
@@ -2616,6 +2633,110 @@ def register_routes(app: Flask) -> None:
             send_refusal=networks_mod.send_refusal(
                 coin_id_resolved, _cfg(app).network),
             network_label=networks_mod.network_label(_cfg(app).network))
+
+    @app.route("/api/coins/<coin_id>/route")
+    @login_required
+    def jupiter_route(coin_id: str):
+        """One live Jupiter route for the coin page's "Finding
+        route…" box: the pools SOL is paired with for this coin,
+        with the expected output and price impact. The quote IS the
+        scan — Jupiter routes across every DEX/pool it integrates.
+        Read-only market data: no money moves, no signing. A coin
+        with no route gets ok:false and a plain message, never a
+        made-up route. Pump.fun mints trade on pump.fun, so no
+        Jupiter route is shown for them."""
+        coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
+        if coin_id_resolved is None:
+            return jsonify({"ok": False, "coin_id": coin_id,
+                            "error": "Unknown coin — no live price."})
+        side = (request.args.get("side") or "buy").strip().lower()
+        if side not in ("buy", "sell"):
+            side = "buy"
+        if is_valid_address(coin_id_resolved):
+            return jsonify({
+                "ok": False, "coin_id": coin_id_resolved, "side": side,
+                "error": "This coin trades on pump.fun — no Jupiter "
+                         "route is shown."})
+        if coin_id_resolved == "SOL":
+            return jsonify({
+                "ok": False, "coin_id": coin_id_resolved, "side": side,
+                "error": "SOL is the coin you swap from — no route "
+                         "needed."})
+        amount_sol_raw = (request.args.get("amount_sol") or "").strip()
+        try:
+            amount_sol = (float(amount_sol_raw) if amount_sol_raw
+                          else jupiter_mod.DEFAULT_BUY_SOL)
+        except ValueError:
+            return jsonify({"ok": False, "coin_id": coin_id_resolved,
+                            "side": side,
+                            "error": "Amount must be a number."})
+        if amount_sol <= 0:
+            return jsonify({"ok": False, "coin_id": coin_id_resolved,
+                            "side": side,
+                            "error": "Amount must be more than 0."})
+        coin_name = COINS.get(coin_id_resolved, {}).get("name")
+        try:
+            if side == "buy":
+                quote = jupiter_mod.quote_buy(
+                    coin_id_resolved, amount_sol, coin_name=coin_name)
+            else:
+                # Sell: amount_sol worth of the coin, converted to
+                # tokens at the live price, then quoted back to SOL.
+                sol_price = _sol_price_usd()
+                if (price is None or price <= 0
+                        or sol_price is None):
+                    return jsonify({
+                        "ok": False, "coin_id": coin_id_resolved,
+                        "side": side,
+                        "error": "Price unavailable right now — the "
+                                 "sell route needs a current price."})
+                tokens = amount_sol * sol_price / price
+                quote = jupiter_mod.quote_sell(
+                    coin_id_resolved, tokens, coin_name=coin_name)
+        except jupiter_mod.JupiterError as exc:
+            # No liquid route (no route, not tradable, dead pool)
+            # says so plainly — never a dead route, never the raw
+            # API wording. Anything else (Jupiter unreachable) is
+            # reported as itself.
+            error = (jupiter_mod.no_liquid_route_message(exc)
+                     or str(exc))
+            return jsonify({"ok": False, "coin_id": coin_id_resolved,
+                            "side": side, "error": error})
+        return jsonify({
+            "ok": True, "coin_id": coin_id_resolved, "side": side,
+            "wrapped": quote["wrapped"],
+            "display_name": quote["display_name"],
+            "in_amount": quote["in_amount"],
+            "out_amount": quote["out_amount"],
+            "in_amount_ui": quote["in_amount_ui"],
+            "out_amount_ui": quote["out_amount_ui"],
+            "route_labels": quote["route_labels"],
+            "price_impact_pct": quote["price_impact_pct"],
+            "fetched_at": quote["fetched_at"], "source": "jupiter",
+            "lines": jupiter_mod.summarize_route(quote)})
+
+    @app.route("/api/coins/<coin_id>/wallet", methods=["POST"])
+    @login_required
+    def coin_wallet_create(coin_id: str):
+        """The "Create wallet" tap for a coin: records the user's
+        existing Solana app wallet for this coin (one row in
+        coin_wallets) and returns the real address, truncated, for
+        the connected indicator. Idempotent — a second tap returns
+        the same row. A coin with no supported wallet refuses
+        plainly instead of faking one."""
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        coin_id_resolved, _price, _source = _resolve_coin_price(coin_id)
+        if coin_id_resolved is None:
+            abort(404)
+        wallet = _wallet(app, user["id"])
+        coin_name = COINS.get(coin_id_resolved, {}).get("name")
+        result = coin_wallets_mod.create_coin_wallet(
+            db, user["id"], coin_id_resolved,
+            wallet["pubkey"] if wallet else None,
+            coin_name=coin_name)
+        return jsonify(result)
 
     @app.route("/api/coins/<coin_id>/tick")
     @login_required
@@ -2904,6 +3025,28 @@ def register_routes(app: Flask) -> None:
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
+        # First-trade wallet step: Buy is disabled until the wallet
+        # for this coin is created (coin page, "Create wallet"), and
+        # a coin with no supported wallet cannot be bought at all.
+        # The gate runs in both modes, before any pricing or bot
+        # work — and before the Jupiter refusal below, so the
+        # wallet message is the one the user sees first.
+        wallet = _wallet(app, user["id"])
+        coin_name = COINS.get(coin_id_resolved, {}).get("name")
+        wstate = coin_wallets_mod.coin_wallet_state(
+            db, user["id"], coin_id_resolved,
+            wallet["pubkey"] if wallet else None,
+            coin_name=coin_name)
+        if not wstate["supported"]:
+            return _coin_result(
+                "Nothing was bought",
+                [coin_wallets_mod.WALLET_NOT_AVAILABLE],
+                False, coin_id_resolved, label)
+        if not wstate["recorded"]:
+            return _coin_result(
+                "Nothing was bought",
+                [coin_wallets_mod.WALLET_REQUIRED],
+                False, coin_id_resolved, label)
         if mode == "paper":
             # Buys are in SOL on the detail page and the coin popup:
             # convert at the current SOL price. The old $ form is
@@ -2961,8 +3104,21 @@ def register_routes(app: Flask) -> None:
                         "Nothing was bought",
                         ["Amount must be a number."], False,
                         coin_id_resolved, label)
+            # Paper buys in SOL price from the live Jupiter quote
+            # when the coin has a route — the fill rate comes from
+            # Jupiter; a failed quote falls back to the live price
+            # (never blocks the trade).
+            jup_price = None
+            if amount_sol_raw:
+                try:
+                    jup_price = _jupiter_buy_price_usd(
+                        coin_id_resolved, float(amount_sol_raw))
+                except (ValueError, TypeError):
+                    jup_price = None
             result = _paper_buy_for(app, user, coin_id_resolved, usd,
-                                    request.form.get("bot_id") or "")
+                                    request.form.get("bot_id") or "",
+                                    price_usd=jup_price,
+                                    price_source="jupiter quote")
             lines = [result["message"]]
             if result["ok"]:
                 lines.append(
@@ -3016,14 +3172,31 @@ def register_routes(app: Flask) -> None:
             return _coin_result(
                 "Nothing was bought", ["Amount must be more than 0."],
                 False, coin_id_resolved, label)
+        # A Jupiter-routed coin trades through the Jupiter executor
+        # (mainnet, gated behind James's go-ahead); anything else
+        # is a pump.fun mint and trades through the pump.fun
+        # executor (devnet). With the Jupiter gate off the
+        # executor refuses plainly — nothing is built, signed or
+        # sent — instead of letting the pump.fun executor fail on
+        # a coin it was never built for.
         bot, error = _real_bot_for_trade(
             app, user, request.form.get("bot_id") or "")
         if error:
             return _coin_result("Nothing was bought", [error], False,
                                 coin_id_resolved, label)
-        result = execute_real_trade(
-            bot, user["id"], coin_id_resolved, "buy", amount_sol,
-            price or 0.0, db, _cfg(app))
+        if jupiter_mod.is_jupiter_coin(coin_id_resolved):
+            result = execute_jupiter_swap(
+                bot, user["id"], coin_id_resolved, "buy", amount_sol,
+                db, _cfg(app),
+                coin_name=COINS.get(coin_id_resolved, {}).get("name"))
+            fee_pct_label = "1.9%"
+            venue_label = "via Jupiter (mainnet)"
+        else:
+            result = execute_real_trade(
+                bot, user["id"], coin_id_resolved, "buy", amount_sol,
+                price or 0.0, db, _cfg(app))
+            fee_pct_label = "3.65%"
+            venue_label = "on pump.fun (devnet)"
         if result.get("status") != "executed":
             return _coin_result(
                 "Nothing was bought",
@@ -3039,11 +3212,16 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)
-        # The 3.65% fee travelled in the same transaction as the
-        # buy (executor.py); record it once, keyed by the trade's
-        # signature, so it is never charged twice.
+        # The fee: for a pump.fun buy it travelled in the same
+        # transaction as the buy; for a Jupiter buy it was sent
+        # right after the swap confirmed, as its own transfer to
+        # the Treasury dev wallet. Either way it is recorded once,
+        # keyed by the trade's signature, so it is never charged
+        # twice — and only when it was actually paid (a Jupiter
+        # fee still pending is not recorded yet).
         fee_sol = result.get("fee_sol")
-        if fee_sol is not None:
+        fee_paid = result.get("fee_status") in (None, "paid")
+        if fee_sol is not None and fee_paid:
             fees_mod.record_fee(db, user["id"], bot["id"],
                                 coin_id_resolved, "buy", "real", fee_sol,
                                 fee_lamports=result.get("fee_lamports"),
@@ -3056,12 +3234,19 @@ def register_routes(app: Flask) -> None:
                                 pump_fee_lamports=result.get(
                                     "pump_fee_lamports"),
                                 signature=result.get("signature"))
-        fee_sentence = (
-            f" Fee (3.65%): {fee_sol:.4f} SOL."
-            if fee_sol is not None else "")
+        if fee_sol is not None and fee_paid:
+            fee_sentence = (
+                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
+        elif fee_sol is not None:
+            fee_sentence = (
+                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
+                f"— the swap landed but the fee transfer has not "
+                f"confirmed yet.")
+        else:
+            fee_sentence = ""
         _log(app, user["id"], "real_buy",
              f"Bought {coin_amount:.4f} {coin_id_resolved} for "
-             f"{amount_sol:.4f} SOL on pump.fun (devnet). Signature: "
+             f"{amount_sol:.4f} SOL {venue_label}. Signature: "
              f"{str(result.get('signature', ''))[:12]}... Signing bot: "
              f"{result.get('signing_bot', '')}.{fee_sentence}", "real")
         _record_pnl_snapshot(
@@ -3069,11 +3254,16 @@ def register_routes(app: Flask) -> None:
             {c: e.get("price", 0.0)
              for c, e in get_prices()["prices"].items()})
         lines = [f"Bought {coin_amount:.4f} {coin_id_resolved} for "
-                 f"{amount_sol:.4f} SOL on pump.fun (devnet).",
+                 f"{amount_sol:.4f} SOL {venue_label}.",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
-        if fee_sol is not None:
-            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL.")
+        if fee_sol is not None and fee_paid:
+            lines.append(f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
+        elif fee_sol is not None:
+            lines.append(
+                f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
+                f"— the swap landed but the fee transfer has not "
+                f"confirmed yet.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Bought", lines, True, coin_id_resolved, label)
@@ -3179,7 +3369,14 @@ def register_routes(app: Flask) -> None:
                     "Nothing was sold", ["Amount must be more than 0."],
                     False, coin_id_resolved, label)
         if mode == "paper":
-            result = _paper_sell_for(app, user, coin_id_resolved, amount)
+            # Paper sells price from the live Jupiter quote when the
+            # coin has a route — a failed quote falls back to the
+            # live price (never blocks the trade).
+            jup_price = _jupiter_sell_price_usd(
+                coin_id_resolved, amount)
+            result = _paper_sell_for(app, user, coin_id_resolved, amount,
+                                     price_usd=jup_price,
+                                     price_source="jupiter quote")
             lines = [result["message"]]
             if result["ok"]:
                 lines.append(f"New paper cash: ${result['cash']:,.2f} CAD.")
@@ -3212,14 +3409,30 @@ def register_routes(app: Flask) -> None:
                  + (f" ({bot_managed:.4f} more is managed by a bot)."
                     if bot_managed > 0 else ".")],
                 False, coin_id_resolved, label)
+        # A Jupiter-routed coin trades through the Jupiter executor
+        # (mainnet, gated behind James's go-ahead); anything else
+        # is a pump.fun mint and trades through the pump.fun
+        # executor (devnet). With the Jupiter gate off the
+        # executor refuses plainly — nothing is built, signed or
+        # sent.
         bot, error = _real_bot_for_trade(
             app, user, request.form.get("bot_id") or "")
         if error:
             return _coin_result("Nothing was sold", [error], False,
                                 coin_id_resolved, label)
-        result = execute_real_trade(
-            bot, user["id"], coin_id_resolved, "sell", amount,
-            price or 0.0, db, _cfg(app))
+        if jupiter_mod.is_jupiter_coin(coin_id_resolved):
+            result = execute_jupiter_swap(
+                bot, user["id"], coin_id_resolved, "sell", amount,
+                db, _cfg(app),
+                coin_name=COINS.get(coin_id_resolved, {}).get("name"))
+            fee_pct_label = "1.9%"
+            venue_label = "via Jupiter (mainnet)"
+        else:
+            result = execute_real_trade(
+                bot, user["id"], coin_id_resolved, "sell", amount,
+                price or 0.0, db, _cfg(app))
+            fee_pct_label = "3.65%"
+            venue_label = "on pump.fun (devnet)"
         if result.get("status") != "executed":
             return _coin_result(
                 "Nothing was sold",
@@ -3230,11 +3443,16 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)
-        # The 3.65% fee travelled in the same transaction as the
-        # sell (executor.py); record it once, keyed by the trade's
-        # signature, so it is never charged twice.
+        # The fee: for a pump.fun sell it travelled in the same
+        # transaction as the sell; for a Jupiter sell it was sent
+        # right after the swap confirmed, as its own transfer to
+        # the Treasury dev wallet. Either way it is recorded once,
+        # keyed by the trade's signature, so it is never charged
+        # twice — and only when it was actually paid (a Jupiter
+        # fee still pending is not recorded yet).
         fee_sol = result.get("fee_sol")
-        if fee_sol is not None:
+        fee_paid = result.get("fee_status") in (None, "paid")
+        if fee_sol is not None and fee_paid:
             fees_mod.record_fee(db, user["id"], bot["id"],
                                 coin_id_resolved, "sell", "real", fee_sol,
                                 fee_lamports=result.get("fee_lamports"),
@@ -3247,24 +3465,35 @@ def register_routes(app: Flask) -> None:
                                 pump_fee_lamports=result.get(
                                     "pump_fee_lamports"),
                                 signature=result.get("signature"))
-        fee_sentence = (
-            f" Fee (3.65%): {fee_sol:.4f} SOL."
-            if fee_sol is not None else "")
+        if fee_sol is not None and fee_paid:
+            fee_sentence = (
+                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
+        elif fee_sol is not None:
+            fee_sentence = (
+                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
+                f"— the swap landed but the fee transfer has not "
+                f"confirmed yet.")
+        else:
+            fee_sentence = ""
         _log(app, user["id"], "real_sell",
-             f"Sold {amount:.4f} {coin_id_resolved} on pump.fun "
-             f"(devnet). Signature: "
+             f"Sold {amount:.4f} {coin_id_resolved} {venue_label}. "
+             f"Signature: "
              f"{str(result.get('signature', ''))[:12]}... Signing bot: "
              f"{result.get('signing_bot', '')}.{fee_sentence}", "real")
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
              for c, e in get_prices()["prices"].items()})
-        lines = [f"Sold {amount:.4f} {coin_id_resolved} on pump.fun "
-                 f"(devnet).",
+        lines = [f"Sold {amount:.4f} {coin_id_resolved} {venue_label}.",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
-        if fee_sol is not None:
-            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL.")
+        if fee_sol is not None and fee_paid:
+            lines.append(f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
+        elif fee_sol is not None:
+            lines.append(
+                f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
+                f"— the swap landed but the fee transfer has not "
+                f"confirmed yet.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Sold", lines, True, coin_id_resolved, label)
@@ -3750,10 +3979,45 @@ def register_routes(app: Flask) -> None:
             text += f" (≈ {fee['fee_sol']:.4f} SOL)"
         return text
 
+    def _jupiter_buy_price_usd(coin: str, amount_sol: float) -> float | None:
+        """Implied USD price for a paper BUY of `amount_sol` SOL
+        worth, from a live Jupiter quote — None when Jupiter cannot
+        quote (the caller falls back to the live price and never
+        blocks the trade on a quote). Only listed coins have Jupiter
+        routes; pump.fun mints price from the trenches feed."""
+        if coin.upper() not in COINS:
+            return None
+        return jupiter_mod.jupiter_usd_price(
+            coin.upper(), _sol_price_usd(), amount_sol=amount_sol)
+
+    def _jupiter_sell_price_usd(coin: str,
+                                amount_tokens: float) -> float | None:
+        """Implied USD price for a paper SELL of `amount_tokens`,
+        from a live Jupiter sell quote — None when Jupiter cannot
+        quote (caller falls back to the live price)."""
+        if coin.upper() not in COINS:
+            return None
+        sol_price = _sol_price_usd()
+        if sol_price is None or amount_tokens <= 0:
+            return None
+        try:
+            quote = jupiter_mod.quote_sell(
+                coin.upper(), amount_tokens,
+                coin_name=COINS[coin.upper()]["name"])
+        except jupiter_mod.JupiterError:
+            return None
+        if quote["out_amount_ui"] <= 0:
+            return None
+        return quote["out_amount_ui"] * sol_price / amount_tokens
+
     def _paper_buy_for(app, user, coin: str, usd: float,
-                       bot_id_raw: str) -> dict:
+                       bot_id_raw: str, price_usd: float | None = None,
+                       price_source: str | None = None) -> dict:
         """One paper buy. Returns {"ok", "message", ...}. The caller
-        presents the message. Never raises for a refused buy."""
+        presents the message. Never raises for a refused buy.
+        `price_usd` overrides the resolved price when given (a
+        Jupiter quote-implied price): the fill rate then comes from
+        Jupiter, not the cached feed price."""
         db = _db(app)
         coin_id, price, source = _resolve_coin_price(coin)
         if coin_id is None:
@@ -3762,6 +4026,9 @@ def register_routes(app: Flask) -> None:
         if usd <= 0:
             return {"ok": False,
                     "message": "Amount must be more than 0."}
+        if price_usd is not None and price_usd > 0:
+            price = price_usd
+            source = price_source or "jupiter quote"
         # Optional managing bot: the bot looks after this coin — the
         # silent loop governs the position by that bot's rules once
         # its silent trading is on. The bot must be the user's own
@@ -3820,8 +4087,12 @@ def register_routes(app: Flask) -> None:
                 "amount": amount, "usd": usd, "bot": bot, "cash": cash,
                 "coin": coin_id}
 
-    def _paper_sell_for(app, user, coin: str, amount: float) -> dict:
-        """One paper sell. Returns {"ok", "message", ...}."""
+    def _paper_sell_for(app, user, coin: str, amount: float,
+                        price_usd: float | None = None,
+                        price_source: str | None = None) -> dict:
+        """One paper sell. Returns {"ok", "message", ...}.
+        `price_usd` overrides the resolved price when given (a
+        Jupiter quote-implied price)."""
         db = _db(app)
         coin_id, price, source = _resolve_coin_price(coin)
         if coin_id is None:
@@ -3830,6 +4101,9 @@ def register_routes(app: Flask) -> None:
         if amount <= 0:
             return {"ok": False,
                     "message": "Amount must be more than 0."}
+        if price_usd is not None and price_usd > 0:
+            price = price_usd
+            source = price_source or "jupiter quote"
         if price is None:
             return {"ok": False,
                     "message": "Price unavailable right now."}

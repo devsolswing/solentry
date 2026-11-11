@@ -35,6 +35,19 @@ from tradingbot.rules import load_rules, scanner_ruleset
 DEST = "11111111111111111111111111111111"
 
 
+def create_coin_wallet(client, coin):
+    """Tap "Create wallet" for a coin (the first-trade wallet step):
+    records the user's Solana app wallet for the coin so Buy works.
+    The gate refuses any Buy before this tap, so tests that buy a
+    non-SOL coin must create its wallet first."""
+    resp = client.post(f"/api/coins/{coin}/wallet", data={
+        "csrf_token": csrf(client, f"/coins/{coin}")})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["ok"], data
+    return data
+
+
 class FakeRpc:
     instances = []
     balance_lamports = 0
@@ -381,6 +394,10 @@ class TestQuickTradeAmounts(CoinsPageBase):
         self._choose_mode("paper")
         with mock.patch.object(routes, "fetch_prices_for_mints",
                                return_value={}):
+            # The first-trade wallet step comes before pricing: a
+            # Buy with no wallet recorded is refused with the
+            # wallet message, not the price message.
+            create_coin_wallet(self.client, DEST)
             resp = self.client.post(f"/coins/{DEST}/buy", data={
                 "csrf_token": csrf(self.client, f"/coins/{DEST}"),
                 "amount_tokens": "1", "bot_id": ""})

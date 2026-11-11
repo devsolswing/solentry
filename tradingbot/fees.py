@@ -91,15 +91,25 @@ from .solana import is_valid_address
 # 3.65% — basis points, so fee math is exact integer math in
 # lamports (amount * 365 // 10000, rounded down).
 #
-# MAINNET MODEL (James, 2026-11-11 — for the record, NOT this
-# build): on mainnet the app fee is 1.9% of the trade, ALL of it
+# MAINNET MODEL (James, 2026-11-11 — IMPLEMENTED for Jupiter
+# swaps in jupiter_executor.py, behind the JUPITER_REAL_SWAPS
+# gate): on mainnet the app fee is 1.9% of the trade, ALL of it
 # to the Treasury dev wallet (FEE_RECIPIENT_PUBKEY — the address
 # James already supplied; no new wallet). Pump.fun's fee is
 # separate (taken by pump.fun via the program, accurately
-# accounted in the display). No burn on mainnet. The executor is
-# devnet-only; mainnet collection is a launch-time change.
+# accounted in the display). No burn on mainnet — the mainnet
+# fee travels as its own System transfer to the treasury (the
+# Jupiter swap transaction is built by Jupiter, so the fee
+# cannot ride inside it; it is sent right after the swap
+# confirms, from the unspent fee portion, and recorded once by
+# swap signature). mainnet_fee_split_lamports is the single
+# home of that split.
 FEE_BPS = 365
 FEE_PCT = 3.65
+
+# Mainnet Jupiter fee: 1.9% of the trade, ALL to the treasury.
+MAINNET_FEE_BPS = 190
+MAINNET_FEE_PCT = 1.9
 
 # Treasury share of the fee, for the DISPLAYED balances only
 # (James, 2026-11-10): the treasury's share is 1.7% OF THE TRADE,
@@ -172,6 +182,29 @@ def fee_lamports(amount_lamports: int) -> int:
     if amount_lamports is None or amount_lamports <= 0:
         return 0
     return int(amount_lamports) * FEE_BPS // 10000
+
+
+def mainnet_fee_lamports(amount_lamports: int) -> int:
+    """1.9% of a lamport amount, integer math, rounded down — the
+    MAINNET Jupiter fee (James, 2026-11-11). Zero or negative
+    amounts have no fee."""
+    if amount_lamports is None or amount_lamports <= 0:
+        return 0
+    return int(amount_lamports) * MAINNET_FEE_BPS // 10000
+
+
+def mainnet_fee_split_lamports(amount_lamports: int) -> dict:
+    """The mainnet Jupiter fee split for one trade amount, in
+    lamports: {"fee_lamports", "treasury_lamports",
+    "burn_lamports"}. The fee is 1.9% of the trade, ALL of it to
+    the treasury (FEE_RECIPIENT_PUBKEY); the burn is ALWAYS zero
+    on mainnet — there is no burn on mainnet, ever. This is the
+    single home of the mainnet split; the Jupiter executor
+    (jupiter_executor.py) reads it, and the display records the
+    treasury share from the fee row (see fee_row_split)."""
+    fee = mainnet_fee_lamports(amount_lamports)
+    return {"fee_lamports": fee, "treasury_lamports": fee,
+            "burn_lamports": 0}
 
 
 def fee_usd(amount_usd: float) -> float:

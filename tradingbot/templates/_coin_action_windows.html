@@ -22,26 +22,26 @@
     {% if mode == 'paper' %}
     <form method="post" action="{{ url_for('coin_buy', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required data-jupiter-amount="buy"></label>
       <label>Bot to look after this coin (optional)
         <select name="bot_id">
           <option value="">No bot — just buy it</option>
           {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
         </select>
       </label>
-      <button class="btn big" type="submit">Buy (paper)</button>
+      <button class="btn big" type="submit" data-buy-submit{% if not coin_wallet.recorded %} disabled{% endif %}>Buy (paper)</button>
     </form>
     {% else %}
     <form method="post" action="{{ url_for('coin_buy', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required data-jupiter-amount="buy"></label>
       <label>Real bot to manage this buy (required — its buy-size limit is the cap)
         <select name="bot_id" required>
           <option value="">Choose a real bot…</option>
           {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
         </select>
       </label>
-      <button class="btn big" type="submit">Buy (real, devnet)</button>
+      <button class="btn big" type="submit" data-buy-submit{% if not coin_wallet.recorded %} disabled{% endif %}>Buy (real, devnet)</button>
     </form>
     <p class="muted small">Buys on pump.fun (devnet), signed by your signing bot, within the bot's limits. If the coin is not a live pump.fun token, the buy is refused plainly and nothing is placed.</p>
     {% endif %}
@@ -57,13 +57,13 @@
     {% if mode == 'paper' %}
     <form method="post" action="{{ url_for('coin_sell', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required data-jupiter-amount="sell"></label>
       <button class="btn big" type="submit">Sell (paper)</button>
     </form>
     {% else %}
     <form method="post" action="{{ url_for('coin_sell', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required data-jupiter-amount="sell"></label>
       <label>Real bot to manage this sell (required)
         <select name="bot_id" required>
           <option value="">Choose a real bot…</option>

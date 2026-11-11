@@ -40,6 +40,19 @@ from tradingbot.solana import (
 DEST = "11111111111111111111111111111111"
 
 
+def create_coin_wallet(client, coin):
+    """Tap "Create wallet" for a coin (the first-trade wallet step):
+    records the user's Solana app wallet for the coin so Buy works.
+    The gate refuses any Buy before this tap, so tests that buy a
+    non-SOL coin must create its wallet first."""
+    resp = client.post(f"/api/coins/{coin}/wallet", data={
+        "csrf_token": csrf(client, f"/coins/{coin}")})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["ok"], data
+    return data
+
+
 class FakeRpc:
     instances = []
     balance_lamports = 0
@@ -448,6 +461,9 @@ class TestCoinPopup(SplitBase):
 
         # The app wallet needs enough SOL for the buy-size limit check.
         FakeRpc.balance_lamports = sol_to_lamports(10.0)
+        # The first-trade wallet step: Buy is refused until the
+        # coin's wallet is created.
+        create_coin_wallet(self.client, mint)
         try:
             with mock.patch.object(routes, "execute_real_trade", fake_execute):
                 resp = self.client.post(f"/coins/{mint}/buy", data={

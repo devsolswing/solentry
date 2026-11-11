@@ -47,6 +47,8 @@ from datetime import datetime, timezone
 from .config import Config
 from .db import init_db
 from .executor import execute_real_trade
+from .jupiter import is_jupiter_coin
+from .jupiter_executor import execute_jupiter_swap
 from .fees import record_fee
 from .ledger import record_trade
 from .platforms import REAL_TRADEABLE_PLATFORMS
@@ -85,8 +87,13 @@ def _log(db: sqlite3.Connection, user_id: int, kind: str,
 def default_real_executor(bot, user_id: int, coin: str, side: str,
                          amount: float, price: float, db, cfg) -> dict:
     """Real executor: the account's dedicated signing bot executes
-    pump.fun trades on devnet (see executor.py). Anything unverified
-    is skipped honestly — never a fake fill."""
+    pump.fun trades on devnet (see executor.py) — and Jupiter
+    swaps on mainnet for listed coins (see jupiter_executor.py,
+    gated behind James's go-ahead). Anything unverified is
+    skipped honestly — never a fake fill."""
+    if is_jupiter_coin(coin):
+        return execute_jupiter_swap(bot, user_id, coin, side, amount,
+                                    db, cfg)
     return execute_real_trade(bot, user_id, coin, side, amount, price,
                               db, cfg)
 

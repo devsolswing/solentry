@@ -60,6 +60,17 @@ class Config:
         # bots the user explicitly switched to silent.
         self.silent_loop_enabled: bool = env.get(
             "SILENT_LOOP_ENABLED", "0") == "1"
+        # Real Jupiter swaps (mainnet): OFF by default — set
+        # JUPITER_REAL_SWAPS=1 on Railway to enable them. This is
+        # James's explicit mainnet go-ahead (2026-11-11): the flag
+        # is admin-only (a Railway env var) and NOTHING in the
+        # user-facing UI can flip it on. With the flag off, any
+        # real/mainnet Jupiter swap attempt refuses plainly. The
+        # executor also requires NETWORK=mainnet — Jupiter has no
+        # devnet liquidity, so a mainnet swap on a devnet RPC is
+        # refused too. No real money moves unless both hold.
+        self.jupiter_real_swaps: bool = env.get(
+            "JUPITER_REAL_SWAPS", "0") == "1"
         # Live price feed: Kraken WebSocket for majors, DexScreener
         # poll for pump.fun mints, Jupiter cross-check for SOL. Runs
         # as daemon threads inside the web process (started from
