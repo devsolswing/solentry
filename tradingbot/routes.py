@@ -929,14 +929,23 @@ def register_routes(app: Flask) -> None:
             # answer is remembered (see _clear_mode_chosen).
             _clear_mode_chosen(_db(app), row["id"])
             return redirect(url_for("wallet"))
-        # SolEntry login page: hero + donate card. The donation wallet is
-        # created once, on first use, and its public address is shown as
-        # the donation destination. The field is labeled "Email Address"
-        # per the design; accounts are username-based, so it accepts the
-        # account username (no email addresses are stored).
+        # SolEntry login page: hero + donate card. The donate card
+        # shows only the MASKED recipient (first 5 characters +
+        # '*****'); the full address never reaches a template —
+        # the donor's browser fetches it from /api/donate/info
+        # when it builds the transfer. When the recipient is not
+        # configured the card says so plainly. The field is labeled
+        # "Email Address" per the design; accounts are
+        # username-based, so it accepts the account username (no
+        # email addresses are stored).
+        try:
+            donation_masked = donations_mod.mask_address(
+                donations_mod.get_donation_recipient(_cfg(app)))
+        except ValueError:
+            donation_masked = ""
         return render_template(
             "login.html",
-            donation_address=donations_mod.get_or_create_donation_wallet(app),
+            donation_address_masked=donation_masked,
             rpc_url=_cfg(app).rpc_url)
 
     @app.route("/logout")
@@ -1298,9 +1307,19 @@ def register_routes(app: Flask) -> None:
     # ------------------------------------------------------------------
     @app.route("/api/donate/info")
     def donate_info():
+        # The full recipient address is returned ONLY here, for
+        # the donor's browser to build the transfer — no template
+        # ever renders it. The page shows only the masked value.
+        # When the recipient is not configured, donations refuse
+        # plainly (503) instead of falling back to any wallet.
+        try:
+            recipient = donations_mod.get_donation_recipient(_cfg(app))
+        except ValueError:
+            return jsonify({"error": "donations are not configured"}), 503
         return jsonify({
-            "donation_address":
-                donations_mod.get_or_create_donation_wallet(app),
+            "donation_address": recipient,
+            "donation_address_masked":
+                donations_mod.mask_address(recipient),
             "network": _cfg(app).network,
             "rpc_url": _cfg(app).rpc_url,
         })
@@ -1348,10 +1367,17 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         if not _is_admin(user):
             abort(403)
+        # The admin page shows only the MASKED recipient, like the
+        # login page — never the full address.
+        try:
+            donation_masked = donations_mod.mask_address(
+                donations_mod.get_donation_recipient(_cfg(app)))
+        except ValueError:
+            donation_masked = ""
         return render_template(
             "admin_donations.html",
             donations=donations_mod.list_donations(app),
-            donation_address=donations_mod.get_or_create_donation_wallet(app))
+            donation_address_masked=donation_masked)
 
     # ------------------------------------------------------------------
     # Dashboard
@@ -1436,7 +1462,7 @@ def register_routes(app: Flask) -> None:
         # plus the live SOL price for display. The fee total starts
         # at zero for everyone — trades that predate the fee are
         # never charged. The home page shows ONLY the user's own
-        # fees: no app-wide total, and the Treasury wallet address
+        # fees: no app-wide total, and the fee recipient address
         # is never shown here (James, 2026-11-10).
         fees_rows = fees_mod.user_fees(db, user["id"], limit=20)
         for _row in fees_rows:
@@ -2094,8 +2120,8 @@ def register_routes(app: Flask) -> None:
                                 fee_lamports=result.get("fee_lamports"),
                                 signature=result.get("signature"))
         fee_sentence = (
-            f" Fee (3.65%): {fee_sol:.4f} SOL to the SolEntry "
-            f"Treasury wallet." if fee_sol is not None else "")
+            f" Fee (3.65%): {fee_sol:.4f} SOL."
+            if fee_sol is not None else "")
         _log(app, user["id"], "real_buy",
              f"Bought {coin_amount:.4f} {coin_id_resolved} for "
              f"{amount_sol:.4f} SOL on pump.fun (devnet). Signature: "
@@ -2110,8 +2136,7 @@ def register_routes(app: Flask) -> None:
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
         if fee_sol is not None:
-            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL to the "
-                         f"SolEntry Treasury wallet.")
+            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Bought", lines, True, coin_id_resolved, label)
@@ -2278,8 +2303,8 @@ def register_routes(app: Flask) -> None:
                                 fee_lamports=result.get("fee_lamports"),
                                 signature=result.get("signature"))
         fee_sentence = (
-            f" Fee (3.65%): {fee_sol:.4f} SOL to the SolEntry "
-            f"Treasury wallet." if fee_sol is not None else "")
+            f" Fee (3.65%): {fee_sol:.4f} SOL."
+            if fee_sol is not None else "")
         _log(app, user["id"], "real_sell",
              f"Sold {amount:.4f} {coin_id_resolved} on pump.fun "
              f"(devnet). Signature: "
@@ -2294,8 +2319,7 @@ def register_routes(app: Flask) -> None:
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
         if fee_sol is not None:
-            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL to the "
-                         f"SolEntry Treasury wallet.")
+            lines.append(f"Fee (3.65%): {fee_sol:.4f} SOL.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Sold", lines, True, coin_id_resolved, label)

@@ -44,8 +44,7 @@
 
   <div class="se-card" id="donate-card"
        data-network="{{ network }}"
-       data-rpc-url="{{ rpc_url }}"
-       data-donation-address="{{ donation_address }}">
+       data-rpc-url="{{ rpc_url }}">
     <div class="se-donate-head">
       <span class="se-heart" aria-hidden="true">❤️</span>
       <div>
@@ -64,9 +63,13 @@
              inputmode="decimal" placeholder="0.00">
     </label>
     <button type="button" class="se-send-btn" id="donate-send" disabled>➤&nbsp; Send Donation</button>
+    {% if donation_address_masked %}
     <p class="se-donate-dest">Donations go to the SolEntry wallet:
-      <span class="se-addr">{{ donation_address[:4] }}…{{ donation_address[-4:] }}</span>
+      <span class="se-addr">{{ donation_address_masked }}</span>
     </p>
+    {% else %}
+    <p class="se-donate-dest">Donations are not set up yet.</p>
+    {% endif %}
     <p class="se-donate-status" id="donate-status" role="status"></p>
   </div>
 

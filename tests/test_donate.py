@@ -1,12 +1,12 @@
-"""Donations: donation wallet, record endpoint, admin page."""
+"""Donations: the FEE_RECIPIENT_PUBKEY recipient, masked display,
+record endpoint, admin page."""
 
 import tempfile
 import unittest
 
-from helpers import csrf, make_client, signup
+from helpers import TEST_FEE_RECIPIENT, csrf, make_client, signup
 from tradingbot import donations as donations_mod
-from tradingbot.security import decrypt_secret
-from tradingbot.solana import base58_encode, publickey_from_secret
+from tradingbot.solana import base58_encode
 
 # A well-formed fake 64-byte signature (base58 of 64 bytes whose first
 # byte is nonzero, so it encodes to 87 chars like a real signature).
@@ -15,7 +15,7 @@ FAKE_SIG = base58_encode(b"\x01" * 64)
 FAKE_DONOR = "9WMzFGfMAiPUzNhTJU2jdyJQb5AM3GWroKBS7LCDVQ3H"
 
 
-class TestDonationWallet(unittest.TestCase):
+class TestDonationRecipient(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
@@ -23,39 +23,83 @@ class TestDonationWallet(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_wallet_generated_once_and_decrypts(self):
-        first = donations_mod.get_or_create_donation_wallet(self.app)
-        second = donations_mod.get_or_create_donation_wallet(self.app)
-        self.assertEqual(first, second)
-        self.assertTrue(30 <= len(first) <= 44)
-        db = self.app.config["DB"]
-        rows = db.execute("SELECT COUNT(*) c FROM donation_wallet"
-                          ).fetchone()["c"]
-        self.assertEqual(rows, 1)
-        row = db.execute("SELECT pubkey, encrypted_secret FROM "
-                         "donation_wallet WHERE id = 1").fetchone()
-        # Encrypted blob must not contain the pubkey or key material.
-        self.assertNotIn(row["pubkey"], row["encrypted_secret"])
-        self.assertTrue(donations_mod.donation_wallet_decrypts(self.app))
-
-    def test_wallet_secret_matches_pubkey(self):
-        pubkey = donations_mod.get_or_create_donation_wallet(self.app)
-        db = self.app.config["DB"]
-        row = db.execute("SELECT encrypted_secret FROM donation_wallet "
-                         "WHERE id = 1").fetchone()
-        secret = decrypt_secret(row["encrypted_secret"],
-                                self.app.config["TRADINGBOT_CONFIG"]
-                                .encryption_key)
+    def test_recipient_is_the_fee_recipient(self):
+        # Donations go ONLY to the same single wallet as the
+        # trading fee — the throwaway test address from
+        # FEE_RECIPIENT_PUBKEY. No wallet is generated.
         self.assertEqual(
-            base58_encode(publickey_from_secret(secret)), pubkey)
+            donations_mod.get_donation_recipient(
+                self.app.config["TRADINGBOT_CONFIG"]),
+            TEST_FEE_RECIPIENT)
+        db = self.app.config["DB"]
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) c FROM donation_wallet"
+                       ).fetchone()["c"], 0)
+
+    def test_unset_recipient_fails_closed(self):
+        from tradingbot.config import Config
+        cfg = Config(env={
+            "SESSION_SECRET": "test-session-secret-" + "x" * 40,
+            "ENCRYPTION_KEY": "ab" * 32,
+            "NETWORK": "devnet",
+            "DATABASE_PATH": self.tmp.name + "/other.db",
+        })
+        with self.assertRaises(ValueError):
+            donations_mod.get_donation_recipient(cfg)
+
+    def test_mask_address(self):
+        self.assertEqual(donations_mod.mask_address(TEST_FEE_RECIPIENT),
+                         TEST_FEE_RECIPIENT[:5] + "*****")
+        self.assertEqual(donations_mod.mask_address(""), "")
 
     def test_donate_info_endpoint(self):
         resp = self.client.get("/api/donate/info")
         self.assertEqual(resp.status_code, 200)
         body = resp.get_json()
         self.assertEqual(body["network"], "devnet")
-        self.assertTrue(30 <= len(body["donation_address"]) <= 44)
+        # The full address is returned ONLY here, for the donor's
+        # browser to build the transfer — plus the masked value
+        # the page shows.
+        self.assertEqual(body["donation_address"], TEST_FEE_RECIPIENT)
+        self.assertEqual(body["donation_address_masked"],
+                         TEST_FEE_RECIPIENT[:5] + "*****")
         self.assertIn("api.devnet.solana.com", body["rpc_url"])
+
+    def test_donate_info_refuses_when_unconfigured(self):
+        # Rebuild the app without FEE_RECIPIENT_PUBKEY: donations
+        # refuse plainly (503) instead of falling back to any
+        # wallet.
+        import os
+        from tradingbot import create_app
+        from tradingbot.config import Config
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = {
+            "SESSION_SECRET": "test-session-secret-" + "x" * 40,
+            "ENCRYPTION_KEY": "ab" * 32,
+            "NETWORK": "devnet",
+            "DATABASE_PATH": os.path.join(tmp.name, "test2.db"),
+        }
+        app2 = create_app(Config(env=env))
+        app2.testing = True
+        client2 = app2.test_client()
+        resp = client2.get("/api/donate/info")
+        self.assertEqual(resp.status_code, 503)
+        self.assertIn("not configured", resp.get_json()["error"])
+
+    def test_login_page_shows_only_masked_recipient(self):
+        html = self.client.get("/login").get_data(as_text=True)
+        self.assertIn(TEST_FEE_RECIPIENT[:5] + "*****", html)
+        # The full address never reaches a template.
+        self.assertNotIn(TEST_FEE_RECIPIENT, html)
+        self.assertNotIn("data-donation-address", html)
+
+    def test_donate_js_fetches_info_at_send_time(self):
+        with open("tradingbot/static/donate.js",
+                  encoding="utf-8") as f:
+            js = f.read()
+        self.assertIn("/api/donate/info", js)
+        self.assertNotIn("data-donation-address", js)
 
 
 class TestDonationRecord(unittest.TestCase):
@@ -130,7 +174,6 @@ class TestAdminDonations(unittest.TestCase):
         self.tmp.cleanup()
 
     def _seed_donation(self):
-        donations_mod.get_or_create_donation_wallet(self.app)
         donations_mod.record_donation(self.app, FAKE_DONOR, 500_000_000,
                                       FAKE_SIG, "devnet")
 
@@ -147,6 +190,16 @@ class TestAdminDonations(unittest.TestCase):
         self.assertIn("Donations", html)
         self.assertIn("0.5000 SOL", html)
         self.assertIn("Email notification is not configured", html)
+
+    def test_admin_page_masks_recipient(self):
+        self._seed_donation()
+        signup(self.client, "alice")
+        resp = self.client.get("/admin/donations")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertIn(TEST_FEE_RECIPIENT[:5] + "*****", html)
+        # The full address is never shown, even to the admin.
+        self.assertNotIn(TEST_FEE_RECIPIENT, html)
 
     def test_second_user_is_not_admin(self):
         self._seed_donation()
@@ -181,7 +234,6 @@ class TestAdminDonations(unittest.TestCase):
         tmp.cleanup()
 
     def _seed_donation_on(self, app):
-        donations_mod.get_or_create_donation_wallet(app)
         donations_mod.record_donation(app, FAKE_DONOR, 500_000_000,
                                       FAKE_SIG, "devnet")
 

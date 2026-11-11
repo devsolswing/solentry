@@ -5,6 +5,15 @@
  * the donor's money and only records the confirmed donation.
  * No connection is faked: without Phantom, the page shows plain steps
  * to open it in Phantom's in-app browser instead.
+ *
+ * The destination address is NOT in the page: the script fetches it
+ * from /api/donate/info when the donor taps Send, and only then
+ * builds the transfer. The page shows only the masked address
+ * (first 5 characters + '*****'). Phantom shows the full
+ * destination when the donor approves — the masking is the page
+ * display, not the signed transaction. When no recipient is
+ * configured, /api/donate/info answers 503 and the send is
+ * refused plainly.
  */
 (function () {
   'use strict';
@@ -14,7 +23,6 @@
 
   var network = card.getAttribute('data-network');
   var rpcUrl = card.getAttribute('data-rpc-url');
-  var donationAddress = card.getAttribute('data-donation-address');
   var connectBtn = document.getElementById('donate-connect');
   var amountInput = document.getElementById('donate-amount');
   var sendBtn = document.getElementById('donate-send');
@@ -103,18 +111,27 @@
     setStatus('Building your donation — Phantom will ask you to approve it…');
     loadWeb3()
       .then(function (web3) {
-        var connection = new web3.Connection(rpcUrl, 'confirmed');
-        var tx = new web3.Transaction().add(
-          web3.SystemProgram.transfer({
-            fromPubkey: new web3.PublicKey(donorAddress),
-            toPubkey: new web3.PublicKey(donationAddress),
-            lamports: Math.round(amount * 1000000000)
-          })
-        );
-        tx.feePayer = new web3.PublicKey(donorAddress);
-        return connection.getLatestBlockhash().then(function (bh) {
-          tx.recentBlockhash = bh.blockhash;
-          return provider.signAndSendTransaction(tx);
+        // The recipient is fetched only now, at send time — the page
+        // never carries the full address. A non-OK answer means
+        // donations are not configured: refuse plainly.
+        return fetch('/api/donate/info').then(function (resp) {
+          if (!resp.ok) { throw new Error('Donations are not set up yet. Please try again later.'); }
+          return resp.json();
+        }).then(function (info) {
+          if (!info || !info.donation_address) { throw new Error('Donations are not set up yet. Please try again later.'); }
+          var connection = new web3.Connection(rpcUrl, 'confirmed');
+          var tx = new web3.Transaction().add(
+            web3.SystemProgram.transfer({
+              fromPubkey: new web3.PublicKey(donorAddress),
+              toPubkey: new web3.PublicKey(info.donation_address),
+              lamports: Math.round(amount * 1000000000)
+            })
+          );
+          tx.feePayer = new web3.PublicKey(donorAddress);
+          return connection.getLatestBlockhash().then(function (bh) {
+            tx.recentBlockhash = bh.blockhash;
+            return provider.signAndSendTransaction(tx);
+          });
         });
       })
       .then(function (result) {

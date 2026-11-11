@@ -235,8 +235,7 @@ class TestExecutorBuy(ExecutorBase):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
         curve = pumpfun.parse_bonding_curve(make_curve())
         # 1.0 SOL in: the 3.65% fee (36,500,000 lamports) goes to the
-        # SolEntry Treasury wallet, and only 0.9635 SOL is swapped
-        # for tokens.
+        # fee recipient, and only 0.9635 SOL is swapped for tokens.
         expected = pumpfun.buy_quote(curve, 95, 963_500_000)
         rpc.fill_tokens = expected
         result = execute_real_trade(self._bot(), self.user_id, self.mint,

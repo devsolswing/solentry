@@ -10,6 +10,11 @@ from tradingbot.config import Config
 
 TEST_SESSION_SECRET = "test-session-secret-" + "x" * 40
 TEST_ENCRYPTION_KEY = "ab" * 32  # 64 hex chars -> 32 bytes
+# Throwaway fee/donation recipient for tests ONLY: a valid base58
+# 32-byte address with no real wallet behind it (the keypair was
+# generated once to produce the address and discarded). Never a
+# real address — no real wallet address ever appears in tests.
+TEST_FEE_RECIPIENT = "4XWpRuKMH5uVGiXkvV5PSKSBi36dBQVSy9QJ59Kvda7Q"
 
 
 def make_config(tmpdir: str) -> Config:
@@ -19,6 +24,7 @@ def make_config(tmpdir: str) -> Config:
         "NETWORK": "devnet",
         "DATABASE_PATH": os.path.join(tmpdir, "test.db"),
         "PAPER_START_CASH": "100",
+        "FEE_RECIPIENT_PUBKEY": TEST_FEE_RECIPIENT,
     }
     return Config(env=env)
 

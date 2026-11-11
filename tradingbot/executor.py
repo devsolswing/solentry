@@ -15,17 +15,18 @@ within the rules that already govern it:
     create-ATA instruction for the user's own token account when the
     buy needs one) — and, since the 3.65% trading fee (fees.py), ONE
     extra instruction per trade: a System-program transfer of
-    exactly the computed fee to the SolEntry Treasury wallet, in
-    the SAME transaction as the trade. That is the ONLY transfer
-    the executor can ever sign: _check_instructions_only_allowed
-    refuses any System-program instruction that is not exactly one
-    fee transfer — one instruction, to the treasury wallet, for
-    exactly the computed fee lamports, from the user's own wallet.
-    Any other transfer, destination, or amount is still refused.
-    The fee is taken from the trade amount (buys) or the sale
-    proceeds (sells), so the total SOL spent is what the user
-    approved; a trade that fails never pays a fee, and a fee is
-    never charged twice for one trade.
+    exactly the computed fee to the fee recipient
+    (FEE_RECIPIENT_PUBKEY), in the SAME transaction as the trade.
+    That is the ONLY transfer the executor can ever sign:
+    _check_instructions_only_allowed refuses any System-program
+    instruction that is not exactly one fee transfer — one
+    instruction, to the fee recipient, for exactly the computed
+    fee lamports, from the user's own wallet. Any other transfer,
+    destination, or amount is still refused. The fee is taken
+    from the trade amount (buys) or the sale proceeds (sells), so
+    the total SOL spent is what the user approved; a trade that
+    fails never pays a fee, and a fee is never charged twice for
+    one trade.
 
 The user's app wallet key is decrypted transiently with
 ENCRYPTION_KEY into a mutable bytearray, used for one signature,
@@ -48,7 +49,7 @@ from __future__ import annotations
 from . import pumpfun
 from .config import Config
 from .fees import fee_lamports as compute_fee_lamports
-from .fees import get_or_create_treasury_wallet
+from .fees import get_fee_recipient_pubkey
 from .security import decrypt_secret_mutable, wipe_secret
 from .signing_bot import ensure_signing_bot
 from .solana import (SYSTEM_PROGRAM, SolanaRpcClient, base58_encode,
@@ -64,7 +65,7 @@ FEE_RESERVE_LAMPORTS = 1_000_000
 # The System program is deliberately NOT in this set: no instruction
 # the executor builds ever uses it as a program (it only appears as
 # an account inside pump.fun instructions) — EXCEPT the single
-# 3.65% fee transfer to the SolEntry Treasury wallet, which
+# 3.65% fee transfer to the fee recipient, which
 # _check_instructions_only_allowed validates separately (see
 # fees.py). A plain SOL transfer to any other destination can never
 # be signed.
@@ -76,12 +77,12 @@ ALLOWED_PROGRAM_IDS = frozenset([
 
 
 def _is_fee_transfer(instruction: dict, payer_b58: str,
-                     treasury_b58: str, fee_lamports: int) -> bool:
+                     recipient_b58: str, fee_lamports: int) -> bool:
     """True only when this instruction is exactly the 3.65% fee
     transfer: a System-program transfer, from the user's own
-    wallet, to the SolEntry Treasury wallet, for exactly the
-    computed fee lamports. Anything else — any other destination,
-    amount, or account layout — is not a fee transfer."""
+    wallet, to the fee recipient, for exactly the computed fee
+    lamports. Anything else — any other destination, amount, or
+    account layout — is not a fee transfer."""
     if instruction.get("program_id") != SYSTEM_PROGRAM:
         return False
     accounts = instruction.get("accounts") or []
@@ -92,7 +93,7 @@ def _is_fee_transfer(instruction: dict, payer_b58: str,
             or not payer.get("is_signer")
             or not payer.get("is_writable")):
         return False
-    if (destination.get("pubkey") != treasury_b58
+    if (destination.get("pubkey") != recipient_b58
             or destination.get("is_signer")
             or not destination.get("is_writable")):
         return False
@@ -100,11 +101,11 @@ def _is_fee_transfer(instruction: dict, payer_b58: str,
     return instruction.get("data") == expected
 
 
-def _fee_transfer_context(payer_b58: str, treasury_b58: str,
+def _fee_transfer_context(payer_b58: str, recipient_b58: str,
                           fee_lamports: int) -> dict:
     """The validated fee-transfer expectation handed to the
     instruction allow-list check."""
-    return {"payer": payer_b58, "treasury": treasury_b58,
+    return {"payer": payer_b58, "recipient": recipient_b58,
             "lamports": fee_lamports}
 
 
@@ -113,7 +114,7 @@ def _check_instructions_only_allowed(instructions: list,
     """Every instruction's program must be in ALLOWED_PROGRAM_IDS —
     with exactly one narrow exception: when fee_transfer is given,
     exactly ONE System-program instruction is allowed, and only
-    when it is the 3.65% fee transfer to the treasury wallet for
+    when it is the 3.65% fee transfer to the fee recipient for
     exactly the computed fee (see _is_fee_transfer). Any other
     System-program instruction, any second fee transfer, or any
     fee transfer to a different destination or amount raises.
@@ -125,7 +126,7 @@ def _check_instructions_only_allowed(instructions: list,
             continue
         if (fee_transfer is not None and not fee_seen
                 and _is_fee_transfer(ins, fee_transfer["payer"],
-                                     fee_transfer["treasury"],
+                                     fee_transfer["recipient"],
                                      fee_transfer["lamports"])):
             fee_seen = True
             continue
@@ -191,6 +192,11 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
+    # The fee recipient pubkey is held in this mutable buffer while
+    # the trade is built and sent, and wiped in place in the
+    # finally block below — the moment the trade is done. It is
+    # never logged.
+    recipient_buf = None
     try:
         try:
             global_info = rpc.get_account_info(pumpfun.global_pda()[0])
@@ -230,8 +236,8 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
         # The 3.65% trading fee comes out of the trade amount: the
         # user still spends amount_sol in total, but only
         # amount_sol minus the fee is swapped for tokens, and the
-        # fee goes to the SolEntry Treasury wallet in the same
-        # transaction as the buy.
+        # fee goes to the fee recipient in the same transaction
+        # as the buy.
         fee_lamports = compute_fee_lamports(amount_lamports)
         trade_lamports = amount_lamports - fee_lamports
         tokens = pumpfun.buy_quote(curve, fee_bps, trade_lamports)
@@ -240,9 +246,19 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
         max_sol_cost = (trade_lamports
                         * (10000 + pumpfun.DEFAULT_SLIPPAGE_BPS) // 10000
                         + 1)
-        treasury_pubkey = None
+        # The fee recipient comes from FEE_RECIPIENT_PUBKEY
+        # (fees.py) — fail closed when it is not configured: the
+        # trade is refused before anything is signed or sent,
+        # never a fallback wallet.
+        recipient_pubkey = None
         if fee_lamports > 0:
-            treasury_pubkey = get_or_create_treasury_wallet(db, cfg)
+            try:
+                recipient_pubkey = get_fee_recipient_pubkey(cfg)
+            except ValueError:
+                return _skip("fee recipient not configured "
+                             "(FEE_RECIPIENT_PUBKEY)")
+            recipient_buf = bytearray(recipient_pubkey.encode("ascii"))
+            recipient_pubkey = bytes(recipient_buf).decode("ascii")
 
         accts = pumpfun.derive_trade_accounts(
             mint, wallet_pubkey, glob["fee_recipient"])
@@ -267,9 +283,9 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
         fee_transfer = None
         if fee_lamports > 0:
             instructions.append(build_transfer_instruction(
-                wallet_pubkey, treasury_pubkey, fee_lamports))
+                wallet_pubkey, recipient_pubkey, fee_lamports))
             fee_transfer = _fee_transfer_context(
-                wallet_pubkey, treasury_pubkey, fee_lamports)
+                wallet_pubkey, recipient_pubkey, fee_lamports)
         _check_instructions_only_allowed(instructions, fee_transfer)
         try:
             blockhash = rpc.get_latest_blockhash()
@@ -291,15 +307,17 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                 "coin_amount": coin_amount,
                 "fee_lamports": fee_lamports,
                 "fee_sol": lamports_to_sol(fee_lamports),
-                "treasury": treasury_pubkey,
                 "signing_bot": signing_bot["support_id"]}
     finally:
         # Wipe the seed IN PLACE the moment the trade is done —
         # success, refusal, or failure. Overwriting the buffer is
         # what actually scrubs memory; reassigning the variable
         # would only drop the reference and leave the bytes sitting.
+        # The fee recipient buffer is wiped the same way.
         if seed is not None:
             wipe_secret(seed)
+        if recipient_buf is not None:
+            wipe_secret(recipient_buf)
 
 
 def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
@@ -307,6 +325,11 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
+    # The fee recipient pubkey is held in this mutable buffer while
+    # the trade is built and sent, and wiped in place in the
+    # finally block below — the moment the trade is done. It is
+    # never logged.
+    recipient_buf = None
     try:
         try:
             global_info = rpc.get_account_info(pumpfun.global_pda()[0])
@@ -352,20 +375,30 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
                           // 10000)
         # The 3.65% trading fee comes out of the sale proceeds: the
         # fee is 3.65% of the expected SOL out, transferred to the
-        # SolEntry Treasury wallet in the same transaction as the
-        # sell. Proceeds are at least 99% of the quote even at worst
+        # fee recipient in the same transaction as the sell.
+        # Proceeds are at least 99% of the quote even at worst
         # slippage, so the transfer is always covered.
         fee_lamports = compute_fee_lamports(expected_sol)
-        treasury_pubkey = None
+        # The fee recipient comes from FEE_RECIPIENT_PUBKEY
+        # (fees.py) — fail closed when it is not configured: the
+        # trade is refused before anything is signed or sent,
+        # never a fallback wallet.
+        recipient_pubkey = None
         instructions = [pumpfun.build_sell_instruction(
             accts, token_base, min_sol_output)]
         fee_transfer = None
         if fee_lamports > 0:
-            treasury_pubkey = get_or_create_treasury_wallet(db, cfg)
+            try:
+                recipient_pubkey = get_fee_recipient_pubkey(cfg)
+            except ValueError:
+                return _skip("fee recipient not configured "
+                             "(FEE_RECIPIENT_PUBKEY)")
+            recipient_buf = bytearray(recipient_pubkey.encode("ascii"))
+            recipient_pubkey = bytes(recipient_buf).decode("ascii")
             instructions.append(build_transfer_instruction(
-                wallet_pubkey, treasury_pubkey, fee_lamports))
+                wallet_pubkey, recipient_pubkey, fee_lamports))
             fee_transfer = _fee_transfer_context(
-                wallet_pubkey, treasury_pubkey, fee_lamports)
+                wallet_pubkey, recipient_pubkey, fee_lamports)
         _check_instructions_only_allowed(instructions, fee_transfer)
         try:
             blockhash = rpc.get_latest_blockhash()
@@ -379,13 +412,15 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
         return {"status": "executed", "signature": confirmed,
                 "fee_lamports": fee_lamports,
                 "fee_sol": lamports_to_sol(fee_lamports),
-                "treasury": treasury_pubkey,
                 "signing_bot": signing_bot["support_id"]}
     finally:
         # Wipe the seed IN PLACE the moment the trade is done —
-        # success, refusal, or failure.
+        # success, refusal, or failure. The fee recipient buffer
+        # is wiped the same way.
         if seed is not None:
             wipe_secret(seed)
+        if recipient_buf is not None:
+            wipe_secret(recipient_buf)
 
 
 def execute_real_trade(bot, user_id: int, coin: str, side: str,
@@ -400,12 +435,12 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
     "real swap not available in v1". `amount` is SOL for buys and
     whole tokens for sells. `price` (USD) is accepted for the loop's
     protocol and not used for execution. Returns {"status":
-    "executed", "signature", "fee_lamports", "fee_sol",
-    "treasury", ...} or {"status": "skipped", "reason": ...}.
+    "executed", "signature", "fee_lamports", "fee_sol", ...} or
+    {"status": "skipped", "reason": ...}.
     The fee is 3.65% of the trade, taken in the same transaction
-    as the trade to the SolEntry Treasury wallet (fees.py) — a
-    trade that is skipped or fails never pays a fee. Never raises
-    for a refused trade.
+    as the trade to the fee recipient (fees.py) — a trade that is
+    skipped or fails never pays a fee. Never raises for a refused
+    trade.
     """
     if cfg.network != "devnet":
         return _skip("real execution requires devnet")

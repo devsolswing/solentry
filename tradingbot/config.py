@@ -79,6 +79,14 @@ class Config:
             "WEBAUTHN_ORIGIN", "http://localhost:5000")
         # Admin for /admin/donations. Empty = the first registered user.
         self.admin_username: str = env.get("ADMIN_USERNAME", "").strip()
+        # Fee + donation recipient: the ONE wallet that ever
+        # receives the 3.65% trading fee or a login-screen donation
+        # (James's own wallet, set in Railway). Fail-closed: when
+        # unset, empty, or not a valid base58 32-byte address, real
+        # trades refuse and the donate flow refuses — never fall
+        # back to a generated wallet, never a guessed address.
+        self.fee_recipient_pubkey: str = env.get(
+            "FEE_RECIPIENT_PUBKEY", "").strip()
         # Cloudflare Turnstile (bot challenge on login/signup). Both
         # keys must be set for the challenge to be enforced; with
         # either missing the app logs a warning at startup and

@@ -5,7 +5,8 @@ Schema:
   paper_trades, bots, bot_proposals, send_intents, activity,
   login_attempts (rate limiting), passkey_credentials (WebAuthn),
   webauthn_challenges (single-use ceremony challenges), trade_ledger,
-  treasury_wallet (the SolEntry Treasury wallet, one row), trade_fees
+  treasury_wallet (retired 2026-11-10: rows purged at startup by
+  _purge_generated_fee_wallets, never written), trade_fees
   (one row per 3.65% fee charged).
 """
 
@@ -234,10 +235,10 @@ CREATE TABLE IF NOT EXISTS signing_bots (
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
--- Project donation wallet: ONE wallet for the whole project, generated
--- once at first use, encrypted like user wallets. It belongs to the
--- project — never to any user's personal wallet, and never to James's
--- personal Phantom wallet.
+-- Project donation wallet: RETIRED 2026-11-10. All donations go
+-- only to the recipient in FEE_RECIPIENT_PUBKEY; the generated
+-- wallet's row is purged at startup and nothing ever writes here.
+-- The table stays (empty) so old databases keep their shape.
 CREATE TABLE IF NOT EXISTS donation_wallet (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     pubkey TEXT NOT NULL,
@@ -321,9 +322,11 @@ CREATE TABLE IF NOT EXISTS trade_ledger (
     FOREIGN KEY (bot_id) REFERENCES bots (id)
 );
 
--- The app's SolEntry Treasury wallet: ONE row (id=1), created once
--- at first use, key AES-256-GCM encrypted like a user wallet. It
--- receives the 3.65% fee from every trade, from every user.
+-- The app's former SolEntry Treasury wallet: RETIRED 2026-11-10.
+-- ALL fees go only to the recipient in FEE_RECIPIENT_PUBKEY; the
+-- generated wallet's row is purged at startup and nothing ever
+-- writes here. The table stays (empty) so old databases keep
+-- their shape.
 CREATE TABLE IF NOT EXISTS treasury_wallet (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     pubkey TEXT NOT NULL,
@@ -570,6 +573,30 @@ def _reset_paper_100_cad(conn: sqlite3.Connection) -> None:
         "VALUES ('paper_reset_100_cad', '2026-11-09')")
 
 
+def _purge_generated_fee_wallets(conn: sqlite3.Connection) -> None:
+    """One-time purge (2026-11-10): the app-generated Treasury and
+    donation wallets are retired — ALL fees and donations go only
+    to the recipient in FEE_RECIPIENT_PUBKEY. Any treasury_wallet
+    or donation_wallet row is deleted so neither wallet can ever
+    receive again. Runs once: a marker row in meta() records it, so
+    later restarts never touch these tables again. On a fresh
+    database there is nothing to purge. The tables stay (empty) —
+    nothing in the app writes to them any more."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'purge_generated_fee_wallets'"
+    ).fetchone()
+    if row:
+        return
+    conn.execute("DELETE FROM treasury_wallet")
+    conn.execute("DELETE FROM donation_wallet")
+    conn.execute(
+        "INSERT INTO meta (key, value) "
+        "VALUES ('purge_generated_fee_wallets', '2026-11-10')")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, column, ddl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(
@@ -588,5 +615,6 @@ def init_db(path: str) -> sqlite3.Connection:
     _backfill_builderbots(conn)
     _reset_paper_50_cad(conn)
     _reset_paper_100_cad(conn)
+    _purge_generated_fee_wallets(conn)
     conn.commit()
     return conn

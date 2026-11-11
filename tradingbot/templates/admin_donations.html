@@ -6,8 +6,8 @@
   <p class="muted">Every confirmed donation appears here — this page is how
   James is notified. Email notification is not configured (no mail service),
   so check this page for new donations.</p>
-  <p class="muted">Donation wallet (project wallet, not a personal wallet):
-    <span class="addr">{{ donation_address }}</span></p>
+  <p class="muted">Donation wallet:
+    <span class="addr">{{ donation_address_masked }}</span></p>
   {% if donations %}
   <table>
     <tr><th>When</th><th>Donor</th><th>Amount</th><th>Signature</th></tr>

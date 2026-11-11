@@ -49,7 +49,7 @@
      still fits on one screen. #}
   <details class="card fees-card" id="fees">
     <summary><span class="fees-total">Fees paid to SolEntry: <b><span data-fees-user-total>{{ "%.4f"|format(fees_total_sol) }} SOL</span></b></span> <span class="muted small">· SOL <span data-live-price="SOL">{% if sol_price_usd is not none %}${{ "%.4f"|format(sol_price_usd) }}{% else %}—{% endif %}</span></span></summary>
-    <p class="muted small">Every trade pays 3.65% to the SolEntry Treasury wallet. Fees are in SOL.</p>
+    <p class="muted small">Every trade pays a 3.65% fee in SOL. Fees are in SOL.</p>
     {% if fees_rows %}
     <ul class="fees-list">
       {% for fee in fees_rows %}

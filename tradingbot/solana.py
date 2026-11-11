@@ -306,8 +306,8 @@ def build_transfer_instruction(fee_payer_b58: str, to_b58: str,
     Data: [2, 0, 0, 0] (transfer discriminator) + lamports u64 LE.
     Accounts: the fee payer (signer, writable), then the
     destination (writable). The executor is the only caller, and it
-    only ever builds this for the 3.65% trading fee to the SolEntry
-    Treasury wallet — see executor._check_instructions_only_allowed.
+    only ever builds this for the 3.65% trading fee to the fee
+    recipient — see executor._check_instructions_only_allowed.
     """
     if lamports <= 0:
         raise ValueError("lamports must be positive")

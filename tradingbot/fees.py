@@ -1,4 +1,4 @@
-"""Trading fees: 3.65% on every trade, paid to the SolEntry Treasury wallet.
+"""Trading fees: 3.65% on every trade, paid to ONE recipient wallet.
 
 The fee (James, 2026-11-10):
   * 3.65% of every trade, going forward only — past trades are never
@@ -9,12 +9,16 @@ The fee (James, 2026-11-10):
     price; a paper fee recorded without a usable SOL price is
     converted at the live price when displayed, never at a guessed
     rate.
-  * The fee goes to ONE wallet for the whole app — the "SolEntry
-    Treasury" wallet, generated once at first use, encrypted like
-    user wallets. Only its public address is ever served or shown.
+  * The fee goes to ONE wallet for the whole app — the recipient in
+    the FEE_RECIPIENT_PUBKEY env var (James's own wallet, set in
+    Railway). There is no app-generated Treasury wallet any more:
+    the generated wallet is retired (its row is purged at startup
+    by db._purge_generated_fee_wallets) and must never receive
+    anything. The recipient address is never shown on any page
+    and never logged.
   * Real (devnet) trades: the fee travels in the SAME transaction
     as the trade itself — a single System-program transfer of
-    exactly the computed fee to the treasury wallet, appended after
+    exactly the computed fee to the fee recipient, appended after
     the pump.fun buy/sell instruction. Either the whole transaction
     confirms (trade + fee) or neither happens, so a fee is never
     taken from a trade that did not execute, and never taken twice
@@ -22,8 +26,12 @@ The fee (James, 2026-11-10):
   * The signing bot's destination restriction (executor.py) keeps
     exactly ONE exception for this: a System-program instruction is
     allowed only when it is the fee transfer — one instruction, to
-    the treasury wallet, for exactly the computed fee. Any other
+    the fee recipient, for exactly the computed fee. Any other
     transfer, destination, or amount is still refused.
+  * Fail-closed: when FEE_RECIPIENT_PUBKEY is unset, empty, or not
+    a valid base58 32-byte pubkey, real trades refuse and the
+    donate flow refuses — never a fallback wallet, never a guessed
+    address.
 
 Mainnet settlement rule (James, 2026-11-10): when the app launches
 on mainnet, after selling a coin the proceeds are converted to SOL
@@ -36,8 +44,7 @@ in plain words.
 
 from __future__ import annotations
 
-from .security import decrypt_secret_mutable, encrypt_secret, wipe_secret
-from .solana import base58_encode, generate_keypair, publickey_from_secret
+from .solana import is_valid_address
 
 # 3.65% — basis points, so fee math is exact integer math in
 # lamports (amount * 365 // 10000, rounded down).
@@ -79,46 +86,21 @@ def fee_sol_from_usd(fee_usd_amount: float, sol_price_usd) -> float | None:
     return fee_usd_amount / price
 
 
-def get_or_create_treasury_wallet(db, cfg) -> str:
-    """Return the SolEntry Treasury wallet's public address, creating
-    it once. Same pattern as the donation wallet: a fresh keypair,
-    AES-256-GCM encrypted at rest, one row (id=1). Only the public
-    address is ever returned — the key is never logged or displayed,
-    and the executor only ever needs the address (it builds a
-    transfer TO it; it never decrypts the treasury key)."""
-    row = db.execute(
-        "SELECT pubkey FROM treasury_wallet WHERE id = 1").fetchone()
-    if row:
-        return row["pubkey"]
-    _seed, pubkey, secret64 = generate_keypair()
-    try:
-        blob = encrypt_secret(secret64, cfg.encryption_key)
-    finally:
-        wipe_secret(_seed)
-        wipe_secret(secret64)
-    db.execute(
-        "INSERT INTO treasury_wallet (id, pubkey, encrypted_secret) "
-        "VALUES (1, ?, ?)", (pubkey, blob))
-    db.commit()
-    return pubkey
+def get_fee_recipient_pubkey(cfg) -> str:
+    """Return the fee/donation recipient pubkey from the
+    FEE_RECIPIENT_PUBKEY env var (Config.fee_recipient_pubkey).
 
-
-def treasury_wallet_decrypts(db, cfg) -> bool:
-    """Internal check: the stored treasury secret decrypts and
-    matches the stored pubkey. Used by tests; never exposes the
-    secret."""
-    row = db.execute(
-        "SELECT pubkey, encrypted_secret FROM treasury_wallet WHERE id = 1"
-    ).fetchone()
-    if not row:
-        return False
-    secret = decrypt_secret_mutable(row["encrypted_secret"],
-                                    cfg.encryption_key)
-    try:
-        ok = base58_encode(publickey_from_secret(secret)) == row["pubkey"]
-    finally:
-        wipe_secret(secret)
-    return ok
+    Raises ValueError when the var is unset, empty, or not a valid
+    base58 32-byte Solana address — the caller must fail closed
+    (real trades refuse, donations refuse), never fall back to a
+    generated wallet or a guessed address. No wallet is ever
+    created here; the recipient is configured, not generated."""
+    raw = (cfg.fee_recipient_pubkey or "").strip()
+    if not raw or not is_valid_address(raw):
+        raise ValueError(
+            "FEE_RECIPIENT_PUBKEY is not set or not a valid wallet "
+            "address")
+    return raw
 
 
 def record_fee(db, user_id: int, bot_id: int | None, coin: str,

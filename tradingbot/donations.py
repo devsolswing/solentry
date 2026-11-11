@@ -1,65 +1,50 @@
-"""Project donation wallet + donation records.
+"""Donations to the one fee/donation recipient (FEE_RECIPIENT_PUBKEY).
 
-The donation wallet is ONE wallet for the whole project: generated once
-at first use, encrypted with the same AES-256-GCM mechanism as user
-wallets, and stored in the DB. Its public address is the destination for
-donations. It belongs to the project — it is NOT any user's personal
-wallet and NEVER James's personal Phantom wallet.
+All donations from the login screen go ONLY to the recipient in the
+FEE_RECIPIENT_PUBKEY env var (James's own wallet, set in Railway) —
+the same single wallet that receives the 3.65% trading fee. There
+is no app-generated donation wallet any more: the generated wallet
+is retired (its row is purged at startup by
+db._purge_generated_fee_wallets) and must never receive anything.
 
 Donations are paid by the donor's own Phantom wallet (client-side,
 Phantom signs). The server only records confirmed donations: donor
 address, amount, signature, network. Each record is also the admin
 notification for James (see /admin/donations). No email is sent —
 no mail service is configured.
+
+Masking: the login page and the admin page show only the first 5
+characters of the recipient address + '*****' — the full address
+is never rendered in a template. The donor's browser still needs
+the full address to build the transfer, so /api/donate/info
+returns it for tx-building only, and Phantom shows the full
+destination when the donor approves — the masking is the page
+display, not the signed transaction (see the README).
 """
 
 from __future__ import annotations
 
-from .security import (decrypt_secret_mutable, encrypt_secret,
-                       wipe_secret)
-from .solana import (base58_decode, generate_keypair, is_valid_address,
-                     lamports_to_sol, sol_to_lamports)
+from .fees import get_fee_recipient_pubkey
+from .solana import (base58_decode, is_valid_address, lamports_to_sol,
+                     sol_to_lamports)
 
 
-def get_or_create_donation_wallet(app) -> str:
-    """Return the donation wallet's public address, creating it once."""
-    cfg = app.config["TRADINGBOT_CONFIG"]
-    db = app.config["DB"]
-    row = db.execute(
-        "SELECT pubkey FROM donation_wallet WHERE id = 1").fetchone()
-    if row:
-        return row["pubkey"]
-    _seed, pubkey, secret64 = generate_keypair()
-    try:
-        blob = encrypt_secret(secret64, cfg.encryption_key)
-    finally:
-        wipe_secret(_seed)
-        wipe_secret(secret64)
-    db.execute(
-        "INSERT INTO donation_wallet (id, pubkey, encrypted_secret) "
-        "VALUES (1, ?, ?)", (pubkey, blob))
-    db.commit()
-    return pubkey
+def get_donation_recipient(cfg) -> str:
+    """Return the donation recipient pubkey: the same single
+    recipient as the trading fee (FEE_RECIPIENT_PUBKEY).
+
+    Raises ValueError when it is unset, empty, or invalid — the
+    donate flow must refuse plainly, never fall back to a
+    generated wallet or a guessed address."""
+    return get_fee_recipient_pubkey(cfg)
 
 
-def donation_wallet_decrypts(app) -> bool:
-    """Internal check: the stored donation secret decrypts and matches
-    the stored pubkey. Used by tests; never exposes the secret."""
-    cfg = app.config["TRADINGBOT_CONFIG"]
-    db = app.config["DB"]
-    row = db.execute(
-        "SELECT pubkey, encrypted_secret FROM donation_wallet WHERE id = 1"
-    ).fetchone()
-    if not row:
-        return False
-    secret = decrypt_secret_mutable(row["encrypted_secret"],
-                                    cfg.encryption_key)
-    from .solana import publickey_from_secret, base58_encode
-    try:
-        ok = base58_encode(publickey_from_secret(secret)) == row["pubkey"]
-    finally:
-        wipe_secret(secret)
-    return ok
+def mask_address(address: str) -> str:
+    """Masked display for a wallet address: first 5 characters +
+    '*****'. The full address is never rendered on a page."""
+    if not address:
+        return ""
+    return address[:5] + "*****"
 
 
 def validate_donation_record(body: dict, network: str) -> tuple[str, int, str]:

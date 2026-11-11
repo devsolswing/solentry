@@ -1,19 +1,23 @@
-"""The 3.65% trading fee + SolEntry Treasury wallet (fees.py).
+"""The 3.65% trading fee + the FEE_RECIPIENT_PUBKEY recipient
+(fees.py).
 
-Covers: fee math (3.65% of several amounts, rounding), treasury
-wallet creation + encryption (the key is never in plaintext
-output), paper fee recording, the real-trade fee flow with mocked
-signing (no real SOL moves — the RPC is fake, the wallet is a
-throwaway keypair, and the signed transaction is decoded and
-checked), the home-page fee dropdown, the fee in buy/sell
-confirmations, no fee on failed/refused trades, and no fee on
-trades that predate the deploy.
+Covers: fee math (3.65% of several amounts, rounding), recipient
+resolution from the env var + fail-closed behaviour when it is
+unset or invalid, the purge of the retired generated wallets,
+paper fee recording, the real-trade fee flow with mocked signing
+(no real SOL moves — the RPC is fake, the wallet is a throwaway
+keypair, and the signed transaction is decoded and checked), the
+home-page fee dropdown, the fee in buy/sell confirmations, no fee
+on failed/refused trades, and no fee on trades that predate the
+deploy.
 """
 
 import tempfile
 import unittest
 
-from helpers import csrf, login, make_client, signup
+from helpers import (TEST_ENCRYPTION_KEY, TEST_FEE_RECIPIENT,
+                     TEST_SESSION_SECRET, csrf, login, make_client,
+                     signup)
 from test_executor import (ExecutorBase, FakePumpRpc, make_curve,
                            parse_signed_tx)
 from tradingbot import fees as fees_mod
@@ -54,26 +58,121 @@ class TestFeeMath(unittest.TestCase):
         self.assertEqual(fees_mod.MAINNET_SETTLEMENT, "SOL")
 
 
-class TestTreasuryWallet(ExecutorBase):
-    def test_created_once_and_encrypted(self):
-        pubkey = fees_mod.get_or_create_treasury_wallet(self.db, self.cfg)
-        self.assertTrue(pubkey)
-        # Second call returns the same wallet — no second row.
+class TestFeeRecipient(ExecutorBase):
+    def test_recipient_from_env_var(self):
+        # The one recipient comes from FEE_RECIPIENT_PUBKEY — the
+        # throwaway test address, never a real wallet.
         self.assertEqual(
-            fees_mod.get_or_create_treasury_wallet(self.db, self.cfg),
-            pubkey)
-        rows = self.db.execute(
-            "SELECT * FROM treasury_wallet").fetchall()
-        self.assertEqual(len(rows), 1)
-        # The stored secret is encrypted, not plaintext: it does not
-        # equal the pubkey, and it decrypts back to a key that
-        # matches the stored pubkey.
-        self.assertNotEqual(rows[0]["encrypted_secret"], pubkey)
-        self.assertTrue(
-            fees_mod.treasury_wallet_decrypts(self.db, self.cfg))
-        # The public address is a valid Solana address shape.
+            fees_mod.get_fee_recipient_pubkey(self.cfg),
+            TEST_FEE_RECIPIENT)
         from tradingbot.solana import is_valid_address
-        self.assertTrue(is_valid_address(pubkey))
+        self.assertTrue(is_valid_address(TEST_FEE_RECIPIENT))
+
+    def test_unset_var_fails_closed(self):
+        from tradingbot.config import Config
+        cfg = Config(env={
+            "SESSION_SECRET": TEST_SESSION_SECRET,
+            "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
+            "NETWORK": "devnet",
+            "DATABASE_PATH": self.tmp.name + "/other.db",
+        })
+        with self.assertRaises(ValueError):
+            fees_mod.get_fee_recipient_pubkey(cfg)
+
+    def test_empty_var_fails_closed(self):
+        from tradingbot.config import Config
+        cfg = Config(env={
+            "SESSION_SECRET": TEST_SESSION_SECRET,
+            "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
+            "NETWORK": "devnet",
+            "DATABASE_PATH": self.tmp.name + "/other.db",
+            "FEE_RECIPIENT_PUBKEY": "   ",
+        })
+        with self.assertRaises(ValueError):
+            fees_mod.get_fee_recipient_pubkey(cfg)
+
+    def test_invalid_var_fails_closed(self):
+        from tradingbot.config import Config
+        for bad in ("not-an-address", "x" * 32,
+                    TEST_FEE_RECIPIENT + "extra"):
+            cfg = Config(env={
+                "SESSION_SECRET": TEST_SESSION_SECRET,
+                "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
+                "NETWORK": "devnet",
+                "DATABASE_PATH": self.tmp.name + "/other.db",
+                "FEE_RECIPIENT_PUBKEY": bad,
+            })
+            with self.assertRaises(ValueError, msg=bad):
+                fees_mod.get_fee_recipient_pubkey(cfg)
+
+    def test_unset_recipient_refuses_real_trade(self):
+        # Fail closed: with no recipient configured the trade is
+        # refused before anything is signed or sent — never a
+        # fallback wallet, never a guessed address.
+        from tradingbot.config import Config
+        cfg = Config(env={
+            "SESSION_SECRET": TEST_SESSION_SECRET,
+            "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
+            "NETWORK": "devnet",
+            "DATABASE_PATH": self.tmp.name + "/other.db",
+        })
+        rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
+        rpc.fill_tokens = 1_000_000
+        result = execute_real_trade(self._bot(), self.user_id, self.mint,
+                                    "buy", 1.0, 100.0, self.db, cfg,
+                                    rpc_client=rpc)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("fee recipient", result["reason"])
+        self.assertEqual(rpc.sent, [])
+        self.assertEqual(fees_mod.user_fees(self.db, self.user_id), [])
+
+
+class TestRetiredGeneratedWallets(unittest.TestCase):
+    def test_purge_deletes_generated_wallet_rows(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app, _client = make_client(tmp.name)
+        db = app.config["DB"]
+        # Simulate a database from before the switch: rows left by
+        # the old generated Treasury / donation wallets.
+        db.execute(
+            "INSERT INTO treasury_wallet (id, pubkey, encrypted_secret) "
+            "VALUES (1, 'TreasuryPubkey', 'x')")
+        db.execute(
+            "INSERT INTO donation_wallet (id, pubkey, encrypted_secret) "
+            "VALUES (1, 'DonationPubkey', 'x')")
+        db.commit()
+        # The startup migration already ran once for this DB; clear
+        # its marker so the purge can run again, as it would on a
+        # live database that still holds the rows.
+        db.execute(
+            "DELETE FROM meta WHERE key = 'purge_generated_fee_wallets'")
+        db.commit()
+        from tradingbot.db import _purge_generated_fee_wallets
+        _purge_generated_fee_wallets(db)
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) n FROM treasury_wallet"
+                       ).fetchone()["n"], 0)
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) n FROM donation_wallet"
+                       ).fetchone()["n"], 0)
+        # The marker is set, so a second run is a no-op.
+        self.assertEqual(
+            db.execute("SELECT value FROM meta WHERE key = "
+                       "'purge_generated_fee_wallets'").fetchone()["value"],
+            "2026-11-10")
+
+    def test_fresh_database_has_no_generated_wallet_rows(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        app, _client = make_client(tmp.name)
+        db = app.config["DB"]
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) n FROM treasury_wallet"
+                       ).fetchone()["n"], 0)
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) n FROM donation_wallet"
+                       ).fetchone()["n"], 0)
 
 
 class TestPaperFees(unittest.TestCase):
@@ -184,12 +283,10 @@ class TestRealFeeFlow(ExecutorBase):
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["fee_lamports"], 36_500_000)
         self.assertAlmostEqual(result["fee_sol"], 0.0365)
-        treasury = result["treasury"]
-        self.assertTrue(treasury)
-        # The treasury wallet was created by the trade.
-        self.assertEqual(
-            fees_mod.get_or_create_treasury_wallet(self.db, self.cfg),
-            treasury)
+        # The fee goes to the configured recipient — the throwaway
+        # test address from FEE_RECIPIENT_PUBKEY — and the result
+        # carries no wallet address at all.
+        self.assertNotIn("treasury", result)
         parsed = parse_signed_tx(rpc.sent[0])
         programs = [i["program_id"] for i in parsed["instructions"]]
         self.assertIn(SYSTEM_PROGRAM, programs)
@@ -200,7 +297,7 @@ class TestRealFeeFlow(ExecutorBase):
                   if i["program_id"] == SYSTEM_PROGRAM][0]
         self.assertEqual(len(fee_ix["accounts"]), 2)
         self.assertEqual(fee_ix["accounts"][0], self.pubkey)
-        self.assertEqual(fee_ix["accounts"][1], treasury)
+        self.assertEqual(fee_ix["accounts"][1], TEST_FEE_RECIPIENT)
         self.assertEqual(fee_ix["data"][:4], bytes([2, 0, 0, 0]))
         self.assertEqual(
             int.from_bytes(fee_ix["data"][4:12], "little"), 36_500_000)
@@ -231,10 +328,13 @@ class TestRealFeeFlow(ExecutorBase):
                   if i["program_id"] == SYSTEM_PROGRAM][0]
         self.assertEqual(int.from_bytes(fee_ix["data"][4:12], "little"),
                          fee)
+        # …and it goes to the configured recipient, not any
+        # generated wallet.
+        self.assertEqual(fee_ix["accounts"][1], TEST_FEE_RECIPIENT)
 
     def test_skipped_real_trade_charges_no_fee(self):
-        # No bonding curve for this mint: refused, no fee, and the
-        # treasury wallet is not even created.
+        # No bonding curve for this mint: refused, no fee, and no
+        # wallet is ever generated.
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=None)
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
                                     "buy", 1.0, 100.0, self.db, self.cfg,
@@ -256,43 +356,43 @@ class TestFeeTransferRestriction(unittest.TestCase):
             _check_instructions_only_allowed([transfer])
 
     def test_fee_transfer_to_wrong_destination_refused(self):
-        treasury = "T" * 44
+        recipient = "T" * 44
         wrong = build_transfer_instruction(
             "A" * 44, "B" * 44, 36_500_000)
         with self.assertRaises(ValueError):
             _check_instructions_only_allowed(
-                [wrong], {"payer": "A" * 44, "treasury": treasury,
+                [wrong], {"payer": "A" * 44, "recipient": recipient,
                           "lamports": 36_500_000})
 
     def test_fee_transfer_wrong_amount_refused(self):
-        treasury = "T" * 44
+        recipient = "T" * 44
         transfer = build_transfer_instruction(
-            "A" * 44, treasury, 1_000_000)
+            "A" * 44, recipient, 1_000_000)
         with self.assertRaises(ValueError):
             _check_instructions_only_allowed(
-                [transfer], {"payer": "A" * 44, "treasury": treasury,
+                [transfer], {"payer": "A" * 44, "recipient": recipient,
                              "lamports": 36_500_000})
 
     def test_two_fee_transfers_refused(self):
-        treasury = "T" * 44
+        recipient = "T" * 44
         first = build_transfer_instruction(
-            "A" * 44, treasury, 36_500_000)
+            "A" * 44, recipient, 36_500_000)
         second = build_transfer_instruction(
-            "A" * 44, treasury, 36_500_000)
+            "A" * 44, recipient, 36_500_000)
         with self.assertRaises(ValueError):
             _check_instructions_only_allowed(
                 [first, second],
-                {"payer": "A" * 44, "treasury": treasury,
+                {"payer": "A" * 44, "recipient": recipient,
                  "lamports": 36_500_000})
 
     def test_exact_fee_transfer_allowed(self):
-        treasury = "T" * 44
+        recipient = "T" * 44
         transfer = build_transfer_instruction(
-            "A" * 44, treasury, 36_500_000)
+            "A" * 44, recipient, 36_500_000)
         # No raise: the one exact fee transfer is the only allowed
         # System-program instruction.
         _check_instructions_only_allowed(
-            [transfer], {"payer": "A" * 44, "treasury": treasury,
+            [transfer], {"payer": "A" * 44, "recipient": recipient,
                          "lamports": 36_500_000})
 
 
@@ -318,12 +418,9 @@ class TestFeeHomePage(unittest.TestCase):
         self.assertIn("0.0000 SOL", html)
         self.assertIn("No fees paid yet", html)
         self.assertIn('data-live-price="SOL"', html)
-        # The Treasury wallet address is never shown on the home
-        # page (James, 2026-11-10) — the dropdown names the wallet,
-        # not its address.
-        treasury = fees_mod.get_or_create_treasury_wallet(
-            self.db, self.app.config["TRADINGBOT_CONFIG"])
-        self.assertNotIn(treasury, html)
+        # The fee recipient address is never shown on the home page
+        # (James, 2026-11-10).
+        self.assertNotIn(TEST_FEE_RECIPIENT, html)
 
     def test_home_lists_fee_payments(self):
         fees_mod.record_fee(self.db, self.user_id, None, "SOL", "buy",
@@ -446,10 +543,11 @@ class TestAppWideTotal(unittest.TestCase):
         # The user's own total in the dropdown, as a live span.
         self.assertIn("data-fees-user-total", html)
         self.assertIn("0.0100 SOL", html)
-        # The Treasury wallet address is never shown on the home
-        # page — the dropdown names the wallet, not its address.
-        self.assertIn("SolEntry Treasury wallet.", html)
-        self.assertNotIn("SolEntry Treasury wallet (", html)
+        # The recipient address is never shown on the home page,
+        # and no wallet is named as the fee destination.
+        self.assertNotIn(TEST_FEE_RECIPIENT, html)
+        self.assertNotIn("Treasury", html)
+        self.assertIn("Every trade pays a 3.65% fee in SOL.", html)
 
     def test_live_js_polls_fees_every_five_seconds(self):
         js = open("tradingbot/static/live.js").read()
