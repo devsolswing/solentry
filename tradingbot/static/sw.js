@@ -6,7 +6,7 @@
  * network first, so prices, balances and auth state are never stale.
  * A trading app must never show yesterday's numbers.
  */
-const CACHE = "solentry-v2";
+const CACHE = "solentry-v3";
 const SHELL = [
   "/static/style.css",
   "/static/fox-red-480.jpg",

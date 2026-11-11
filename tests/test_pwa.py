@@ -56,15 +56,16 @@ class TestPwa(unittest.TestCase):
 
     def test_service_worker_cache_version(self):
         # The installed app caches the shell under a versioned name.
-        # v2 (2026-11-11): the old v1 cache held the stale flat foxes,
-        # so the installed Android app kept showing them. A new
-        # version makes the worker fetch the fresh foxes on install,
-        # and the activate handler deletes the old cache.
+        # v3 (2026-11-11): the old v2 cache held the pre-Clyde /
+        # pre-Security-bot shell, so the installed Android app kept
+        # showing the old Page 6 preset list. A new version makes
+        # the worker fetch the fresh shell on install, and the
+        # activate handler deletes the old cache.
         resp = self.client.get("/sw.js")
         self.assertEqual(resp.status_code, 200)
         body = resp.get_data(as_text=True)
-        self.assertIn('"solentry-v2"', body)
-        self.assertNotIn("solentry-v1", body)
+        self.assertIn('"solentry-v3"', body)
+        self.assertNotIn("solentry-v2", body)
 
     def test_base_template_has_pwa_tags(self):
         resp = self.client.get("/login")
