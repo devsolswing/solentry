@@ -35,16 +35,32 @@ from tradingbot.silent_loop import run_once
 from tradingbot.solana import (SYSTEM_PROGRAM, TOKEN_PROGRAM, base58_decode,
                                base58_encode, generate_keypair)
 
-BUY_DISCRIMINATOR = bytes.fromhex("66063d1201daebea")
-SELL_DISCRIMINATOR = bytes.fromhex("33e685a4017f83ad")
+BUY_DISCRIMINATOR = bytes.fromhex("07051dc4f5176550")
+SELL_DISCRIMINATOR = bytes.fromhex("1c92de7726c469d5")
 FAKE_SIGNATURE = "5" * 43
 BLOCKHASH = "11111111111111111111111111111111"
 
 
+# The 8 buyback fee recipients from the live devnet global
+# account (public program config, not a secret). The v3 buy/sell
+# passes one of them (the first) as buyback_fee_recipient.
+BUYBACK_RECIPIENTS = [
+    "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD",
+    "9M4giFFMxmFGXtc3feFzRai56WbBqehoSeRE5GK7gf7",
+    "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
+    "3BpXnfJaUTiwXnJNe7Ej1rcbzqTTQUvLShZaWazebsVR",
+    "5cjcW9wExnJJiqgLjq7DEG75Pm6JBgE1hNv4B2vHXUW6",
+    "EHAAiTxcdDwQ3U4bU6YcMsQGaekdzLS3B5SmYo46kJtL",
+    "5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD",
+    "A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW",
+]
+
+
 def make_global(fee_bps=95, fee_recipient=None):
-    """113-byte pump.fun global account with the known devnet
-    constants."""
-    data = bytearray(113)
+    """1088-byte pump.fun global account with the known devnet
+    constants, including the 8 buyback fee recipients at offset
+    741 and buyback_basis_points (1000) at 997."""
+    data = bytearray(1088)
     data[8] = 1
     data[41:73] = base58_decode(
         fee_recipient or "11111111111111111111111111111111")
@@ -53,6 +69,9 @@ def make_global(fee_bps=95, fee_recipient=None):
     data[89:97] = (793_100_000_000_000).to_bytes(8, "little")
     data[97:105] = (1_000_000_000_000_000).to_bytes(8, "little")
     data[105:113] = fee_bps.to_bytes(8, "little")
+    for i, recipient in enumerate(BUYBACK_RECIPIENTS):
+        data[741 + i * 32:741 + (i + 1) * 32] = base58_decode(recipient)
+    data[997:1005] = (1000).to_bytes(8, "little")
     return bytes(data)
 
 
@@ -87,6 +106,11 @@ class FakePumpRpc:
         self._accounts[global_addr] = {
             "data": make_global(), "lamports": 0, "executable": False,
             "owner": pumpfun.PUMP_PROGRAM}
+        # The mint account, owned by the SPL Token program (the
+        # executor reads the owner to pick the token program).
+        self._accounts[mint] = {
+            "data": b"", "lamports": 0, "executable": False,
+            "owner": TOKEN_PROGRAM}
         if curve is not None:
             curve_addr, _ = pumpfun.bonding_curve_pda(mint)
             self._accounts[curve_addr] = {
@@ -206,8 +230,10 @@ class ExecutorBase(unittest.TestCase):
 
 class TestPumpfunMath(unittest.TestCase):
     def test_discriminators_match_known_values(self):
-        self.assertEqual(pumpfun.discriminator("buy"), BUY_DISCRIMINATOR)
-        self.assertEqual(pumpfun.discriminator("sell"), SELL_DISCRIMINATOR)
+        self.assertEqual(pumpfun.discriminator("buy_v3"),
+                         BUY_DISCRIMINATOR)
+        self.assertEqual(pumpfun.discriminator("sell_v3"),
+                         SELL_DISCRIMINATOR)
 
     def test_global_pda_matches_devnet(self):
         addr, _bump = pumpfun.global_pda()
@@ -220,6 +246,36 @@ class TestPumpfunMath(unittest.TestCase):
                          1_073_000_000_000_000)
         self.assertEqual(glob["initial_virtual_sol_reserves"], 300_000_000)
         self.assertEqual(glob["fee_basis_points"], 95)
+
+    def test_parse_global_buyback_recipients(self):
+        glob = pumpfun.parse_global(make_global())
+        self.assertEqual(glob["buyback_basis_points"], 1000)
+        self.assertEqual(len(glob["buyback_fee_recipients"]), 8)
+        self.assertEqual(glob["buyback_fee_recipients"],
+                         BUYBACK_RECIPIENTS)
+
+    def test_buy_v3_instruction_has_17_accounts(self):
+        accts = pumpfun.derive_trade_accounts(
+            "11111111111111111111111111111111",
+            "11111111111111111111111111111111",
+            TOKEN_PROGRAM, BUYBACK_RECIPIENTS[0])
+        buy = pumpfun.build_buy_instruction(accts, 1000, 2000)
+        self.assertEqual(buy["program_id"], pumpfun.PUMP_PROGRAM)
+        self.assertEqual(buy["data"][:8], BUY_DISCRIMINATOR)
+        self.assertEqual(len(buy["accounts"]), 17)
+        # TRADE_V3.md order: global, base_mint, quote_mint, ...
+        self.assertEqual(buy["accounts"][0]["pubkey"], accts["global"])
+        self.assertEqual(buy["accounts"][1]["pubkey"], accts["base_mint"])
+        self.assertEqual(buy["accounts"][2]["pubkey"], pumpfun.WSOL_MINT)
+        self.assertEqual(buy["accounts"][13]["pubkey"],
+                         BUYBACK_RECIPIENTS[0])
+        self.assertTrue(buy["accounts"][13]["is_writable"])
+        self.assertTrue(buy["accounts"][8]["is_signer"])  # user
+        sell = pumpfun.build_sell_instruction(accts, 1000, 2000)
+        self.assertEqual(sell["data"][:8], SELL_DISCRIMINATOR)
+        self.assertEqual(len(sell["accounts"]), 17)
+        self.assertEqual([a["pubkey"] for a in sell["accounts"]],
+                         [a["pubkey"] for a in buy["accounts"]])
 
     def test_buy_sell_quotes_are_sane(self):
         curve = pumpfun.parse_bonding_curve(make_curve())

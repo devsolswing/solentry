@@ -290,10 +290,14 @@ def find_program_address(seeds: list, program_id: str) -> tuple[str, int]:
     raise ValueError("no program-derived address found")
 
 
-def find_associated_token_address(owner_b58: str, mint_b58: str) -> str:
-    """The associated token account for (owner, mint)."""
+def find_associated_token_address(owner_b58: str, mint_b58: str,
+                                  token_program_b58: str = TOKEN_PROGRAM
+                                  ) -> str:
+    """The associated token account for (owner, mint) under the
+    given token program (SPL Token by default; Token-2022 for
+    create_v2 mints)."""
     address, _bump = find_program_address(
-        [base58_decode(owner_b58), base58_decode(TOKEN_PROGRAM),
+        [base58_decode(owner_b58), base58_decode(token_program_b58),
          base58_decode(mint_b58)],
         ASSOCIATED_TOKEN_PROGRAM)
     return address

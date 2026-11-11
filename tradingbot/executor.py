@@ -260,22 +260,37 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
             recipient_buf = bytearray(recipient_pubkey.encode("ascii"))
             recipient_pubkey = bytes(recipient_buf).decode("ascii")
 
+        # v3 trades need the mint's token program (from the mint
+        # account's owner) and one of the global account's buyback
+        # fee recipients. Fail closed when either is unavailable —
+        # never a guessed token program or recipient.
+        buyback_recipients = glob.get("buyback_fee_recipients")
+        if not buyback_recipients:
+            return _skip("buyback fee recipient unavailable")
+        try:
+            mint_info = rpc.get_account_info(mint)
+        except Exception:
+            mint_info = None
+        if not mint_info:
+            return _skip("mint account unavailable")
+        token_program = pumpfun.token_program_for_owner(
+            mint_info.get("owner") or "")
         accts = pumpfun.derive_trade_accounts(
-            mint, wallet_pubkey, glob["fee_recipient"])
+            mint, wallet_pubkey, token_program, buyback_recipients[0])
         instructions = []
         ata_before = 0
         try:
-            ata_info = rpc.get_account_info(accts["associated_user"])
+            ata_info = rpc.get_account_info(accts["associated_base_user"])
         except Exception:
             ata_info = None
         if ata_info is None:
             instructions.append(pumpfun.build_create_ata_instruction(
-                wallet_pubkey, accts["associated_user"], wallet_pubkey,
-                mint))
+                wallet_pubkey, accts["associated_base_user"], wallet_pubkey,
+                mint, token_program))
         else:
             try:
                 ata_before = rpc.get_token_account_balance(
-                    accts["associated_user"])
+                    accts["associated_base_user"])
             except Exception:
                 ata_before = 0
         instructions.append(pumpfun.build_buy_instruction(
@@ -299,7 +314,7 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
         coin_amount = tokens / pumpfun.TOKEN_BASE
         try:
             ata_after = rpc.get_token_account_balance(
-                accts["associated_user"])
+                accts["associated_base_user"])
             coin_amount = (ata_after - ata_before) / pumpfun.TOKEN_BASE
         except Exception:
             pass
@@ -359,10 +374,25 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
         token_base = int(round(token_amount * pumpfun.TOKEN_BASE))
         if token_base <= 0:
             return _skip("amount too small to sell")
-        accts = pumpfun.derive_trade_accounts(
-            mint, wallet_pubkey, glob["fee_recipient"])
+        # v3 trades need the mint's token program (from the mint
+        # account's owner) and one of the global account's buyback
+        # fee recipients. Fail closed when either is unavailable.
+        buyback_recipients = glob.get("buyback_fee_recipients")
+        if not buyback_recipients:
+            return _skip("buyback fee recipient unavailable")
         try:
-            held = rpc.get_token_account_balance(accts["associated_user"])
+            mint_info = rpc.get_account_info(mint)
+        except Exception:
+            mint_info = None
+        if not mint_info:
+            return _skip("mint account unavailable")
+        token_program = pumpfun.token_program_for_owner(
+            mint_info.get("owner") or "")
+        accts = pumpfun.derive_trade_accounts(
+            mint, wallet_pubkey, token_program, buyback_recipients[0])
+        try:
+            held = rpc.get_token_account_balance(
+                accts["associated_base_user"])
         except Exception:
             return _skip("token balance unavailable")
         if token_base > held:
