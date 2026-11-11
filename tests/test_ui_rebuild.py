@@ -230,7 +230,10 @@ class TestHomePage(UiBase):
         html = self._html("/wallet")
         self.assertIn("TOTAL PORTFOLIO VALUE", html)
         self.assertIn("fox-logo", html)
-        self.assertIn("data:image/jpeg;base64,", html)
+        # The home fox is the static file now (byte-identical to the
+        # base64 blob it replaced) — no embedded image on the page.
+        self.assertIn("fox-red-480.jpg", html)
+        self.assertNotIn("data:image/jpeg;base64,", html)
         self.assertIn("SolEntry fox logo", html)
         self.assertIn("HOLDINGS", html)
         self.assertIn("holdings-panel", html)

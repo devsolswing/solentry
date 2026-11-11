@@ -202,7 +202,10 @@ class TestWalletIsHomepage(HomeBase):
         self._choose_mode("paper")
         html = self._html("/wallet")
         # Home is the fox layout now; the door art lives on /wallet/details.
-        self.assertIn("data:image/jpeg;base64,", html)
+        # The home fox is the static file (fox-red-480.jpg), not an
+        # embedded base64 blob — no base64 image on the home page.
+        self.assertNotIn("data:image/jpeg;base64,", html)
+        self.assertIn("fox-red-480.jpg", html)
         self.assertIn("SolEntry fox logo", html)
         self.assertIn("🇨🇦", html)
         details = self._html("/wallet/details")
