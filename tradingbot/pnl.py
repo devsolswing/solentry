@@ -25,6 +25,14 @@ RANGES = {
     "1h": ("1 hour", 3600),
 }
 
+# Short labels for the homepage chart's duration row (1h / 1d / 1w /
+# 1m / 1y / All) — same ranges as RANGES, short enough for one row
+# on a phone.
+HOME_RANGE_LABELS = {
+    "1h": "1h", "1d": "1d", "1w": "1w", "1mo": "1m", "1y": "1y",
+    "all": "All",
+}
+
 _FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 

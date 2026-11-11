@@ -244,8 +244,18 @@ class TestCoinDetail(HomeBase):
             return_value={"buys": 120, "sells": 80,
                           "buys_pct": 60.0, "sells_pct": 40.0})
         self.flow_patch.start()
+        self.ohlc_patch = mock.patch.object(
+            routes, "fetch_ohlc",
+            return_value={"candles": [
+                {"ts": 1790000000000, "open": 80.0, "high": 82.0,
+                 "low": 79.0, "close": 81.0},
+                {"ts": 1790001800000, "open": 81.0, "high": 83.0,
+                 "low": 80.5, "close": 82.0}],
+                "interval": 1800, "error": None})
+        self.ohlc_patch.start()
         self.addCleanup(self.chart_patch.stop)
         self.addCleanup(self.flow_patch.stop)
+        self.addCleanup(self.ohlc_patch.stop)
 
     def test_detail_renders_ranges_high_low_and_flow(self):
         html = self._html("/coins/SOL/detail")
@@ -289,14 +299,20 @@ class TestCoinDetail(HomeBase):
     def test_detail_no_chart_data_says_no_data_yet(self):
         with mock.patch.object(routes, "fetch_market_chart",
                                return_value={"points": [], "error":
-                                             "no chart history"}):
+                                             "no chart history"}), \
+                mock.patch.object(
+                    routes, "fetch_ohlc",
+                    return_value={"candles": [], "interval": None,
+                                  "error": "no chart history"}):
             html = self._html("/coins/SOL/detail")
         self.assertIn("No data yet", html)
-        # The historical range chart draws nothing when it has no
-        # points (its SVG carries the P&L-chart label). The separate
-        # live chart is still on the page — an empty line that fills
-        # with real ticks once they arrive, never invented history.
-        self.assertNotIn('aria-label="P&amp;L chart"', html)
+        # Neither chart view draws anything when it has no candles
+        # (the candlestick SVG carries the Candlestick-chart label;
+        # the line SVG carries the Price-chart label). The live
+        # price block is still on the page — a price that fills with
+        # real ticks once they arrive, never invented history.
+        self.assertNotIn('aria-label="Candlestick chart"', html)
+        self.assertNotIn('aria-label="Price chart"', html)
         self.assertIn('id="live-chart"', html)
         self.assertIn("Waiting for the first live tick", html)
         self.assertIn("24h high", html)

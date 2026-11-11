@@ -1,6 +1,5 @@
 /* Live price ticks on the coin detail page: polls the tick endpoint
-   once a second while the page is visible, updates the big price,
-   appends the tick to the live chart (last ~120 ticks, 2 minutes),
+   once a second while the page is visible, updates the big price
    and shows when the price was actually fetched. Pauses while the
    tab is hidden so the feed is not hammered for a page nobody is
    looking at. Prices are never invented: on a failed tick the last
@@ -9,13 +8,22 @@
    tick's own as_of — for a cached feed price that is when the
    price was fetched, not when this tick arrived.
 
+   The CHART does not redraw every second. The detail chart is a
+   real candlestick chart, rendered server-side; live ticks only
+   re-render it at most once per candle interval (a new fetch of
+   the candles endpoint, which re-buckets the current candle from
+   the latest data). Between renders the chart stands as-is and
+   the caption says when it last refreshed. The price number above
+   it still updates every second — that is the price, not the
+   chart.
+
    When the app WebSocket is up (live.js sets
    window.__solentryLiveUp), the socket owns the ticks: this poller
    stands down and live.js feeds ticks into the same applyTick
-   below, so the price, chart and note update from the socket
-   instead. When the socket drops, the flag clears and this poller
-   resumes on its next second — the REST fallback, with no gap in
-   the chart. */
+   below, so the price and note update from the socket instead.
+   When the socket drops, the flag clears and this poller resumes
+   on its next second — the REST fallback, with no gap in the
+   price. */
 (function () {
   'use strict';
   var chart = document.getElementById('live-chart');
@@ -24,36 +32,63 @@
   if (!url) return;
   var priceEl = document.getElementById('live-price');
   var updatedEl = document.getElementById('live-updated');
-  var line = document.getElementById('live-chart-line');
   var note = document.getElementById('live-chart-note');
-  var points = [];  /* last prices, one per second */
-  var MAX_POINTS = 120;
+  var detailChart = document.getElementById('detail-chart');
   var lastOkAt = null;
   var timer = null;
+  /* The server-rendered chart is fresh on page load, so the first
+     live re-render waits a full candle interval. */
+  var lastChartRefresh = Date.now();
 
   function fmtTime(d) {
     return d.toLocaleTimeString([], {
       hour: '2-digit', minute: '2-digit', second: '2-digit'});
   }
 
-  function draw() {
-    if (!line || points.length === 0) return;
-    var min = Math.min.apply(null, points);
-    var max = Math.max.apply(null, points);
-    var span = max - min;
-    if (span === 0) span = Math.abs(max) * 0.001 || 1;
-    var pts = points.map(function (p, i) {
-      var x = points.length === 1 ? 50 : (i / (MAX_POINTS - 1)) * 100;
-      var y = 38 - ((p - min) / span) * 36;
-      return x.toFixed(2) + ',' + y.toFixed(2);
-    });
-    line.setAttribute('points', pts.join(' '));
+  /* Re-render the candlestick chart at most once per candle
+     interval. Fetches fresh candle SVGs from the server (same data
+     as the page load) and swaps them in; the toggle state is kept
+     because the swap only replaces the view contents, not the
+     buttons. A failed fetch leaves the last chart standing. */
+  function maybeRefreshChart() {
+    if (!detailChart) return;
+    var interval = parseInt(
+      detailChart.dataset.chartInterval || '0', 10);
+    if (!interval || interval <= 0) return;
+    var candlesUrl = detailChart.dataset.candlesUrl;
+    if (!candlesUrl) return;
+    var now = Date.now();
+    if (now - lastChartRefresh < interval * 1000) return;
+    lastChartRefresh = now;
+    fetch(candlesUrl, { credentials: 'same-origin' })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (!data || !data.ok) return;
+        var candlesEl = detailChart.querySelector(
+          '[data-chart-view="candles"]');
+        var lineEl = detailChart.querySelector(
+          '[data-chart-view="line"]');
+        if (candlesEl && data.candles_svg) {
+          candlesEl.innerHTML = data.candles_svg;
+        }
+        if (lineEl && data.line_svg) {
+          lineEl.innerHTML = data.line_svg;
+        }
+        var chartUpdated = document.getElementById('chart-updated');
+        if (chartUpdated && data.updated) {
+          var d = new Date(data.updated);
+          chartUpdated.textContent = isNaN(d.getTime())
+            ? data.updated : fmtTime(d);
+        }
+      })
+      .catch(function () { /* next tick retries; chart stands */ });
   }
 
   /* One validated tick, from the REST poll or the live WebSocket:
-     update the price, the "last updated" time, the chart and the
-     note. asOf is a Date (the tick's own time); source names the
-     feed the tick came from. */
+     update the price, the "last updated" time and the note, then
+     let the chart re-render if a candle interval has passed.
+     asOf is a Date (the tick's own time); source names the feed
+     the tick came from. */
   function applyTick(price, asOf, source) {
     if (typeof price !== 'number' || isNaN(price)) return;
     if (!(asOf instanceof Date) || isNaN(asOf.getTime())) {
@@ -62,14 +97,10 @@
     lastOkAt = asOf;
     if (priceEl) priceEl.textContent = '$' + price.toFixed(4);
     if (updatedEl) updatedEl.textContent = fmtTime(asOf);
-    points.push(price);
-    if (points.length > MAX_POINTS) points.shift();
-    draw();
     if (note) {
-      note.textContent = 'Live · ' + points.length + ' tick'
-        + (points.length === 1 ? '' : 's')
-        + ' · source: ' + (source || 'feed');
+      note.textContent = 'Live · source: ' + (source || 'feed');
     }
+    maybeRefreshChart();
   }
 
   /* The live feed (live.js) calls this for every socket tick. */

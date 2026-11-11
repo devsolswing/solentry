@@ -57,6 +57,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
+from collections import deque
 
 log = logging.getLogger("tradingbot.livefeed")
 
@@ -133,6 +134,14 @@ class LiveFeed:
         self._pending: dict = {}
         # mint -> subscriber count (browsers watching it).
         self._mint_subs: dict = {}
+        # coin_id -> deque of (epoch_seconds, price): every ACCEPTED
+        # tick, oldest first, capped at the last ~2,000 per coin
+        # (about 3 hours at the 5-second mint poll). Rejected ticks
+        # never enter it. This is the recorded history the
+        # candlestick chart builds mint candles from — it is
+        # in-memory only, so a fresh deploy starts with no history
+        # and the page says the candles are still building.
+        self._history: dict = {}
         self._stop = threading.Event()
         self._started = False
         self._threads: list = []
@@ -213,6 +222,11 @@ class LiveFeed:
                 elif last is not None and key in last:
                     entry[key] = last[key]
             self._ticks[coin_id] = entry
+            history = self._history.get(coin_id)
+            if history is None:
+                history = deque(maxlen=2000)
+                self._history[coin_id] = history
+            history.append((now, price))
             return True
 
     # --- reads ------------------------------------------------------------
@@ -238,6 +252,14 @@ class LiveFeed:
             ticks = {cid: self._ticks[cid] for cid in ids
                      if cid in self._ticks}
         return {cid: self._tick_dict(t, now) for cid, t in ticks.items()}
+
+    def history(self, coin_id: str) -> list:
+        """Recorded (epoch_seconds, price) ticks for a coin, oldest
+        first. Only accepted ticks are recorded; a coin nobody has
+        watched yet returns []."""
+        with self._lock:
+            ticks = self._history.get(coin_id)
+            return list(ticks) if ticks else []
 
     def is_stale(self, coin_id: str, now: float | None = None) -> bool:
         now = time.time() if now is None else now

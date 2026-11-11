@@ -282,13 +282,17 @@ class TestHomePage(UiBase):
         self.assertIn("overflow: hidden", css)
         self.assertIn(".holdings-panel", css)
 
-    def test_home_chart_moved_to_pnl_no_range_switches(self):
-        # Home lift: the portfolio chart (and its range switches)
-        # moved off the home page to make room for the half-screen
-        # holdings list. The full chart lives on the P&L page.
+    def test_home_chart_is_back_with_duration_options(self):
+        # Candlestick build (2026-11-10, supersedes the home lift's
+        # "chart moved off home"): the user ordered a chart back in
+        # the home balance area, as a candlestick chart with duration
+        # options. The old portfolio-chart / chart-ranges classes
+        # stay gone; the full chart still lives on the P&L page.
         self._choose_mode("paper")
         html = self._html("/wallet?range=1h")
-        self.assertNotIn('href="/wallet?range=1h"', html)
+        self.assertIn('href="/wallet?range=1h"', html)
+        self.assertIn('id="home-chart"', html)
+        self.assertIn("home-chart-durations", html)
         self.assertNotIn("chart-ranges", html)
         self.assertNotIn("portfolio-chart", html)
         # The "Full chart ›" link opens the P&L page.
@@ -299,8 +303,9 @@ class TestHomePage(UiBase):
         self._choose_mode("paper")
         html = self._html("/wallet")
         self.assertIn("change-24h", html)
-        # No recorded snapshots yet: no invented change. The chart
-        # itself lives on the P&L page now, not on home.
+        # No recorded snapshots yet: no invented change. The compact
+        # home chart says there is not enough history yet instead of
+        # drawing a chart; the full chart lives on the P&L page.
         self.assertIn("—", html)
         self.assertNotIn("No chart data yet", html)
 

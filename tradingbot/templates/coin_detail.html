@@ -7,10 +7,7 @@
   <p class="muted small">{{ mode_label }}</p>
   <p class="big-num" id="live-price" data-live-price="{{ coin.coin_id }}">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>
   <div class="live-chart" id="live-chart" data-tick-url="{{ url_for('coin_tick', coin_id=coin.coin_id) }}" data-coin-id="{{ coin.coin_id }}">
-    <p class="muted small live-status">Live — updating every second · Last updated <span id="live-updated">—</span></p>
-    <svg id="live-chart-svg" viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Live price chart, last 2 minutes">
-      <polyline id="live-chart-line" fill="none" stroke="#ffd700" stroke-width="1.5" points="" />
-    </svg>
+    <p class="muted small live-status">Live price · Last updated <span id="live-updated">—</span></p>
     <p class="muted small" id="live-chart-note">Waiting for the first live tick…</p>
   </div>
   <p class="muted small">24h <span data-live-change-24h="{{ coin.coin_id }}">{% if coin.change_24h is not none %}<span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span> · Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
@@ -20,10 +17,17 @@
     <a class="range-btn{{ ' active' if key == range_key else '' }}" href="{{ url_for('coin_detail', coin_id=coin.coin_id, range=key) }}">{{ label }}</a>
     {% endfor %}
   </div>
-  <div class="detail-chart">
-    {% if chart_svg %}{{ chart_svg|safe }}{% else %}<p class="muted">No data yet — no chart history for this range.</p>{% endif %}
+  <div class="detail-chart" id="detail-chart" data-chart-block data-chart-interval="{{ chart_interval or '' }}" data-chart-range="{{ range_key }}" data-candles-url="{{ url_for('coin_candles', coin_id=coin.coin_id, range=range_key) }}">
+    {% if candles_svg %}
+    <button class="btn small chart-view-toggle" id="chart-view-toggle" type="button" data-chart-toggle aria-label="Switch chart view">📈 Line</button>
+    <div class="chart-view chart-view-candles" data-chart-view="candles">{{ candles_svg|safe }}</div>
+    <div class="chart-view chart-view-line hidden" data-chart-view="line">{{ line_svg|safe }}</div>
+    <p class="muted small">Candlesticks · {{ chart_interval_label }} each · chart refreshes at most once per candle · last refresh <span id="chart-updated">—</span></p>
+    {% else %}
+    {% if coin.is_mint %}<p class="muted">Candles are still building — no chart history for this token yet. Keep this page open and candles form from live prices.</p>{% else %}<p class="muted">No data yet — no chart history for this range.</p>{% endif %}
+    {% endif %}
   </div>
-  {% if chart_error and not chart_svg %}<p class="muted small">Chart: {{ chart_error }}</p>{% endif %}
+  {% if chart_error and not candles_svg %}<p class="muted small">Chart: {{ chart_error }}</p>{% endif %}
 
   <div class="detail-stats">
     <p>24h high: <strong>{% if high_24h is not none %}${{ "%.4f"|format(high_24h) }}{% else %}<span class="muted">—</span>{% endif %}</strong></p>

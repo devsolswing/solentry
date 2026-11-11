@@ -20,7 +20,7 @@
 <div class="coin-list">
   {% for row in coin_rows %}
   <a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
-    <span class="coin-name"><strong>{{ row.name }}</strong><span class="muted small"> {{ row.ticker }}</span></span>
+    <span class="coin-name"><strong>{{ row.name }}</strong></span><span class="coin-ticker muted small">{{ row.ticker }}</span>
     <span class="coin-price" data-live-price="{{ row.coin_id }}">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span>
     <span data-live-change-24h="{{ row.coin_id }}" class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
     <span class="coin-pnl" data-live-pnl="{{ row.coin_id }}" data-live-amount="{{ row.held }}" data-live-avg="{{ row.avg_price }}">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
@@ -39,7 +39,7 @@
   {% if trenches_rows %}
   {% for t in trenches_rows %}
   <a class="coin-row" href="{{ url_for('coin_popup', coin_id=t.mint) }}">
-    <span class="coin-name"><strong>{{ t.name }}</strong><span class="muted small"> {{ t.symbol }}</span></span>
+    <span class="coin-name"><strong>{{ t.name }}</strong></span><span class="coin-ticker muted small">{{ t.symbol }}</span>
     <span class="coin-price" data-live-price="{{ t.mint }}">${{ "%.4f"|format(t.price_usd) }}</span>
     <span data-live-change-1h="{{ t.mint }}" class="coin-change">{% if t.change_1h_pct is not none %}<span class="{{ 'up' if t.change_1h_pct >= 0 else 'down' }}">{% if t.change_1h_pct >= 0 %}+{% endif %}{{ "%.1f"|format(t.change_1h_pct) }}% 1h</span>{% else %}<span class="muted">—</span>{% endif %}</span>
   </a>

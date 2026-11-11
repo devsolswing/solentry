@@ -38,6 +38,7 @@ from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 from . import assistant as assistant_mod
 from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
+from . import candles as candles_mod
 from . import donations as donations_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
@@ -46,8 +47,9 @@ from . import pnl as pnl_mod
 from .page_numbers import page_number_for
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
-from .charts import (CHART_RANGES, fetch_market_chart, fetch_trade_flow,
-                     high_low_24h, search_coins, to_pnl_points)
+from .charts import (CHART_RANGES, fetch_market_chart, fetch_ohlc,
+                     fetch_trade_flow, high_low_24h,
+                     mint_candles_from_feed, search_coins)
 from .config import Config
 from .executor import execute_real_trade
 from .paper import (InsufficientCash, InsufficientHolding,
@@ -68,8 +70,8 @@ from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
                      lamports_to_sol, sol_to_lamports)
-from .trenches import (fetch_mint_1h_changes, fetch_prices_for_mints,
-                       fetch_trenches_scan)
+from .trenches import (fetch_mint_1h_changes, fetch_mint_identities,
+                       fetch_prices_for_mints, fetch_trenches_scan)
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
@@ -490,6 +492,7 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
             "WHERE user_id = ?", (user_id,)).fetchall()}
     mint_ids = [c for c in held if c not in price_map]
     changes_1h: dict = {}
+    identities: dict = {}
     if mint_ids:
         try:
             for mint, price in fetch_prices_for_mints(
@@ -501,6 +504,13 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
             changes_1h = fetch_mint_1h_changes(mint_ids)
         except Exception:
             changes_1h = {}
+        try:
+            # Real name + ticker for held mints, from the same feed.
+            # A mint the feed does not name keeps its honest
+            # "Pump.fun token …" label below — never guessed.
+            identities = fetch_mint_identities(mint_ids)
+        except Exception:
+            identities = {}
     # A bad tick must never inflate a balance on render either: drop
     # any price the live feed rejects against its last good tick. No
     # reference yet (feed empty or off) means everything passes.
@@ -535,9 +545,11 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
         pnl = None
         if price is not None:
             pnl = (float(price) - float(h["avg_price"])) * float(h["amount"])
+        ident = identities.get(mint) or {}
         rows.append({"coin_id": mint,
-                     "name": "Pump.fun token " + mint[:4] + "…" + mint[-4:],
-                     "ticker": mint[:4] + "…",
+                     "name": ident.get("name") or (
+                         "Pump.fun token " + mint[:4] + "…" + mint[-4:]),
+                     "ticker": ident.get("symbol") or (mint[:4] + "…"),
                      "price": price, "change_24h": None,
                      "change_1h": changes_1h.get(mint),
                      "held": float(h["amount"]),
@@ -1401,6 +1413,17 @@ def register_routes(app: Flask) -> None:
             "ORDER BY id DESC",
             (user["id"], "real" if mode == "devnet" else "paper")
             ).fetchall()
+        # Homepage balance-area chart: candles from the SAME recorded
+        # snapshots as the portfolio line chart — never invented
+        # history. Fewer than two candles means the page says so
+        # instead of drawing a chart.
+        _tick_points = candles_mod.normalize_points(_points)
+        _span = ((_tick_points[-1]["ts"] - _tick_points[0]["ts"])
+                 / 1000.0 if len(_tick_points) >= 2 else None)
+        _interval = candles_mod.interval_for_home(chart_range, _span)
+        _candles = candles_mod.build_candles(_tick_points, _interval)
+        portfolio_candles_svg = candles_mod.candles_svg(_candles)
+        portfolio_line_svg = candles_mod.line_svg(_candles)
         activity = _activity_for_mode(db, user["id"], mode)
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
         trenches_rows, trenches_error = (
@@ -1417,6 +1440,11 @@ def register_routes(app: Flask) -> None:
                 "portfolio_usd": portfolio_usd,
                 "portfolio_chart_svg": portfolio_chart_svg,
                 "portfolio_has_data": portfolio_has_data,
+                "portfolio_candles_svg": portfolio_candles_svg,
+                "portfolio_line_svg": portfolio_line_svg,
+                "portfolio_candles_count": len(_candles),
+                "portfolio_chart_interval": _interval,
+                "home_range_labels": pnl_mod.HOME_RANGE_LABELS,
                 "change_24h": change_24h,
                 "chart_range": chart_range,
                 "support_id": signing_bot["support_id"]
@@ -1605,10 +1633,24 @@ def register_routes(app: Flask) -> None:
             range_key = "24h"
         _label, days = CHART_RANGES[range_key]
         chart = fetch_market_chart(coin_id_resolved, days)
-        chart_svg = ""
-        if chart["points"]:
-            chart_svg = pnl_mod.chart_svg(
-                to_pnl_points(chart["points"]), unit="$")
+        # The chart is a real candlestick chart now: CoinGecko OHLC
+        # for known coins, live-feed tick history for mints. The
+        # line ("regular") view is drawn from the same candles, so
+        # the two views can never disagree. market_chart is still
+        # fetched — the 24h high/low come from it, as before.
+        if coin_id_resolved in COINS:
+            ohlc = fetch_ohlc(coin_id_resolved, days)
+            candles = ohlc["candles"]
+            chart_interval = ohlc["interval"]
+            chart_error = ohlc["error"]
+        else:
+            chart_interval = candles_mod.interval_for_mint(range_key)
+            candles = mint_candles_from_feed(
+                coin_id_resolved, chart_interval,
+                app.config.get("LIVE_FEED"))
+            chart_error = None
+        candles_svg = candles_mod.candles_svg(candles, unit="$")
+        line_svg = candles_mod.line_svg(candles, unit="$")
         # 24h high/low come from the 24-hour series itself, so they
         # always match the chart. When the detail range IS 24h/1day,
         # the range chart is the 24h series — no second fetch.
@@ -1626,8 +1668,14 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         return render_template(
             "coin_detail.html", coin=row, range_key=range_key,
-            ranges=CHART_RANGES, chart_svg=chart_svg,
-            chart_error=chart["error"], high_24h=high_24h,
+            ranges=CHART_RANGES, candles_svg=candles_svg,
+            line_svg=line_svg, chart_error=chart_error,
+            chart_interval=chart_interval,
+            chart_interval_label=(
+                candles_mod.interval_label(chart_interval)
+                if chart_interval else ""),
+            chart_candles_count=len(candles),
+            high_24h=high_24h,
             low_24h=low_24h, flow=flow, bots=bots, mode=mode,
             mode_label=_mode_label(mode),
             receive_address=wallet["pubkey"] if wallet else "",
@@ -1682,6 +1730,39 @@ def register_routes(app: Flask) -> None:
         return jsonify({"ok": False, "coin_id": coin_id, "price": None,
                         "source": None, "as_of": _now(),
                         "error": "Unknown coin — no live price."})
+
+    @app.route("/api/coins/<coin_id>/candles")
+    @login_required
+    def coin_candles(coin_id: str):
+        """Fresh candle SVGs for the coin detail chart's live
+        re-render. Same data as the page load: CoinGecko OHLC for
+        known coins, live-feed tick history for mints. The chart
+        re-renders from this at most once per candle interval — the
+        page never redraws every second. Login required; a coin
+        with no candles yet reports count 0 and the page says the
+        candles are still building, never a made-up chart."""
+        range_key = (request.args.get("range") or "24h").strip()
+        if range_key not in CHART_RANGES:
+            range_key = "24h"
+        resolved, _price, _source = _resolve_coin_price(coin_id)
+        if resolved is None:
+            abort(404)
+        _label, days = CHART_RANGES[range_key]
+        if resolved in COINS:
+            ohlc = fetch_ohlc(resolved, days)
+            candles = ohlc["candles"]
+            interval = ohlc["interval"]
+        else:
+            interval = candles_mod.interval_for_mint(range_key)
+            candles = mint_candles_from_feed(
+                resolved, interval, app.config.get("LIVE_FEED"))
+        return jsonify({"ok": True, "coin_id": resolved,
+                        "candles_svg": candles_mod.candles_svg(
+                            candles, unit="$"),
+                        "line_svg": candles_mod.line_svg(
+                            candles, unit="$"),
+                        "count": len(candles), "interval": interval,
+                        "updated": _now()})
 
     # ------------------------------------------------------------------
     # Live prices over WebSocket (/ws/live) + REST snapshot (/api/live).

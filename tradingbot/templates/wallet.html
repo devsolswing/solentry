@@ -23,6 +23,22 @@
     <p class="portfolio-mode">TOTAL PORTFOLIO VALUE <span class="wallet-flag" title="Canada">🇨🇦</span></p>
     <p class="portfolio-total" data-balance{% if mode == 'paper' %} data-live-total-portfolio data-live-cash="{{ paper_cash }}"{% endif %}>{% if mode == 'paper' %}${{ "{:,.2f}".format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "{:,.2f}".format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable right now{% endif %}{% endif %}</p>
     <p class="change-24h">{% if change_24h %}<span class="{{ 'up' if change_24h.delta >= 0 else 'down' }}">{% if change_24h.delta >= 0 %}+{% endif %}{% if mode == 'paper' %}${{ "{:,.2f}".format(change_24h.delta) }}{% else %}{{ "%.4f"|format(change_24h.delta) }} SOL{% endif %} ({{ "%+.2f"|format(change_24h.pct) }}%)</span>{% else %}<span class="muted">—</span>{% endif %} <a class="chart-more" href="{{ url_for('pnl') }}" aria-label="Full P&amp;L chart">Full chart ›</a></p>
+    <div class="home-chart" id="home-chart" data-chart-block data-chart-range="{{ chart_range }}">
+      <div class="home-chart-durations" role="group" aria-label="Chart duration">
+        {% for key, label in home_range_labels.items() %}
+        <a class="home-range-btn{{ ' active' if key == chart_range else '' }}" href="{{ url_for('wallet', range=key) }}">{{ label }}</a>
+        {% endfor %}
+      </div>
+      <div class="home-chart-wrap">
+        {% if portfolio_candles_svg %}
+        <button class="btn small chart-view-toggle" type="button" data-chart-toggle aria-label="Switch chart view">📈 Line</button>
+        <div class="chart-view chart-view-candles" data-chart-view="candles">{{ portfolio_candles_svg|safe }}</div>
+        <div class="chart-view chart-view-line hidden" data-chart-view="line">{{ portfolio_line_svg|safe }}</div>
+        {% else %}
+        <p class="muted small">Not enough history yet for candles in this range — snapshots build as the app runs.</p>
+        {% endif %}
+      </div>
+    </div>
   </div>
   {% if support_id %}<p class="muted small">Your signing bot — Support ID: <b>{{ support_id }}</b> (for tech support — this ID cannot be changed)</p>{% endif %}
 
@@ -33,7 +49,7 @@
       {% for row in coin_rows %}
       <a class="coin-row holdings-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
         <span class="coin-ico" aria-hidden="true">{{ row.ticker[:1] }}</span>
-        <span class="coin-name"><span class="holdings-name"><strong>{{ row.name }}</strong><span class="muted"> ({{ row.ticker }})</span></span><span class="holdings-amount muted">{{ "%.4f"|format(row.held) }} {{ row.ticker }} · <span data-live-value="{{ row.coin_id }}" data-live-amount="{{ row.held }}">{% if row.value is not none %}${{ "%.2f"|format(row.value) }}{% else %}value unavailable{% endif %}</span></span></span>
+        <span class="coin-name"><span class="holdings-name"><strong>{{ row.name }}</strong></span><span class="holdings-amount muted">{{ "%.4f"|format(row.held) }} {{ row.ticker }} · <span data-live-value="{{ row.coin_id }}" data-live-amount="{{ row.held }}">{% if row.value is not none %}${{ "%.2f"|format(row.value) }}{% else %}value unavailable{% endif %}</span></span></span><span class="coin-ticker muted">({{ row.ticker }})</span>
         <span class="holdings-1h{% if row.change_1h is not none %} {{ 'up' if row.change_1h >= 0 else 'down' }}{% else %} muted{% endif %}"><span data-live-change-1h="{{ row.coin_id }}" data-live-decimals="2">{% if row.change_1h is not none %}{% if row.change_1h >= 0 %}+{% endif %}{{ "%.2f"|format(row.change_1h) }}%{% else %}—{% endif %}</span><span class="holdings-1h-label">1h</span></span>
       </a>
       {% endfor %}

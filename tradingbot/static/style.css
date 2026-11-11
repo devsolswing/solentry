@@ -127,6 +127,10 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .coin-row { display: flex; align-items: center; gap: 10px; padding: 11px 10px; background: #160b08; border: 1px solid rgba(255, 179, 0, .35); border-radius: 10px; color: #e8ecf1; text-decoration: none; }
 .coin-row:active { background: #241503; }
 .coin-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The ticker is a flex sibling of the name, never inside it: a long
+   coin name truncates with an ellipsis, but the ticker is always
+   fully visible — it can never be cut off the end of the row. */
+.coin-ticker { flex: 0 0 auto; font-size: 13px; white-space: nowrap; }
 .coin-price { flex: 0 0 auto; font-weight: 700; }
 .coin-change { flex: 0 0 56px; text-align: right; font-weight: 700; }
 .coin-pnl { flex: 0 0 74px; text-align: right; font-weight: 700; }
@@ -190,8 +194,23 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .chart-ranges { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
 .range-btn { flex: 1 1 auto; text-align: center; padding: 8px 4px; background: #1a0805; border: 1px solid #ffb300; border-radius: 999px; color: #ffd700; text-decoration: none; font-size: 13px; font-weight: 700; }
 .range-btn.active { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border-color: #ffcf3d; }
-.detail-chart { margin: 8px 0; }
+.detail-chart { position: relative; margin: 8px 0; }
 .detail-chart svg { width: 100%; height: auto; display: block; }
+/* Candlestick ↔ regular line toggle: a button in the corner of the
+   chart, big enough to tap on a phone. It shows the OTHER view —
+   "📈 Line" while candles are showing, "🕯 Candles" while the line
+   is showing. The choice is remembered for the session. */
+.chart-view-toggle { position: absolute; top: 6px; right: 6px; z-index: 2; padding: 4px 10px; font-size: 13px; }
+.chart-view.hidden { display: none; }
+/* Homepage balance-area chart: compact, in the balance card, with
+   its own one-row duration options. The chart is ~90px tall so the
+   half-screen holdings list keeps its room. */
+.home-chart { margin-top: 8px; }
+.home-chart-durations { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 6px; }
+.home-range-btn { color: #ffd700; text-decoration: none; font-size: 12px; font-weight: 700; padding: 3px 8px; border: 1px solid rgba(255, 179, 0, .35); border-radius: 999px; }
+.home-range-btn.active { background: #ffd700; color: #1a0505; border-color: #ffd700; }
+.home-chart-wrap { position: relative; }
+.home-chart-wrap svg { width: 100%; height: 90px; display: block; }
 .detail-stats { background: #160b08; border: 2px solid #ffb300; border-radius: 12px; padding: 10px 14px; margin: 8px 0; }
 .detail-stats p { margin: 6px 0; font-size: 14px; }
 

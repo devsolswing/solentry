@@ -586,6 +586,39 @@ Kill switch: `LIVE_FEED_ENABLED=0` stops the upstream threads; the
 app keeps serving from the existing REST feeds. No new secret is
 needed — every source above is keyless.
 
+## Candlestick charts (Page 5 + home balance chart)
+
+The coin detail page (Page 5) shows a real candlestick (OHLC) chart
+by default, with a button in the corner of the chart switching to the
+regular line chart — both views are drawn from the same candles, so
+they can never disagree, and the choice is remembered for the page
+view. The homepage balance area has the same toggle on a compact
+portfolio chart, with duration options (1h / 1d / 1w / 1m / 1y /
+all-time). The chart does **not** redraw every second: the live
+price number still updates per tick, but the chart re-renders at
+most once per candle interval (fresh SVGs from
+`GET /api/coins/<id>/candles?range=...`), and the caption says when
+it last refreshed.
+
+**Candle sources, in order:**
+
+| Chart | Candles come from | Interval |
+|---|---|---|
+| Page 5, known coin | CoinGecko OHLC endpoint (`/coins/{id}/ohlc`) | set by CoinGecko's granularity (30 min for the 24h range, 4h for 1w/1m) |
+| Page 5, pump.fun mint | the live feed's recorded tick history (in-memory, ~2,000 ticks per coin) | 1 min (24h) / 15 min (1w) / 1h (1m) / 1d (1y, all-time) |
+| Home portfolio | the recorded portfolio snapshots (1-minute, the app's only portfolio history) | 5 min (1h) / 1h (1d) / 6h (1w) / 1d (1m) / 1w (1y) / 1d or 1w (all-time, by span) |
+
+Candles are never faked: fewer than two candles draws nothing, and
+the page says plainly that candles are still building (mints with
+no feed history yet) or that there is not enough history yet (home
+chart in a thin range). A mint's candles only exist while the app
+has been running long enough to record them — a fresh deploy starts
+with no mint history. The coins list (Page 4) shows every coin's
+name and its ticker in its own span, so a long name can truncate
+but the ticker never can; held mints show their real name + symbol
+from the DexScreener feed when it names them, and the honest
+"Pump.fun token …" label when it does not.
+
 ## Security rules (do not weaken)
 
 - Never log, print, or return a private key, password, session secret,

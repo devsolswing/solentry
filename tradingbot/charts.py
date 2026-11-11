@@ -40,6 +40,13 @@ CHART_RANGES = {
 
 COINGECKO_CHART_URL = ("https://api.coingecko.com/api/v3/coins/{}/"
                        "market_chart?vs_currency=usd&days={}")
+COINGECKO_OHLC_URL = ("https://api.coingecko.com/api/v3/coins/{}/"
+                      "ohlc?vs_currency=usd&days={}")
+# CoinGecko's own OHLC granularity, used only when the returned
+# candles cannot speak for themselves (empty or a single candle):
+# 1 day -> 30-minute candles, 7-30 days -> 4-hour, 31+ days -> 4-day.
+OHLC_INTERVAL_FALLBACK = {1: 1800, 7: 14400, 30: 14400, 365: 345600,
+                          "max": 345600}
 DEXSCREENER_SEARCH_URL = DEXSCREENER_BASE + "/latest/dex/search?q={}"
 
 
@@ -152,6 +159,81 @@ def search_coins(query: str, http_get=None, prices_fn=None) -> dict:
                           "error": error, "source": source}
     return {"results": [dict(r) for r in results],
             "error": error, "source": source}
+
+
+def fetch_ohlc(coin_id: str, days, http_get=None) -> dict:
+    """Candlestick data for a coin: {"candles", "interval", "error"}.
+
+    CoinGecko's free OHLC endpoint (no key) returns real
+    [timestamp, open, high, low, close] candles — this is the actual
+    candlestick data, not candles derived from a line series. Only
+    the coins in the app's price list have CoinGecko history; a
+    pump.fun mint returns no candles and an error string, and the
+    page says the candles are still building instead of inventing
+    them. `interval` is the candle width in seconds, read from the
+    candles themselves (the gap between consecutive candles); the
+    fallback table above is used only when the candles cannot speak
+    for themselves.
+    """
+    http_get = http_get or _default_get
+    info = COINS.get((coin_id or "").upper())
+    if info is None:
+        return {"candles": [], "interval": None,
+                "error": "no chart history for this token"}
+    try:
+        data = http_get(COINGECKO_OHLC_URL.format(
+            info["coingecko"], days))
+        raw = data if isinstance(data, list) else []
+        candles = []
+        for entry in raw:
+            try:
+                ts = int(entry[0])
+                o, h, l, c = (float(entry[1]), float(entry[2]),
+                              float(entry[3]), float(entry[4]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            candles.append({"ts": ts, "open": o, "high": h, "low": l,
+                            "close": c})
+        if not candles:
+            return {"candles": [], "interval": None,
+                    "error": "chart came back empty"}
+        interval = None
+        if len(candles) >= 2:
+            gaps = sorted(candles[i + 1]["ts"] - candles[i]["ts"]
+                          for i in range(len(candles) - 1)
+                          if candles[i + 1]["ts"] > candles[i]["ts"])
+            if gaps:
+                interval = gaps[len(gaps) // 2] // 1000
+        if not interval:
+            interval = OHLC_INTERVAL_FALLBACK.get(
+                days, OHLC_INTERVAL_FALLBACK["max"])
+        return {"candles": candles, "interval": int(interval),
+                "error": None}
+    except Exception as exc:
+        return {"candles": [], "interval": None,
+                "error": str(exc)[:160]}
+
+
+def mint_candles_from_feed(coin_id: str, interval_seconds: int,
+                           feed=None) -> list:
+    """Candles for a pump.fun mint, built ONLY from the live feed's
+    recorded ticks (see LiveFeed.history). The feed keeps roughly
+    the last 2,000 ticks per coin — a few hours at the 5-second mint
+    poll — so a fresh deploy or a coin nobody has watched yet has
+    too little history to form candles and this returns []. That is
+    honest: the page says the candles are still building instead of
+    drawing a made-up chart."""
+    from .candles import build_candles
+
+    if feed is None:
+        return []
+    try:
+        ticks = feed.history(coin_id)
+    except Exception:
+        return []
+    points = [{"ts": int(ts * 1000), "price": price}
+              for ts, price in ticks]
+    return build_candles(points, interval_seconds)
 
 
 def fetch_market_chart(coin_id: str, days, http_get=None) -> dict:

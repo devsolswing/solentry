@@ -16,7 +16,11 @@ holdings:
   None.
 - The portfolio chart moved off the home page to make room; the
   total, the 24h change and a "Full chart ›" link to the P&L page
-  stay. The main screen still has NO back-button X.
+  stay. The candlestick build (2026-11-10) brings a COMPACT chart
+  back into the balance card — candlestick view with duration
+  options and the candle/line toggle, candles from recorded
+  snapshots only, never faked — while the holdings list stays
+  half-screen. The main screen still has NO back-button X.
 No SOL moves in these tests; sends are never confirmed.
 """
 
@@ -183,15 +187,31 @@ class TestHomeLiftLayout(HomeLiftBase):
         self.assertNotIn("data-go-back", html)
         self.assertNotIn('aria-label="Back">✕<', html)
 
-    def test_home_chart_moved_off_but_full_chart_link_stays(self):
+    def test_home_chart_is_back_in_balance_area_with_durations(self):
+        # The candlestick build (2026-11-10) brings a compact chart
+        # back to the home balance area, by the user's order: a
+        # candlestick chart with duration options and the same
+        # candle/line toggle as the coin detail page. It lives in
+        # the balance card as home-chart / home-chart-durations —
+        # never the old portfolio-chart / chart-ranges classes.
         self._choose_mode("paper")
         html = self._html("/wallet")
         self.assertNotIn("portfolio-chart", html)
         self.assertNotIn("chart-ranges", html)
+        self.assertIn('id="home-chart"', html)
+        self.assertIn("home-chart-durations", html)
+        for label in ("1h", "1d", "1w", "1m", "1y", "All"):
+            self.assertIn(f">{label}<", html)
         self.assertIn("Full chart ›", html)
         self.assertIn('href="/pnl"', html)
         # The total and the 24h change still show.
         self.assertIn("TOTAL PORTFOLIO VALUE", html)
+        # No snapshots yet, so no candles — the page says so
+        # instead of drawing a chart, and there is no toggle to
+        # switch (the toggle appears once candles exist; see
+        # test_candles.py).
+        self.assertIn("Not enough history yet", html)
+        self.assertNotIn('data-chart-toggle', html)
 
 
 class TestChange1hFeed(unittest.TestCase):

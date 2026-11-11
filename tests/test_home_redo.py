@@ -17,9 +17,13 @@ Rules under test:
   the homepage kept re-applying itself). It stays on Bots and
   Trenches, where going back makes sense.
 - Coin detail page: tapping a held coin opens its detail page with
-  a live chart that ticks every second while the page is open
+  a live price that ticks every second while the page is open
   (GET /api/coins/<id>/tick) — real prices only, never invented;
-  a failed tick keeps the last real price and its time. Send,
+  a failed tick keeps the last real price and its time. The chart
+  itself is a real candlestick chart (CoinGecko OHLC for known
+  coins, live-feed tick history for mints) with a corner button
+  switching it to the regular line chart; it re-renders at most
+  once per candle interval, never every second. Send,
   Receive, Buy and Sell are four separate windows over the coin
   page, reusing the existing flows (two-step send with a way back
   to the coin page; paper ledger / pump.fun executor guards for
@@ -61,6 +65,16 @@ def make_prices(changes):
 def fake_chart(points):
     return {"points": [{"ts": 1790000000000 + i * 60000, "price": p}
                        for i, p in enumerate(points)], "error": None}
+
+
+def fake_ohlc(*args, **kwargs):
+    """Two 30-minute candles — enough for a candlestick chart."""
+    return {"candles": [
+        {"ts": 1790000000000, "open": 80.0, "high": 82.0,
+         "low": 79.0, "close": 81.0},
+        {"ts": 1790001800000, "open": 81.0, "high": 83.0,
+         "low": 80.5, "close": 82.0}],
+        "interval": 1800, "error": None}
 
 
 class HomeRedoBase(unittest.TestCase):
@@ -207,8 +221,12 @@ class TestCoinDetailActions(HomeRedoBase):
             return_value={"buys": 120, "sells": 80,
                           "buys_pct": 60.0, "sells_pct": 40.0})
         self.flow_patch.start()
+        self.ohlc_patch = mock.patch.object(
+            routes, "fetch_ohlc", side_effect=fake_ohlc)
+        self.ohlc_patch.start()
         self.addCleanup(self.chart_patch.stop)
         self.addCleanup(self.flow_patch.stop)
+        self.addCleanup(self.ohlc_patch.stop)
         self._buy_sol()
 
     def test_four_action_buttons_each_open_their_own_window(self):
@@ -229,13 +247,20 @@ class TestCoinDetailActions(HomeRedoBase):
         self.assertIn(f'data-copy="{self.pubkey}"', html)
 
     def test_live_chart_block_present(self):
+        # The detail chart is a real candlestick chart (not a
+        # every-second redraw): the live price readout still ticks
+        # every second, but the chart re-renders at most once per
+        # candle interval, and a corner button switches it to the
+        # regular line view.
         html = self._html("/coins/SOL/detail")
         self.assertIn('id="live-chart"', html)
         self.assertIn('data-tick-url="/api/coins/SOL/tick"', html)
         self.assertIn('id="live-price"', html)
         self.assertIn('id="live-updated"', html)
-        self.assertIn('id="live-chart-svg"', html)
-        self.assertIn("updating every second", html)
+        self.assertNotIn('id="live-chart-svg"', html)
+        self.assertNotIn("updating every second", html)
+        self.assertIn('aria-label="Candlestick chart"', html)
+        self.assertIn('id="chart-view-toggle"', html)
 
     def test_coin_result_links_back_to_coin(self):
         resp = self.client.post("/coins/SOL/buy", data={
