@@ -3274,13 +3274,38 @@ def register_routes(app: Flask) -> None:
         # rebuild): the same per-platform wallets Page 8 shows, so
         # the selector renders real data and its Create buttons post
         # to the existing create route. Page 8 itself is untouched.
+        # Signer-bot dashboard (Page 6): the signing bot's current
+        # (pending) tasks with the time each was tasked, and how many
+        # real transactions it has signed. Pending bot_proposals are
+        # the task queue (created_at is when the task was tasked);
+        # trade_ledger mode='real' rows are the trades the signing
+        # bot executed on devnet — paper rows are simulated, never
+        # signed, and never counted. A figure that cannot be read is
+        # None, and the template shows "—" instead of a guess. The
+        # Support ID itself already rides along in _dashboard_data.
+        db = _db(app)
+        signing_tasks = [dict(row) for row in db.execute(
+            "SELECT p.id, p.bot_id, p.kind, p.coin_id, p.side, "
+            "p.detail, p.created_at, b.name AS bot_name "
+            "FROM bot_proposals p LEFT JOIN bots b ON b.id = p.bot_id "
+            "WHERE p.user_id = ? AND p.status = 'pending' "
+            "ORDER BY p.created_at DESC, p.id DESC LIMIT 10",
+            (user["id"],)).fetchall()]
+        try:
+            signing_tx_count = db.execute(
+                "SELECT COUNT(*) FROM trade_ledger WHERE user_id = ? "
+                "AND mode = 'real'", (user["id"],)).fetchone()[0]
+        except Exception:
+            signing_tx_count = None
         return render_template("bots.html", **data,
                                memecoin_bots=memecoin_bots,
                                platforms=platforms_mod.PLATFORMS,
                                platform_labels=platforms_mod.PLATFORM_LABELS,
                                platform_notes=platforms_mod.PLATFORM_NOTES,
                                platform_wallets=platforms_mod.get_platform_wallets(
-                                   _db(app), user["id"]))
+                                   _db(app), user["id"]),
+                               signing_tasks=signing_tasks,
+                               signing_tx_count=signing_tx_count)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required

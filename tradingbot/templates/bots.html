@@ -20,11 +20,12 @@
   <div class="home-logo bots-logo">
     <span class="bots-logo-wrap">
     <img src="{{ url_for('static', filename='fox-gold-480.jpg') }}" alt="SolEntry fox logo" class="fox-logo">
-      <span class="bots-gold-bar" aria-hidden="true"></span>
     </span>
     <p class="se-title home-wordmark">Sol<span class="se-entry">Entry</span></p>
   </div>
   <div class="bots-crown-banner"><span>My Bots</span></div>
+
+  <p class="fox-tagline bots-motto">Still on<br>the $GATE?</p>
 
   <div class="bot-actions">
     <a class="btn action-btn" href="{{ url_for('bot_create') }}" aria-label="Add a bot">+ Add Bot</a>
@@ -96,6 +97,22 @@
       <button class="icon-btn wallet-arrow" type="button" data-wallet-next aria-label="Next platform wallet">›</button>
     </div>
     <p class="muted small wallet-counter" data-wallet-counter></p>
+  </div>
+
+  <div class="card bots-signer">
+    <h2>Signing bot</h2>
+    <p class="signer-row"><span>Support ID</span> <strong>{{ support_id or "—" }}</strong></p>
+    <p class="signer-row"><span>Transactions signed</span> <strong data-signer-tx-count="{{ signing_tx_count if signing_tx_count is not none else '' }}">{{ signing_tx_count if signing_tx_count is not none else "—" }}</strong></p>
+    <h3>Current tasks</h3>
+    {% if signing_tasks %}
+    <ul class="signer-tasks">
+      {% for t in signing_tasks %}
+      <li><a href="{{ url_for('bot_detail', bot_id=t.bot_id) }}">{{ t.bot_name or "Bot" }} — {{ t.side }} {{ t.coin_id }}</a><span class="muted small">Tasked: {{ t.created_at[:16].replace('T', ' ') }}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">No tasks right now.</p>
+    {% endif %}
   </div>
 </div>
 

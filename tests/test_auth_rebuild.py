@@ -267,13 +267,14 @@ class TestAuthOneScreen(AuthRebuildTestCase):
                              "%s is not a JPEG" % name)
 
     def test_fox_images_are_the_realistic_photo_foxes(self):
-        # The photo's realistic foxes are the official mascots
-        # (repo commit 17904ae): red 14,847 bytes (a 170x170 square
-        # crop — the rectangular 225x172 version only half showed
-        # in the circular logo), gold 38,514 bytes. The flat logo
-        # foxes (red 21,142 / gold 41,204 bytes) were deleted —
-        # these exact sizes prove they did not come back.
-        sizes = {"fox-red-480.jpg": 14847, "fox-gold-480.jpg": 38514}
+        # The photo's realistic foxes are the official mascots:
+        # red 34,875 bytes — the yellow fox's face recolored red
+        # (2026-11-11, a 308x308 square with NO baked-in gold
+        # circle; the CSS border draws the single yellow circle),
+        # gold 38,514 bytes. The flat logo foxes (red 21,142 /
+        # gold 41,204 bytes) were deleted — these exact sizes prove
+        # they did not come back.
+        sizes = {"fox-red-480.jpg": 34875, "fox-gold-480.jpg": 38514}
         for name, size in sizes.items():
             path = os.path.join(self.app.static_folder, name)
             self.assertEqual(os.path.getsize(path), size,
@@ -282,8 +283,9 @@ class TestAuthOneScreen(AuthRebuildTestCase):
     def test_red_fox_is_square_so_the_circle_shows_the_whole_face(self):
         # The top logo is a circle (border-radius: 50% + object-fit:
         # cover). A rectangular fox gets cropped to half a face; the
-        # square 170x170 crop shows the full face + cigar + gold
-        # circle. Read the JPEG dimensions from the SOF marker.
+        # square 308x308 recolored fox shows the full face + cigar,
+        # and the CSS border draws the single yellow circle. Read
+        # the JPEG dimensions from the SOF marker.
         path = os.path.join(self.app.static_folder, "fox-red-480.jpg")
         with open(path, "rb") as f:
             data = f.read()
@@ -291,7 +293,7 @@ class TestAuthOneScreen(AuthRebuildTestCase):
         self.assertGreater(idx, 0, "no JPEG SOF marker in fox-red-480.jpg")
         height = int.from_bytes(data[idx + 5:idx + 7], "big")
         width = int.from_bytes(data[idx + 7:idx + 9], "big")
-        self.assertEqual((width, height), (170, 170),
+        self.assertEqual((width, height), (308, 308),
                          "red fox is not the square crop")
 
     def test_auth_pages_reference_both_foxes(self):

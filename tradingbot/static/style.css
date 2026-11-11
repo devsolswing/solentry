@@ -572,38 +572,60 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 
 /* ------------------------------------------------------------------ */
 /* Page 6 (Bots) rebuild — the owner's spec (2026-11-10/11).          */
-/* - Lower scrolling section gone: the assistant (robo logo, yellow   */
-/*   bg, red letters) and the platform-wallet rotating selector       */
-/*   (yellow bg, red writing, two arrows) take the lower half.       */
+/* - Lower scrolling section gone: the assistant (robo logo, red      */
+/*   letters) and the platform-wallet rotating selector (red writing,  */
+/*   two arrows) take the lower half.                                  */
+/* - 2026-11-11: the solid yellow washed the whole page out, so both  */
+/*   sections are now compact BLACK cards with gold borders (red      */
+/*   letters kept) — the page reads black/gold/red like the rest.     */
+/* - Motto "Still on the $GATE?" under the crown banner, same large   */
+/*   red italic style as Pages 1-2.                                   */
+/* - Signing-bot dashboard card at the bottom: Support ID, current    */
+/*   tasks with the time each was tasked, transactions signed.        */
 /* - Edit Bot is the same size as Add Bot (one shared action-btn).   */
 /* - App name + logo bigger on this page.                             */
-/* - Thin gold bar across the logo, black crown-tipped banner under. */
+/* - Black crown-tipped banner under the logo. (2026-11-11: the thin  */
+/*   gold bar that used to cross the logo was DELETED — it cut        */
+/*   through the fox, so the logo now sits clean with no bar.)       */
 /* The page stays one screen (fit-screen): the assistant card takes   */
 /* the remaining space and only its chat log scrolls internally.      */
 /* ------------------------------------------------------------------ */
 .bots-screen .home-logo .fox-logo { width: clamp(96px, 16dvh, 140px); height: clamp(96px, 16dvh, 140px); }
 .bots-screen .home-wordmark { font-size: clamp(48px, 9dvh, 68px); }
 .bots-logo-wrap { position: relative; flex: 0 0 auto; }
-.bots-gold-bar { position: absolute; left: -8px; right: -8px; top: 50%; height: 4px; background: linear-gradient(90deg, #ffd700, #ffb300); box-shadow: 0 0 10px rgba(255, 200, 0, .7); transform: translateY(-50%); }
 .bots-crown-banner { background: #000; color: #ffd700; text-align: center; font-weight: 900; font-size: 20px; letter-spacing: 2px; padding: 8px 12px 16px; margin: 2px 0 6px; border-top: 2px solid #ffb300; clip-path: polygon(0 0, 100% 0, 100% 60%, 87.5% 100%, 75% 60%, 62.5% 100%, 50% 60%, 37.5% 100%, 25% 60%, 12.5% 100%, 0 60%); }
 .bot-actions .action-btn { flex: 1 1 0; padding: 12px 4px; font-size: 16px; font-weight: 700; text-align: center; border-radius: 12px; margin-top: 0; }
 .bot-actions .action-btn:disabled { opacity: .45; cursor: not-allowed; }
-/* Assistant: yellow background, red letters, robo logo. */
-.bots-assistant { background: linear-gradient(180deg, #ffd700, #ffb300); color: #b91c1c; border-color: #b91c1c; margin: 8px 0; padding: 12px; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* Motto on the Bots page: same large red italic style as Pages 1-2,
+   centred under the crown banner. */
+.bots-screen .bots-motto { flex: 0 0 auto; text-align: center; margin: 2px 0 4px; }
+/* Assistant: black card, gold border, red letters, robo logo —
+   compact, so the page reads black/gold/red, not a yellow sheet. */
+.bots-assistant { background: #000; color: #b91c1c; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .bots-assistant h2 { color: #b91c1c; margin: 0 0 4px; }
 .bots-assistant .robo-logo { font-size: 26px; }
 .bots-assistant .muted { color: #7f1d1d; }
-.bots-assistant .chat-log { background: rgba(255, 255, 255, .4); border: 2px solid #b91c1c; color: #b91c1c; flex: 1 1 auto; min-height: 44px; max-height: none; }
+.bots-assistant .chat-log { background: #1a0805; border: 2px solid #ffd700; color: #b91c1c; flex: 1 1 auto; min-height: 44px; max-height: 96px; overflow-y: auto; }
 .bots-assistant .chat-log p { color: #b91c1c; }
-.bots-assistant .chat-log a { color: #7f1d1d; }
-.bots-assistant input { background: #fff; color: #b91c1c; border: 2px solid #b91c1c; }
+.bots-assistant .chat-log a { color: #ffd700; }
+.bots-assistant input { background: #1a0805; color: #ffd700; border: 2px solid #ffd700; }
 .bots-assistant .btn { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
-/* Platform wallets: rotating selector, yellow background, red writing. */
-.bots-wallets { background: linear-gradient(180deg, #ffd700, #ffb300); color: #b91c1c; border-color: #b91c1c; margin: 8px 0; padding: 12px; flex: 0 0 auto; }
+/* Platform wallets: rotating selector, black card, gold border, red writing. */
+.bots-wallets { background: #000; color: #b91c1c; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 0 0 auto; }
 .bots-wallets h2 { color: #b91c1c; margin: 0 0 4px; }
 .bots-wallets .muted { color: #7f1d1d; }
-.bots-wallets .addr { background: #fff; color: #7f1d1d; border-color: #b91c1c; }
+.bots-wallets .addr { background: #1a0805; color: #ffd700; border: 2px solid #ffd700; }
 .bots-wallets .btn.small { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
+/* Signing bot dashboard: compact black card, gold border. */
+.bots-signer { background: #000; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 0 0 auto; }
+.bots-signer h2 { color: #ffd700; margin: 0 0 4px; }
+.bots-signer h3 { color: #ffd700; margin: 8px 0 4px; font-size: 15px; }
+.signer-row { display: flex; justify-content: space-between; gap: 10px; margin: 2px 0; }
+.signer-row span { color: #b9a99a; }
+.signer-row strong { color: #ffd700; }
+.signer-tasks { list-style: none; margin: 4px 0 0; padding: 0; }
+.signer-tasks li { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-top: 1px solid #3a1c10; }
+.signer-tasks a { color: #ffd700; }
 .wallet-rotator { display: flex; align-items: center; gap: 8px; }
 .wallet-arrow { flex: 0 0 auto; background: #b91c1c; color: #ffd700; border-color: #7f1d1d; }
 .wallet-panels { flex: 1 1 auto; min-width: 0; }

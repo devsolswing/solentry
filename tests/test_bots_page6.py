@@ -4,18 +4,23 @@ Rules under test:
 - The scrolling section on the lower half is gone: no
   page-scroll-panel, no Memecoin build card, no Trenches link on
   the Bots page (the Trenches page is still reachable from home).
-- The AI assistant lives on the Bots page: robo logo, YELLOW
-  background, RED letters, and a working chatbox wired to the
-  existing /api/assistant flow (it answers, it is not a dead box).
+- The AI assistant lives on the Bots page: robo logo, BLACK card
+  with a GOLD border, RED letters, and a working chatbox wired to
+  the existing /api/assistant flow (it answers, it is not a dead
+  box). (2026-11-11: the solid yellow washed the whole page out,
+  so the yellow background was replaced by black + gold.)
 - Platform wallets moved from Page 8 as a rotating selector: two
   side arrows cycle through the real platforms (pump.fun, Phantom,
-  pumpSwap), yellow background, red writing; a wallet that exists
-  shows its address, one that does not shows a Create button that
-  really creates it. Page 8 itself is untouched.
+  pumpSwap), black card with a gold border, red writing; a wallet
+  that exists shows its address, one that does not shows a Create
+  button that really creates it. Page 8 itself is untouched.
 - Edit Bot is the same size as Add Bot (one shared sizing rule).
 - App name + logo are bigger on the Bots page than the base sizes.
-- A thin gold bar crosses the logo, with a black crown-tipped
-  banner underneath it.
+- A black crown-tipped banner sits underneath the logo. (The thin
+  gold bar that used to cross the logo was deleted 2026-11-11 —
+  it cut through the fox, so the logo now sits clean.)
+- The fox logo has no CSS gold border: the image's baked-in gold
+  circle is the only outline (a CSS border drew a second circle).
 No SOL moves in these tests; real execution is a recording mock.
 """
 
@@ -43,7 +48,7 @@ class TestBotsPage6(UiBase):
         # from home.
         self.assertIn('href="/trenches"', self._html("/wallet"))
 
-    def test_assistant_present_yellow_red_robo(self):
+    def test_assistant_present_black_gold_red_robo(self):
         self._choose_mode("paper")
         html = self._html("/bots")
         self.assertIn("bots-assistant", html)
@@ -55,9 +60,12 @@ class TestBotsPage6(UiBase):
         self.assertIn("/api/assistant", html)
         css = self._css()
         self.assertIn(".bots-assistant", css)
-        # Yellow background, red letters.
+        # Black card, gold border, red letters — no yellow wash.
+        self.assertRegex(css, r"\.bots-assistant\s*\{[^}]*background:\s*#000")
         self.assertRegex(css, r"\.bots-assistant\s*\{[^}]*#ffd700")
         self.assertRegex(css, r"\.bots-assistant[^{]*\{[^}]*#b91c1c")
+        first = css.split(".bots-assistant")[1].split("}")[0]
+        self.assertNotIn("linear-gradient(180deg, #ffd700", first)
 
     def test_assistant_answers(self):
         self._choose_mode("paper")
@@ -87,9 +95,12 @@ class TestBotsPage6(UiBase):
         css = self._css()
         self.assertIn(".wallet-rotator", css)
         self.assertIn(".wallet-panel", css)
-        # Yellow background, red writing.
+        # Black card, gold border, red writing — no yellow wash.
+        self.assertRegex(css, r"\.bots-wallets\s*\{[^}]*background:\s*#000")
         self.assertRegex(css, r"\.bots-wallets\s*\{[^}]*#ffd700")
         self.assertRegex(css, r"\.bots-wallets[^{]*\{[^}]*#b91c1c")
+        first = css.split(".bots-wallets")[1].split("}")[0]
+        self.assertNotIn("linear-gradient(180deg, #ffd700", first)
 
     def test_platform_wallet_shows_address_once_created(self):
         self._choose_mode("paper")
@@ -143,19 +154,40 @@ class TestBotsPage6(UiBase):
         self.assertIsNotNone(m, "no bots-page wordmark size rule")
         self.assertGreaterEqual(int(m.group(1)), 48)
 
-    def test_gold_bar_and_crown_banner(self):
+    def test_crown_banner_no_gold_bar(self):
         self._choose_mode("paper")
         html = self._html("/bots")
-        self.assertIn("bots-gold-bar", html)
         self.assertIn("bots-crown-banner", html)
+        # The thin gold bar that cut through the logo was DELETED
+        # (owner, 2026-11-11) — no bar element, no bar CSS.
+        self.assertNotIn("bots-gold-bar", html)
         css = self._css()
-        self.assertIn(".bots-gold-bar", css)
+        self.assertNotIn(".bots-gold-bar", css)
         self.assertIn(".bots-crown-banner", css)
-        # Thin gold bar.
-        self.assertRegex(css, r"\.bots-gold-bar\s*\{[^}]*#ffd700")
         # Black banner, crown-tipped (clip-path points on its edge).
         self.assertRegex(css, r"\.bots-crown-banner\s*\{[^}]*#000")
         self.assertIn("clip-path", css)
+
+    def test_fox_logo_has_exactly_one_gold_border(self):
+        # The top logo is the yellow fox's face recolored red, with
+        # NO baked-in gold circle — so the CSS border IS the single
+        # yellow circle line (owner, 2026-11-11). The base .fox-logo
+        # rule must set it, and no other .fox-logo rule (base,
+        # .fox-auth, .home-screen, .bots-screen) may add a second
+        # outline. border-radius: 50% stays (it clips the square
+        # image into a circle).
+        css = self._css()
+        self.assertIn("border-radius: 50%", css)
+        base = re.search(r"\.fox-logo\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(base, "no base .fox-logo rule")
+        self.assertIn("border: 3px solid #ffb300", base.group(1))
+        for m in re.finditer(r"([^{}]*\.fox-logo[^{}]*)\{([^}]*)\}", css):
+            selector = m.group(1).strip()
+            if selector == ".fox-logo":
+                continue
+            self.assertNotRegex(
+                m.group(2), r"border\s*:",
+                "second outline on %s" % selector)
 
 
 if __name__ == "__main__":
