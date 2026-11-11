@@ -132,7 +132,7 @@ def clear_image_cache() -> None:
     _image_cache.clear()
 
 
-def sparkline_svg(points, width: int = 64, height: int = 28) -> str:
+def sparkline_svg(points, width: int = 64, height: int = 16) -> str:
     """A small gold line chart (SVG) from real price points, or "".
 
     `points` is a list of prices (oldest first). Fewer than two
@@ -173,6 +173,65 @@ def sparkline_svg(points, width: int = 64, height: int = 28) -> str:
             f'aria-hidden="true"><polyline points="{pts}" fill="none" '
             f'stroke="#ffd700" stroke-width="1.5" stroke-linejoin="round" '
             f'stroke-linecap="round"/></svg>')
+
+
+def _last_hour(pairs) -> list:
+    """Prices from the last hour of (epoch_seconds, price) pairs,
+    oldest first. The hour ends at the newest point, so a feed
+    that is briefly behind still yields its last hour. Fewer than
+    2 points in the hour returns [] — one point is no line."""
+    if len(pairs) < 2:
+        return []
+    newest = max(ts for ts, _ in pairs)
+    cutoff = newest - 3600.0
+    return [price for ts, price in pairs if ts >= cutoff]
+
+
+def sparkline_points_1h(coin_id: str, is_mint: bool = False,
+                        feed=None, http_get=None) -> list:
+    """Real prices from the last hour for a coin's 1hr sparkline,
+    oldest first. Prefers the live feed's recorded ticks; majors
+    fall back to CoinGecko's 1-day chart filtered to the last
+    hour. Fewer than 2 points in the hour returns [] — the page
+    omits the sparkline (chart building) instead of faking one.
+    Any failure returns []."""
+    coin_id = (coin_id or "").strip()
+    if not coin_id:
+        return []
+    try:
+        feed_pairs = []
+        if feed is not None:
+            for ts, price in (feed.history(coin_id) or []):
+                try:
+                    feed_pairs.append((float(ts), float(price)))
+                except (TypeError, ValueError):
+                    continue
+        points = _last_hour(feed_pairs)
+        if len(points) >= 2:
+            return points
+        if not is_mint:
+            cg_pairs = []
+            result = fetch_market_chart(coin_id, 1, http_get=http_get)
+            for p in (result.get("points") or []):
+                try:
+                    cg_pairs.append((float(p.get("ts") or 0) / 1000.0,
+                                     float(p["price"])))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            points = _last_hour(cg_pairs)
+            if len(points) >= 2:
+                return points
+    except Exception:
+        pass
+    return []
+
+
+def sparkline_svg_1h(coin_id: str, is_mint: bool = False,
+                     feed=None, http_get=None) -> str:
+    """The 1hr sparkline SVG for a coin, or "" when fewer than 2
+    real points exist in the last hour."""
+    return sparkline_svg(sparkline_points_1h(
+        coin_id, is_mint=is_mint, feed=feed, http_get=http_get))
 
 
 def sparkline_points_for_coin(coin_id: str, is_mint: bool = False,
@@ -295,14 +354,14 @@ def reconcile_holdings(db_rows, chain_balances) -> list:
 
 def enrich_row(row: dict, feed=None, http_get=None,
                http_head=None) -> dict:
-    """Attach a coin row's real image URL and sparkline SVG.
+    """Attach a coin row's real image URL and 1hr sparkline SVG.
 
     Sets `row["image_url"]` (only when a verified real image URL
-    resolves) and `row["sparkline_svg"]` (only when real price
-    history exists). A row with no image or no history is left
-    without those keys, and the template falls back to the
-    ticker-initial icon / no sparkline. Never raises; the row is
-    returned unchanged on any failure.
+    resolves) and `row["sparkline_svg"]` (only when at least 2 real
+    prices exist in the last hour). A row with no image or no
+    recent history is left without those keys, and the template
+    falls back to the ticker-initial icon / no sparkline. Never
+    raises; the row is returned unchanged on any failure.
     """
     if not isinstance(row, dict):
         return row
@@ -318,7 +377,7 @@ def enrich_row(row: dict, feed=None, http_get=None,
             http_get=http_get, http_head=http_head)
         if image:
             row["image_url"] = image
-        points = sparkline_points_for_coin(
+        points = sparkline_points_1h(
             coin_id, is_mint=is_mint, feed=feed, http_get=http_get)
         svg = sparkline_svg(points)
         if svg:

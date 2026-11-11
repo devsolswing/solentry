@@ -157,7 +157,7 @@ class TestHomeLiftLayout(HomeLiftBase):
         self.assertNotIn(".holdings-row { font-size: 12px;", css)
         self.assertIn(".holdings-row { font-size: 16px;", css)
         self.assertIn(
-            ".holdings-row .coin-ico { flex: 0 0 34px;", css)
+            ".holdings-row .coin-ico { flex: 0 0 32px;", css)
 
     def test_holdings_show_name_ticker_value_and_1h(self):
         self._choose_mode("paper")
@@ -178,11 +178,11 @@ class TestHomeLiftLayout(HomeLiftBase):
         html = self._html("/wallet")
         self.assertIn("Pump.fun token 1111…1111", html)
         # No 1h data: the 1h cell still shows a dash, never a guess.
-        # (The dash sits in the live-update value span, ahead of the
-        # "1h" label, so the live feed can fill it when data arrives.)
+        # (The dash sits in the live-update value span, so the live
+        # feed can fill it when data arrives. The screenshot shows
+        # only the % — there is no "1h" label under it.)
         self.assertIn('class="holdings-1h muted"', html)
-        self.assertIn('>—</span><span class="holdings-1h-label">1h</span>',
-                      html)
+        self.assertIn('>—</span></span>', html)
 
     def test_home_has_no_back_button_x(self):
         self._choose_mode("paper")

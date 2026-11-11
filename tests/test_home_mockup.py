@@ -421,8 +421,15 @@ class TestHomeMockupLayout(HomeMockupBase):
         html = self._html("/wallet")
         self.assertIn("BUY", html)
         self.assertIn("SELL", html)
-        self.assertIn("🛒", html)
-        self.assertIn("✈", html)
+        # Clean inline SVG icons, not emoji: cart (BUY), download
+        # (SELL + Receive), paper plane (Send).
+        actions = html.split('class="home-actions-row"')[1].split("</div>")[0]
+        self.assertEqual(actions.count("<svg"), 4)
+        for emoji in ("🛒", "⬇", "✈"):
+            self.assertNotIn(emoji, actions)
+        self.assertIn("M1 1h4l2.68 13.39", actions)  # cart
+        self.assertIn("M21 15v4a2 2 0 0 1-2 2", actions)  # download
+        self.assertIn("polygon points=\"22 2 15 22", actions)  # plane
         # All four are wired to the existing flows.
         self.assertIn('data-quick-trade-open', html)
         self.assertIn('data-trade="buy"', html)
@@ -569,10 +576,11 @@ class TestLoginFoxMotto(unittest.TestCase):
         self.assertIn("$GATE?", html)
         css = open("tradingbot/static/style.css").read()
         # The motto is raised to the fox's vertical centre (not
-        # sitting at the bottom) and set large, like the screenshot.
+        # sitting at the bottom) and set large, like the screenshot
+        # — half the size it was (owner 2026-11-11 ~05:52), raised.
         self.assertIn(".fox-hero { display: flex; align-items: center;",
                       css)
-        self.assertIn("font-size: clamp(28px, 6dvh, 48px);", css)
+        self.assertIn("font-size: clamp(20px, 3.5dvh, 30px);", css)
 
     def test_login_still_has_create_account_not_back(self):
         html = self._page()

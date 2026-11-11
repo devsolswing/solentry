@@ -220,7 +220,7 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .home-range-btn { color: #ffd700; text-decoration: none; font-size: 12px; font-weight: 700; padding: 3px 8px; border: 1px solid rgba(255, 179, 0, .35); border-radius: 999px; }
 .home-range-btn.active { background: #ffd700; color: #1a0505; border-color: #ffd700; }
 .home-chart-wrap { position: relative; }
-.home-chart-wrap svg { width: 100%; height: 90px; display: block; }
+.home-chart-wrap svg { width: 100%; height: 100px; display: block; }
 .detail-stats { background: #160b08; border: 2px solid #ffb300; border-radius: 12px; padding: 10px 14px; margin: 8px 0; }
 .detail-stats p { margin: 6px 0; font-size: 14px; }
 
@@ -253,8 +253,8 @@ body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-directio
 .chart-more { flex: 0 0 auto; font-size: 26px; font-weight: 900; color: #ffd700; text-decoration: none; padding: 0 10px; line-height: 1; }
 .buy-sell-row { display: flex; gap: 10px; margin: 4px 0 8px; }
 .buy-btn, .sell-btn { flex: 1; padding: 14px; font-size: 20px; font-weight: 900; border-radius: 12px; border: 2px solid #ffcf3d; cursor: pointer; }
-.buy-btn { background: linear-gradient(180deg, #ffd700 0%, #ffb300 100%); color: #1a0505; }
-.sell-btn { background: linear-gradient(180deg, #e62e1b 0%, #b91c1c 100%); color: #fff; border-color: #ff6b5e; }
+.buy-btn { background: #ffd700; color: #1a0505; border-color: #ffd700; }
+.sell-btn { background: #e62e1b; color: #fff; border-color: #e62e1b; }
 .section-link { float: right; font-size: 13px; }
 .holdings-panel { flex: 1 1 auto; min-height: 80px; max-height: none; }
 .coin-ico { flex: 0 0 34px; width: 34px; height: 34px; border-radius: 50%; background: #1a0805; border: 2px solid #ffb300; color: #ffd700; font-weight: 900; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; }
@@ -296,7 +296,8 @@ body.trenches-theme .trenches-title { color: #ffd700; font-size: 30px; margin: 4
 body.trenches-theme .trenches-panel { border-color: #ffd700; background: #000; }
 body.trenches-theme .coin-list-panel { background: #000; border-color: #ffd700; }
 .trenches-panel { flex: 1 1 auto; min-height: 120px; max-height: none; }
-.hud-ico { font-size: 20px; line-height: 1; }
+.hud-ico { display: flex; line-height: 1; }
+.hud-ico svg { width: 26px; height: 26px; display: block; }
 .se-page { max-width: 480px; margin: 0 auto; padding: 10px 12px 28px; background: radial-gradient(120% 60% at 50% 0%, #2a0705 0%, #0a0505 55%, #050303 100%); border-radius: 0; }
 .se-hero img { width: 100%; display: block; border-radius: 14px; border: 2px solid rgba(255, 190, 0, .55); box-shadow: 0 0 28px rgba(255, 30, 0, .35); }
 .se-title { font-size: clamp(52px, 17vw, 76px); font-weight: 900; font-style: italic; letter-spacing: -3px; line-height: 1; text-align: center; margin: 14px 0 4px; color: #ff2d20; background: linear-gradient(100deg, #ff1e14 0%, #ff5e1f 35%, #ffb300 65%, #ffd700 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 10px rgba(255, 60, 0, .55)); position: relative; }
@@ -357,9 +358,9 @@ body.trenches-theme .coin-list-panel { background: #000; border-color: #ffd700; 
 /* ------------------------------------------------------------------ */
 body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
 .home-screen .fox-logo { width: clamp(56px, 10dvh, 96px); height: clamp(56px, 10dvh, 96px); }
-.home-wordmark { font-size: clamp(32px, 5dvh, 44px); }
+.home-wordmark { font-size: clamp(36px, 6dvh, 50px); background: linear-gradient(100deg, #ffb300 0%, #ffd700 50%, #ffcf3d 100%); }
 .home-total { padding: 10px 14px; }
-.home-total .portfolio-total { font-size: clamp(32px, 5dvh, 44px); }
+.home-total .portfolio-total { font-size: clamp(32px, 5dvh, 44px); color: #fff; }
 /* Narrower chart, same proportions (the SVG keeps its aspect, so
    nothing is clipped — the full chart is one tap away via ›). */
 .home-total .portfolio-chart { max-width: 280px; margin: 10px auto 0; }
@@ -402,10 +403,12 @@ body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
    headline and each row show — the other balance's spans hide. */
 #fees[data-fee-view="solentry"] [data-fee-view-pumpfun] { display: none; }
 #fees[data-fee-view="pumpfun"] [data-fee-view-solentry] { display: none; }
-.holdings-row { font-size: 16px; padding: 11px 10px; }
-.holdings-row .coin-ico { flex: 0 0 34px; width: 34px; height: 34px; font-size: 15px; }
-.holdings-name { display: block; font-size: 15px; }
-.holdings-amount { display: block; font-size: 13px; margin-top: 1px; }
+.holdings-row { font-size: 16px; padding: 7px 10px; }
+.holdings-row .coin-ico { flex: 0 0 32px; width: 32px; height: 32px; font-size: 14px; }
+.holdings-row .coin-img { flex: 0 0 32px; width: 32px; height: 32px; }
+.holdings-name { display: block; font-size: 16px; }
+.holdings-row .coin-ticker { font-size: 12px; }
+.holdings-amount { display: block; font-size: 12px; margin-top: 1px; }
 
 /* Coin detail page: four action buttons + the live chart. */
 .coin-actions-row { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
@@ -441,15 +444,14 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 .home-logo .home-wordmark { margin: 0; text-align: left; }
 /* One row of four action buttons, raised near the top under the fox. */
 .home-actions-row { display: flex; gap: 8px; margin: 6px 0 8px; }
-.home-actions-row .buy-btn, .home-actions-row .sell-btn { flex: 1 1 0; padding: 12px 2px; font-size: 17px; }
-.home-actions-row .send-receive-btn { flex: 1 1 0; padding: 12px 2px; font-size: 15px; text-align: center; }
+.home-actions-row .buy-btn, .home-actions-row .sell-btn, .home-actions-row .send-receive-btn { flex: 1 1 0; padding: 12px 2px; font-size: 16px; text-align: center; }
+.home-actions-row .send-receive-btn { background: #000; border: 2px solid #ffb300; color: #ffd700; }
 .home-total { margin: 2px 0 4px; padding: 10px 14px; }
 .home-total .change-24h .chart-more { font-size: 14px; font-weight: 700; padding: 0 4px; }
-.home-screen .section-title { margin: 6px 0 4px; }
+.home-screen .section-title { margin: 6px 0 4px; font-size: 14px; }
 .holdings-summary { margin: 2px 0 6px; }
 /* 1-hour % column on each holdings button. */
-.holdings-1h { flex: 0 0 auto; text-align: right; font-weight: 800; font-size: 16px; }
-.holdings-1h-label { display: block; font-size: 11px; font-weight: 700; color: #b9a99a; }
+.holdings-1h { flex: 0 0 auto; text-align: right; font-weight: 800; font-size: 14px; }
 
 /* ------------------------------------------------------------------ */
 /* Fox login / sign-up pages (Pages 1 and 2, from the owner's        */
@@ -468,31 +470,31 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
    visible and tappable. Nothing here touches long pages: they keep
    scrolling exactly as before. */
 .fox-topbar { height: 40px; padding-top: 0; padding-bottom: 0; }
-.fox-auth { max-width: 480px; margin: -16px auto -40px; padding: 6px 14px 8px; background: #000; height: calc(100vh - 40px); height: calc(100dvh - 40px); display: flex; flex-direction: column; overflow: hidden; }
+.fox-auth { max-width: 480px; margin: -16px auto -40px; padding: 4px 14px 6px; background: #000; height: calc(100vh - 40px); height: calc(100dvh - 40px); display: flex; flex-direction: column; overflow: hidden; }
 .fox-auth > * { flex-shrink: 0; }
-.fox-auth > .fox-hero { flex: 1 1 0; min-height: 40px; }
+.fox-auth > .fox-hero { flex: 1 1 0; min-height: clamp(70px, 12dvh, 120px); max-height: clamp(110px, 16dvh, 160px); margin-bottom: 2dvh; }
 /* A flash message (e.g. failed login) sits above the column: shrink
    the column by its height so the page still does not scroll. */
 .wrap:has(> .flash) .fox-auth { height: calc(100vh - 40px - 57px); height: calc(100dvh - 40px - 57px); }
-.fox-brand { display: flex; align-items: center; gap: 14px; margin: 1dvh 0 0.5dvh; }
-.fox-auth .fox-logo { width: clamp(64px, 11dvh, 104px); height: clamp(64px, 11dvh, 104px); }
-.fox-wordmark { font-size: clamp(36px, 7.5dvh, 62px); font-weight: 900; font-style: italic; letter-spacing: -2px; line-height: 1; margin: 0; background: linear-gradient(100deg, #ffb300 0%, #ffd700 50%, #ffb300 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 8px rgba(255, 170, 0, .4)); }
-.fox-rule { height: 2px; border: none; margin: 1dvh 0; background: linear-gradient(90deg, #ffd700 0%, #ff7a18 45%, #ff2d20 100%); }
-.fox-field { position: relative; margin: 1dvh 0 0; }
-.fox-field input { width: 100%; padding: clamp(9px, 1.5dvh, 14px) 48px clamp(9px, 1.5dvh, 14px) 46px; background: #000; color: #ffd700; border: 2px solid #ffb300; border-radius: 12px; font-size: 17px; font-weight: 800; box-shadow: 0 0 12px rgba(255, 170, 0, .25); }
+.fox-brand { display: flex; align-items: center; gap: 12px; margin: 0.6dvh 0 0.3dvh; }
+.fox-auth .fox-logo { width: clamp(72px, 12dvh, 112px); height: clamp(72px, 12dvh, 112px); }
+.fox-wordmark { font-size: clamp(40px, 8dvh, 66px); font-weight: 900; font-style: italic; letter-spacing: -2px; line-height: 1; margin: 0; background: linear-gradient(100deg, #ffb300 0%, #ffd700 50%, #ffb300 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 2px 8px rgba(255, 170, 0, .4)); }
+.fox-rule { height: 2px; border: none; margin: 0.6dvh 0; background: linear-gradient(90deg, #ffd700 0%, #ff7a18 45%, #ff2d20 100%); }
+.fox-field { position: relative; margin: 0.5dvh 0 0; }
+.fox-field input { width: 100%; padding: clamp(8px, 1.2dvh, 12px) 48px clamp(8px, 1.2dvh, 12px) 46px; background: #000; color: #ffd700; border: 2px solid #ffb300; border-radius: 12px; font-size: 17px; font-weight: 800; box-shadow: 0 0 12px rgba(255, 170, 0, .25); }
 .fox-field input::placeholder { color: #9a9a9a; font-weight: 400; }
 .fox-field input:focus { outline: none; border-color: #ffd700; box-shadow: 0 0 16px rgba(255, 200, 0, .5); }
 .fox-field .fox-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); font-size: 19px; color: #ffd700; }
 .fox-field .fox-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; font-size: 20px; cursor: pointer; padding: 6px; line-height: 1; color: #ffd700; }
 .fox-field .fox-eye.off::after { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; background: #ff2d20; transform: rotate(-45deg); }
-.fox-forgot { display: block; margin: 0.6dvh 0 0; color: #ff2d20; font-size: 15px; text-decoration: underline; text-underline-offset: 3px; }
+.fox-forgot { display: block; margin: 0.4dvh 0 0; color: #ff2d20; font-size: 14px; text-decoration: underline; text-underline-offset: 3px; }
 .fox-forgot:active { color: #fff; }
-.fox-btn { display: block; width: 100%; padding: clamp(9px, 1.6dvh, 14px); font-size: clamp(18px, 2.6dvh, 22px); font-weight: 800; border-radius: 14px; cursor: pointer; margin-top: 1.2dvh; text-align: center; text-decoration: none; }
+.fox-btn { display: block; width: 100%; padding: clamp(8px, 1.3dvh, 12px); font-size: clamp(18px, 2.6dvh, 22px); font-weight: 800; border-radius: 14px; cursor: pointer; margin-top: 0.7dvh; text-align: center; text-decoration: none; }
 .fox-btn:active { transform: scale(.98); filter: brightness(1.2); }
 .fox-btn-gold { color: #1a0505; background: linear-gradient(180deg, #ffd700 0%, #f5a623 55%, #e8a020 100%); border: 2px solid #ffcf3d; box-shadow: 0 0 18px rgba(255, 170, 0, .5); }
 .fox-btn-red { color: #ff2d20; background: #4a0505; border: 2px solid #ff2d20; }
 .fox-btn-donate { color: #ffd700; background: #000; border: 2px solid #ffb300; }
-.fox-passkey { display: block; width: 100%; margin: 1dvh 0 0; background: none; border: none; color: #ffd700; font-size: 15px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.fox-passkey { display: block; width: 100%; margin: 0.6dvh 0 0; background: none; border: none; color: #ffd700; font-size: 14px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 /* The donate card is hidden until Donate is tapped; when shown it
    becomes a fixed bottom sheet so it never makes the page scroll. */
 .fox-auth .se-card { position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 60; max-width: 456px; margin: 0 auto; max-height: 72vh; max-height: 72dvh; overflow-y: auto; }
@@ -500,12 +502,21 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
    screenshot): the big gold fox sits bottom-left and the red
    "Still on the $GATE?" motto is raised to the fox's vertical
    centre on its right, in large red italic letters. */
-.fox-hero { display: flex; align-items: center; gap: 12px; padding-top: 1dvh; }
-.fox-hero img { height: 100%; max-height: 100%; width: auto; max-width: 50%; flex: 0 0 auto; display: block; object-fit: contain; }
-.fox-tagline { color: #ff2d20; font-size: clamp(28px, 6dvh, 48px); font-weight: 900; font-style: italic; line-height: 1.05; margin: 0; flex: 1 1 auto; }
+.fox-hero { display: flex; align-items: center; gap: 10px; padding-top: 0.5dvh; }
+.fox-hero img { height: 100%; max-height: 100%; width: auto; max-width: 46%; flex: 0 0 auto; display: block; object-fit: contain; }
+.fox-tagline { color: #ff2d20; font-size: clamp(20px, 3.5dvh, 30px); font-weight: 900; font-style: italic; line-height: 1.05; margin: 0; flex: 1 1 auto; }
 .fox-reveal { text-align: center; margin: 2dvh 0; }
 .fox-reveal .fox-username { color: #ffd700; font-size: 28px; font-weight: 800; }
 .fox-note { color: #b9a99a; font-size: 13px; text-align: center; margin: 1dvh 0 0; }
+
+/* Short screens: the brand and the hero floor shrink a touch so Pages
+   1 and 2 still fit one screen with no scrolling (Page 2 has six
+   fields). The hero stays large — only its guaranteed share drops. */
+@media (max-height: 700px) {
+  .fox-auth .fox-logo { width: clamp(56px, 10dvh, 84px); height: clamp(56px, 10dvh, 84px); }
+  .fox-auth .fox-wordmark { font-size: clamp(32px, 6.5dvh, 52px); }
+  .fox-auth > .fox-hero { min-height: clamp(60px, 10dvh, 100px); max-height: clamp(80px, 12dvh, 120px); }
+}
 
 /* ------------------------------------------------------------------ */
 /* Home mockup (owner's screenshot, 2026-11-11): Page 3 rebuilt to   */
@@ -525,7 +536,8 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 .home-screen .fox-logo { width: clamp(64px, 12dvh, 110px); height: clamp(64px, 12dvh, 110px); }
 /* Action buttons: icon stacked over the label, like the screenshot. */
 .home-actions-row .btn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: 14px; padding: 10px 2px; }
-.home-action-ico { display: block; font-size: 24px; line-height: 1; }
+.home-action-ico { display: block; line-height: 1; }
+.home-action-ico svg { width: 26px; height: 26px; display: block; }
 .home-action-label { display: block; font-size: 16px; font-weight: 900; }
 /* Balance window: left-aligned total, % change big on the right. */
 .home-total { text-align: left; }
@@ -535,7 +547,7 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 .home-total .portfolio-mode { text-align: left; }
 .home-total-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .home-total-row .portfolio-total { margin: 2px 0 0; text-align: left; flex: 1 1 auto; min-width: 0; }
-.home-total-pct { font-size: clamp(24px, 4dvh, 32px); font-weight: 900; margin: 2px 0 0; flex: 0 0 auto; }
+.home-total-pct { font-size: clamp(20px, 3dvh, 26px); font-weight: 900; margin: 2px 0 0; flex: 0 0 auto; }
 .home-total-cad { margin: 2px 0 0; font-size: 15px; }
 /* Currency selector: the app prices in CAD, so the dropdown lists
    the one display currency. A <details> element — it opens and
@@ -547,11 +559,59 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 .home-currency-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; background: #160b08; border: 2px solid #ffb300; border-radius: 10px; padding: 8px 10px; min-width: 210px; box-shadow: 0 0 16px rgba(255, 120, 0, .3); }
 .home-currency-option { margin: 0; color: #ffd700; font-weight: 700; font-size: 14px; }
 .home-currency-menu .muted { margin: 4px 0 0; }
-/* Holdings rows: real token image (40px circle, gold ring) or the
-   ticker-initial icon; sparkline; price over total value. */
+/* Holdings rows: real token image (32px circle, gold ring) or the
+   ticker-initial icon; wide thin sparkline; price over the amount. */
+.holdings-panel .coin-list { gap: 6px; }
 .coin-img { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 2px solid #ffb300; background: #1a0805; display: block; }
-.holdings-spark { flex: 0 0 56px; display: flex; align-items: center; }
-.holdings-spark svg { width: 56px; height: 26px; display: block; }
+.holdings-spark { flex: 0 0 64px; display: flex; align-items: center; }
+.holdings-spark svg { width: 64px; height: 16px; display: block; }
+.holdings-spark:empty { display: none; }
 .holdings-price-block { flex: 0 0 auto; text-align: right; min-width: 0; }
-.holdings-price { display: block; font-weight: 800; font-size: 15px; }
-.holdings-value { display: block; font-size: 13px; margin-top: 1px; }
+.holdings-price { display: block; font-weight: 800; font-size: 16px; }
+.holdings-value-live { display: none; }
+
+/* ------------------------------------------------------------------ */
+/* Page 6 (Bots) rebuild — the owner's spec (2026-11-10/11).          */
+/* - Lower scrolling section gone: the assistant (robo logo, yellow   */
+/*   bg, red letters) and the platform-wallet rotating selector       */
+/*   (yellow bg, red writing, two arrows) take the lower half.       */
+/* - Edit Bot is the same size as Add Bot (one shared action-btn).   */
+/* - App name + logo bigger on this page.                             */
+/* - Thin gold bar across the logo, black crown-tipped banner under. */
+/* The page stays one screen (fit-screen): the assistant card takes   */
+/* the remaining space and only its chat log scrolls internally.      */
+/* ------------------------------------------------------------------ */
+.bots-screen .home-logo .fox-logo { width: clamp(96px, 16dvh, 140px); height: clamp(96px, 16dvh, 140px); }
+.bots-screen .home-wordmark { font-size: clamp(48px, 9dvh, 68px); }
+.bots-logo-wrap { position: relative; flex: 0 0 auto; }
+.bots-gold-bar { position: absolute; left: -8px; right: -8px; top: 50%; height: 4px; background: linear-gradient(90deg, #ffd700, #ffb300); box-shadow: 0 0 10px rgba(255, 200, 0, .7); transform: translateY(-50%); }
+.bots-crown-banner { background: #000; color: #ffd700; text-align: center; font-weight: 900; font-size: 20px; letter-spacing: 2px; padding: 8px 12px 16px; margin: 2px 0 6px; border-top: 2px solid #ffb300; clip-path: polygon(0 0, 100% 0, 100% 60%, 87.5% 100%, 75% 60%, 62.5% 100%, 50% 60%, 37.5% 100%, 25% 60%, 12.5% 100%, 0 60%); }
+.bot-actions .action-btn { flex: 1 1 0; padding: 12px 4px; font-size: 16px; font-weight: 700; text-align: center; border-radius: 12px; margin-top: 0; }
+.bot-actions .action-btn:disabled { opacity: .45; cursor: not-allowed; }
+/* Assistant: yellow background, red letters, robo logo. */
+.bots-assistant { background: linear-gradient(180deg, #ffd700, #ffb300); color: #b91c1c; border-color: #b91c1c; margin: 8px 0; padding: 12px; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.bots-assistant h2 { color: #b91c1c; margin: 0 0 4px; }
+.bots-assistant .robo-logo { font-size: 26px; }
+.bots-assistant .muted { color: #7f1d1d; }
+.bots-assistant .chat-log { background: rgba(255, 255, 255, .4); border: 2px solid #b91c1c; color: #b91c1c; flex: 1 1 auto; min-height: 44px; max-height: none; }
+.bots-assistant .chat-log p { color: #b91c1c; }
+.bots-assistant .chat-log a { color: #7f1d1d; }
+.bots-assistant input { background: #fff; color: #b91c1c; border: 2px solid #b91c1c; }
+.bots-assistant .btn { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
+/* Platform wallets: rotating selector, yellow background, red writing. */
+.bots-wallets { background: linear-gradient(180deg, #ffd700, #ffb300); color: #b91c1c; border-color: #b91c1c; margin: 8px 0; padding: 12px; flex: 0 0 auto; }
+.bots-wallets h2 { color: #b91c1c; margin: 0 0 4px; }
+.bots-wallets .muted { color: #7f1d1d; }
+.bots-wallets .addr { background: #fff; color: #7f1d1d; border-color: #b91c1c; }
+.bots-wallets .btn.small { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
+.wallet-rotator { display: flex; align-items: center; gap: 8px; }
+.wallet-arrow { flex: 0 0 auto; background: #b91c1c; color: #ffd700; border-color: #7f1d1d; }
+.wallet-panels { flex: 1 1 auto; min-width: 0; }
+.wallet-panel { display: block; }
+.wallet-rotator[data-rotating] .wallet-panel { display: none; }
+.wallet-rotator[data-rotating] .wallet-panel.active { display: block; }
+.wallet-counter { text-align: center; margin: 4px 0 0; }
+@media (max-height: 640px) {
+  .bots-screen .home-logo .fox-logo { width: 72px; height: 72px; }
+  .bots-screen .home-wordmark { font-size: 36px; }
+}

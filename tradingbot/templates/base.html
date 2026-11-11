@@ -65,10 +65,10 @@ if ("serviceWorker" in navigator) {
    from the Log button on the home screen; the Coins page is one tap
    away from the home holdings panel. #}
 <nav class="hud" aria-label="Pages">
-  <a class="hud-item{{ ' active' if request.path == '/wallet' else '' }}" href="{{ url_for('wallet') }}"><span class="hud-ico" aria-hidden="true">⌂</span><span>Home</span></a>
-  <a class="hud-item{{ ' active' if request.path.startswith('/bots') else '' }}" href="{{ url_for('bots') }}"><span class="hud-ico" aria-hidden="true">🤖</span><span>Bots</span></a>
-  <a class="hud-item{{ ' active' if request.path.startswith('/wallet/') else '' }}" href="{{ url_for('wallet_details') }}"><span class="hud-ico" aria-hidden="true">💰</span><span>Wallet</span></a>
-  <a class="hud-item{{ ' active' if request.path.startswith('/settings') else '' }}" href="{{ url_for('settings') }}"><span class="hud-ico" aria-hidden="true">⚙️</span><span>Settings</span></a>
+  <a class="hud-item{{ ' active' if request.path == '/wallet' else '' }}" href="{{ url_for('wallet') }}"><span class="hud-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span><span>Home</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/bots') else '' }}" href="{{ url_for('bots') }}"><span class="hud-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><line x1="12" y1="8" x2="12" y2="4"/><circle cx="12" cy="3" r="1"/><line x1="9" y1="13" x2="9.01" y2="13"/><line x1="15" y1="13" x2="15.01" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg></span><span>Bots</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/wallet/') else '' }}" href="{{ url_for('wallet_details') }}"><span class="hud-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M2 10h20"/><circle cx="17" cy="15" r="1"/></svg></span><span>Wallet</span></a>
+  <a class="hud-item{{ ' active' if request.path.startswith('/settings') else '' }}" href="{{ url_for('settings') }}"><span class="hud-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg></span><span>Settings</span></a>
 </nav>
 {% endif %}
 {% if show_mode_chooser %}

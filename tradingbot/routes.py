@@ -58,6 +58,8 @@ from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
 from .prices import COINS, clear_price_cache, get_prices
 from .builderbot import list_adjustments
+from .home_holdings import (enrich_row, fetch_chain_token_balances,
+                            reconcile_holdings, sparkline_svg_1h)
 from .ledger import bot_wl_summary, recent_trades
 from .rules import (RUG_SELL_DEFAULT, SCANNER_CATEGORY, SCANNER_DISPLAY,
                     SCANNER_PRESET_NAME, TRENCHES_CATEGORY,
@@ -410,6 +412,28 @@ def _real_holdings_view(db, user_id: int) -> list:
     return [merged[k] for k in sorted(merged)]
 
 
+def _reconciled_real_holdings(app, db, user_id: int) -> list:
+    """Real holdings with on-chain balances merged in (devnet).
+
+    The chain is the truth for the AMOUNT held: a coin the wallet
+    holds on-chain but the DB never recorded (its buys were
+    recorded as failed, e.g. Gate) appears with avg_price=None and
+    on_chain_only=True. Any failure (no wallet, RPC down, partial
+    read) falls back to the DB view alone — a chain problem must
+    never hide a recorded holding. Nothing here writes to the DB;
+    the reconciliation is per-render only."""
+    db_rows = _real_holdings_view(db, user_id)
+    try:
+        wallet = _wallet(app, user_id)
+        if not wallet:
+            return db_rows
+        client = SolanaRpcClient(_cfg(app).rpc_url)
+        chain = fetch_chain_token_balances(client, wallet["pubkey"])
+        return reconcile_holdings(db_rows, chain)
+    except Exception:
+        return db_rows
+
+
 def _record_real_holding(db, user_id: int, mint: str, coin_amount: float,
                          avg_price: float) -> None:
     """Merge a real buy into real_holdings (manual real trades)."""
@@ -473,22 +497,34 @@ def _real_avg_price(app, mint: str, amount_sol: float,
 
 
 def _coin_rows(db, user_id: int, mode: str, prices: dict,
-               feed=None) -> list:
+               feed=None, app=None) -> list:
     """The coins list: ONLY the coins the user holds in the ACTIVE
     mode, with name, ticker, current price, P&L and 1-hour % change.
     Coins the user does not hold are not listed here at all — the
     trenches list and the quick Buy/Sell popup (with live search)
     are how new coins are found. P&L is (current price − average
     cost) × amount; a holding with no current price has P&L None
-    and is valued at cost — never guessed. A holding with no 1h
-    figure in the feed has change_1h None ("—" on the page). When a
-    live feed is passed, any price it rejects against its last good
-    tick is dropped here too, so a bad tick can never inflate a
-    balance on render; with no feed (or no reference yet) every
-    price passes unchanged."""
+    and is valued at cost — never guessed. A holding with no
+    cost basis (on-chain only, e.g. Gate, whose buys were recorded
+    as failed) has avg_price None and P&L None — never guessed.
+    A holding with no 1h figure in the feed has change_1h None
+    ("—" on the page). When a live feed is passed, any price it
+    rejects against its last good tick is dropped here too, so a
+    bad tick can never inflate a balance on render; with no feed
+    (or no reference yet) every price passes unchanged. In devnet
+    mode with `app`, holdings are reconciled with the wallet's
+    on-chain token balances first (see _reconciled_real_holdings),
+    so coins the chain holds but the DB never recorded appear.
+    Each row is enriched with its real token image and sparkline
+    (home_holdings.enrich_row) — a row with no image or no history
+    keeps the ticker-initial icon / no sparkline, never a fake."""
     price_map = {c: e.get("price") for c, e in prices["prices"].items()}
     if mode == "devnet":
-        held = {h["coin_id"]: h for h in _real_holdings_view(db, user_id)}
+        if app is not None:
+            held = {h["coin_id"]: h for h in
+                    _reconciled_real_holdings(app, db, user_id)}
+        else:
+            held = {h["coin_id"]: h for h in _real_holdings_view(db, user_id)}
     else:
         held = {h["coin_id"]: h for h in db.execute(
             "SELECT coin_id, amount, avg_price FROM paper_holdings "
@@ -526,9 +562,10 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
         if h is None:
             continue
         price = price_map.get(symbol)
+        avg = h["avg_price"]
         pnl = None
-        if price is not None:
-            pnl = (float(price) - float(h["avg_price"])) * float(h["amount"])
+        if price is not None and avg is not None:
+            pnl = (float(price) - float(avg)) * float(h["amount"])
         rows.append({"coin_id": symbol, "name": info["name"],
                      "ticker": symbol, "price": price,
                      "change_24h": prices["prices"].get(symbol, {}).get(
@@ -536,7 +573,7 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
                      "change_1h": prices["prices"].get(symbol, {}).get(
                          "change_1h"),
                      "held": float(h["amount"]),
-                     "avg_price": float(h["avg_price"]),
+                     "avg_price": (float(avg) if avg is not None else None),
                      "pnl": pnl, "is_mint": False,
                      "value": (float(h["amount"]) * float(price))
                      if price is not None else None})
@@ -545,9 +582,10 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
             continue
         price = price_map.get(mint)
         h = held[mint]
+        avg = h["avg_price"]
         pnl = None
-        if price is not None:
-            pnl = (float(price) - float(h["avg_price"])) * float(h["amount"])
+        if price is not None and avg is not None:
+            pnl = (float(price) - float(avg)) * float(h["amount"])
         ident = identities.get(mint) or {}
         rows.append({"coin_id": mint,
                      "name": ident.get("name") or (
@@ -556,10 +594,15 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
                      "price": price, "change_24h": None,
                      "change_1h": changes_1h.get(mint),
                      "held": float(h["amount"]),
-                     "avg_price": float(h["avg_price"]),
+                     "avg_price": (float(avg) if avg is not None else None),
                      "pnl": pnl, "is_mint": True,
                      "value": (float(h["amount"]) * float(price))
                      if price is not None else None})
+    # Attach each row's real token image + sparkline. Enrichment
+    # never raises and never invents data — a row with no image or
+    # no history keeps the ticker-initial icon / no sparkline.
+    for row in rows:
+        enrich_row(row, feed=feed)
     return rows
 
 
@@ -1656,7 +1699,7 @@ def register_routes(app: Flask) -> None:
         real_sol = (_real_balance(app, wallet["pubkey"])
                     if wallet and mode == "devnet" else None)
         prices = get_prices()
-        coin_rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"))
+        coin_rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
         holdings_value = sum(r["held"] * (r["price"] or 0.0)
                              for r in coin_rows)
         # Portfolio header (Kraken-style): total balance + chart from
@@ -1894,7 +1937,7 @@ def register_routes(app: Flask) -> None:
         if coin_id_resolved is None:
             abort(404)
         prices = get_prices()
-        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"))
+        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
         if row is None:
@@ -1924,7 +1967,7 @@ def register_routes(app: Flask) -> None:
         if coin_id_resolved is None:
             abort(404)
         prices = get_prices()
-        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"))
+        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
         if row is None:
@@ -2083,6 +2126,27 @@ def register_routes(app: Flask) -> None:
         return jsonify({"ok": True,
                         "ticks": feed.snapshot(coins or None),
                         "as_of": _now()})
+
+    @app.route("/api/sparklines")
+    @login_required
+    def sparklines_snapshot():
+        """Fresh 1hr sparklines for the home page's holdings rows.
+        The home page polls this every 60 seconds so each coin's
+        1hr chart keeps moving with the live feed. Returns
+        {ok: True, sparklines: {coin_id: svg-or-null}}. A coin with
+        fewer than 2 real points in the last hour returns null —
+        the page leaves its sparkline alone (chart building),
+        never faked."""
+        coins = [c.strip()
+                 for c in (request.args.get("coins") or "").split(",")
+                 if c.strip()]
+        feed = app.config["LIVE_FEED"]
+        out = {}
+        for coin_id in coins:
+            is_mint = coin_id.upper() not in COINS
+            svg = sparkline_svg_1h(coin_id, is_mint=is_mint, feed=feed)
+            out[coin_id] = svg or None
+        return jsonify({"ok": True, "sparklines": out, "as_of": _now()})
 
     @app.route("/api/fees")
     @login_required
@@ -3206,8 +3270,17 @@ def register_routes(app: Flask) -> None:
         bots = data["bots"]
         memecoin_bots = [b for b in bots
                          if b["category"] == TRENCHES_CATEGORY]
+        # Platform wallets for the Bots-page rotating selector (Page 6
+        # rebuild): the same per-platform wallets Page 8 shows, so
+        # the selector renders real data and its Create buttons post
+        # to the existing create route. Page 8 itself is untouched.
         return render_template("bots.html", **data,
-                               memecoin_bots=memecoin_bots)
+                               memecoin_bots=memecoin_bots,
+                               platforms=platforms_mod.PLATFORMS,
+                               platform_labels=platforms_mod.PLATFORM_LABELS,
+                               platform_notes=platforms_mod.PLATFORM_NOTES,
+                               platform_wallets=platforms_mod.get_platform_wallets(
+                                   _db(app), user["id"]))
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required

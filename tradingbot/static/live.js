@@ -140,6 +140,50 @@
     }
   }
 
+  /* Holdings 1hr sparklines (home page): each coin row's small
+     chart refreshes every 60 seconds from /api/sparklines, so the
+     1hr chart keeps moving with the live feed instead of sitting
+     static from page load. A coin with fewer than 2 real points
+     in the last hour returns null -- its sparkline is left alone
+     (chart building), never faked. The poll stops when the page
+     is hidden or closed, so it never runs in the background. */
+  var sparkEls = collect('[data-sparkline-coin]');
+  var SPARK_POLL_MS = 60000;
+  var sparkTimer = null;
+  function fetchSparklines() {
+    if (!sparkEls.length) return;
+    var ids = [];
+    sparkEls.forEach(function (el) {
+      ids.push(el.getAttribute('data-sparkline-coin'));
+    });
+    fetch('/api/sparklines?coins=' + encodeURIComponent(ids.join(',')),
+      { credentials: 'same-origin' })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (!data || !data.ok || !data.sparklines) return;
+        sparkEls.forEach(function (el) {
+          var svg = data.sparklines[el.getAttribute('data-sparkline-coin')];
+          if (typeof svg === 'string' && svg) el.innerHTML = svg;
+        });
+      })
+      .catch(function () { /* next poll retries; last chart stands */ });
+  }
+  function startSparkPoll() {
+    if (sparkTimer) return;
+    fetchSparklines();
+    sparkTimer = setInterval(fetchSparklines, SPARK_POLL_MS);
+  }
+  function stopSparkPoll() {
+    if (sparkTimer) { clearInterval(sparkTimer); sparkTimer = null; }
+  }
+  if (sparkEls.length) {
+    startSparkPoll();
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) stopSparkPoll();
+      else startSparkPoll();
+    });
+    window.addEventListener('pagehide', stopSparkPoll);
+  }
   var chart = document.getElementById('live-chart');
   var statusEl = document.getElementById('live-status');
 

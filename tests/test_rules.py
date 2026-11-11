@@ -605,12 +605,17 @@ class TestRulesRoutes(unittest.TestCase):
             (self.user_id,)).fetchone()["c"]
         self.assertEqual(count, 1)
 
-    def test_bots_page_memecoin_section(self):
+    def test_bots_page_memecoin_section_removed(self):
+        # Page 6 rebuild: the Memecoin build section (Trenches
+        # description + "+ Create the Trenches bot" button) is gone
+        # from the Bots page — the lower scrolling section was
+        # removed. The Trenches preset itself is unchanged and is
+        # created through the assistant (see test_assistant_preset_create).
         resp = self.client.get("/bots")
         html = resp.get_data(as_text=True)
-        self.assertIn("Memecoin build", html)
-        self.assertIn("Create the Trenches bot", html)
-        self.assertIn("3.4%", html)
+        self.assertNotIn("memecoin-card", html)
+        self.assertNotIn("Create the Trenches bot", html)
+        self.assertIn("create the trenches bot", html)
 
     def test_assistant_preset_create(self):
         data = self._ask("create the trenches bot")

@@ -64,14 +64,18 @@ def create_app(config: Config | None = None) -> Flask:
         # Turnstile challenge (scripts + widget frame). No inline
         # event handlers, no other origins, no framing of this app.
         # style-src allows 'unsafe-inline' for one inline style in
-        # settings.html; img-src allows data: for the hero image.
+        # settings.html; img-src allows data: for the hero image
+        # plus the two token-image hosts (DexScreener + CoinGecko)
+        # so home-page coin images can load — images only, nothing
+        # else is widened.
         nonce = getattr(g, "csp_nonce", "")
         csp = (
             "default-src 'self'; "
             f"script-src 'self' 'nonce-{nonce}' "
             "https://challenges.cloudflare.com; "
             "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; font-src 'self'; "
+            "img-src 'self' data: https://dd.dexscreener.com "
+            "https://assets.coingecko.com; font-src 'self'; "
             "connect-src 'self'; "
             "frame-src https://challenges.cloudflare.com; "
             "object-src 'none'; base-uri 'self'; "

@@ -273,6 +273,26 @@ class TestHomePage(UiBase):
         # The mode switch lives in the topbar, not a fifth tab.
         self.assertIn('action="/mode"', html)
 
+    def test_bottom_nav_uses_svg_icons(self):
+        # The bottom nav uses clean inline SVG icons (house, robot,
+        # wallet, gear) — no emoji — gold for the active item, grey
+        # for the others. Same 4 items, labels, destinations.
+        self._choose_mode("paper")
+        html = self._html("/wallet")
+        nav = html.split('<nav class="hud"')[1].split("</nav>")[0]
+        self.assertEqual(nav.count("<svg"), 4)
+        for emoji in ("⌂", "🤖", "💰", "⚙️"):
+            self.assertNotIn(emoji, nav)
+        for label in ("Home", "Bots", "Wallet", "Settings"):
+            self.assertIn(f">{label}</span>", nav)
+        self.assertIn('stroke="currentColor"', nav)
+        css = open("tradingbot/static/style.css").read()
+        self.assertIn(".hud-ico svg", css)
+        self.assertIn("width: 26px", css)
+        # Active item is gold, inactive items are grey.
+        self.assertIn(".hud-item.active { color: #ffd700;", css)
+        self.assertIn(".hud-item { display: flex; flex-direction: column; align-items: center; gap: 1px; color: #b9a99a;", css)
+
     def test_home_nav_links_all_resolve(self):
         self._choose_mode("paper")
         for path in ("/wallet", "/bots", "/wallet/details", "/settings",
@@ -361,7 +381,10 @@ class TestBotsPage(UiBase):
         self.assertIn("data-balance", html)
         self.assertIn("data-eye-toggle", html)
         self.assertIn("fox-logo", html)
-        self.assertIn("data:image/jpeg;base64,", html)
+        # The logo is the realistic gold fox from the static file —
+        # the old flat gold fox was an embedded base64 blob, deleted.
+        self.assertIn("fox-gold-480.jpg", html)
+        self.assertNotIn("data:image/jpeg;base64,", html)
         self.assertIn('href="/bots/create"', html)
         self.assertIn(f'href="/bots/{bot["id"]}/delete/confirm"', html)
         self.assertIn(f'href="/bots/{bot["id"]}/edit"', html)
@@ -384,8 +407,11 @@ class TestBotsPage(UiBase):
         self.assertNotIn("24H P&amp;L", html)
         # Card taps through to the bot detail page.
         self.assertIn(f'href="/bots/{bot["id"]}"', html)
-        self.assertIn("Trenches", html)
-        self.assertIn('href="/trenches"', html)
+        # The lower scrolling section is gone (Page 6 rebuild): no
+        # Trenches card/link in the page body any more — the
+        # Trenches page is still reachable from home (and stays in
+        # the topbar page picker, which lists every page).
+        self.assertNotIn("trenches-link", html)
         self.assertIn("Logs", html)
 
     def test_bots_page_no_bots_state(self):
@@ -419,7 +445,10 @@ class TestTrenchesPage(UiBase):
         html = self._html("/trenches")
         self.assertIn("trenches-theme", html)
         self.assertIn("fox-logo", html)
-        self.assertIn("data:image/jpeg;base64,", html)
+        # The logo is the realistic gold fox from the static file —
+        # the old flat gold fox was an embedded base64 blob, deleted.
+        self.assertIn("fox-gold-480.jpg", html)
+        self.assertNotIn("data:image/jpeg;base64,", html)
         self.assertIn("Trenches", html)
         self.assertIn("Back home", html)
         self.assertIn("No trenches tokens right now.", html)
@@ -453,10 +482,11 @@ class TestTrenchesPage(UiBase):
         html = self._html("/trenches")
         self.assertIn("Trenches unavailable right now", html)
 
-    def test_trenches_reachable_from_home_and_bots(self):
+    def test_trenches_reachable_from_home(self):
         self._choose_mode("paper")
         self.assertIn('href="/trenches"', self._html("/wallet"))
-        self.assertIn('href="/trenches"', self._html("/bots"))
+        # The Bots page no longer links Trenches (Page 6 rebuild
+        # removed its lower scrolling section).
 
 
 class TestWalletDetails(UiBase):

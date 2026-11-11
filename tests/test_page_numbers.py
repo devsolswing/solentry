@@ -3,9 +3,10 @@ corner, and the numbering lives in one dict (page_numbers).
 
 Also covers the Bots-page duplicate: one Trenches bot plus one
 Scanner bot must render exactly one card each — the "Trenches"
-title must not appear twice as a card (the Trenches page link is a
-slim link, not a card, and the "+ Create the Trenches bot" button
-hides once the bot exists).
+title must not appear twice as a card. (Page 6 rebuild: the lower
+scrolling section that held the Trenches link and the "+ Create
+the Trenches bot" button is gone; the Trenches bot is created
+through the assistant now.)
 """
 
 import re
@@ -164,15 +165,21 @@ class TestPageNumbersRender(unittest.TestCase):
             r'<a class="card bot-card" href="\s*(/bots/\d+)\s*"', html)
         self.assertEqual(sorted(cards),
                          sorted(f"/bots/{i}" for i in ids.values()))
-        # The Trenches page link is a slim link now, not a second
-        # "Trenches" card — and the create button hides once the bot
-        # exists, so it cannot be made twice from this page.
+        # The lower scrolling section is gone (Page 6 rebuild): no
+        # Trenches link, no memecoin card, no create button on this
+        # page — the Trenches bot is created through the assistant.
         self.assertNotIn("trenches-card", html)
-        self.assertIn("Browse the Trenches page", html)
+        self.assertNotIn("trenches-link", html)
+        self.assertNotIn("memecoin-card", html)
         self.assertNotIn("+ Create the Trenches bot", html)
-        self.assertIn("Your Trenches bot is in the carousel above.",
-                      html)
+        self.assertNotIn("Your Trenches bot is in the carousel above.",
+                         html)
+        self.assertIn("create the trenches bot", html)
 
-    def test_create_trenches_button_shows_when_no_trenches_bot(self):
+    def test_no_create_trenches_button_on_bots_page(self):
+        # Page 6 rebuild: the "+ Create the Trenches bot" button is
+        # gone from the Bots page — the assistant is the way to
+        # create the Trenches bot now.
         html = self._html(self.client, "/bots")
-        self.assertIn("+ Create the Trenches bot", html)
+        self.assertNotIn("+ Create the Trenches bot", html)
+        self.assertIn("create the trenches bot", html)
