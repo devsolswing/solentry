@@ -45,9 +45,19 @@ Anything unverified refuses plainly with {"status": "skipped",
 "reason": ...} and no fill: no bonding curve for the mint on
 devnet, a migrated (complete) curve, a missing wallet, a failed
 send, or an unconfirmed transaction all skip — never a fake fill.
+
+Confirmation waits up to ~30s for the chain, and a transaction
+still unconfirmed then gets a final on-chain re-check before it
+is reported as a failure — a slow devnet RPC must never turn a
+landed transaction into a reported error. A preflight rejection
+surfaces the node's own error instead of a bare "not
+confirmed"; a failed trade is never retried.
 """
 
 from __future__ import annotations
+
+import base64
+import time
 
 from . import pumpfun
 from .config import Config
@@ -56,8 +66,9 @@ from .fees import fee_split_lamports
 from .fees import get_fee_recipient_pubkey
 from .security import decrypt_secret_mutable, wipe_secret
 from .signing_bot import ensure_signing_bot
-from .solana import (SYSTEM_PROGRAM, SolanaRpcClient, base58_encode,
-                     build_message, build_transfer_instruction,
+from .solana import (SYSTEM_PROGRAM, RpcError, SolanaRpcClient,
+                     base58_encode, build_message,
+                     build_transfer_instruction,
                      ed25519_publickey_from_seed, is_valid_address,
                      lamports_to_sol, sign_message, sol_to_lamports)
 
@@ -190,18 +201,117 @@ def _load_wallet(db, user_id: int, cfg: Config):
             wipe_secret(secret)
 
 
-def _send_and_confirm(rpc, signed_b64: str) -> str | None:
-    """Send and wait for confirmation. Returns the signature, or
-    None when sending or confirmation failed."""
+def _signature_from_signed_tx(signed_b64: str) -> str | None:
+    """The transaction signature (base58) from a signed legacy
+    transaction, or None when it cannot be decoded. The signature
+    is the first 64 bytes after the compact-u16 signature count."""
     try:
-        signature = rpc.send_transaction(signed_b64)
-        if not signature:
+        raw = base64.b64decode(signed_b64)
+        if not raw or raw[0] != 1 or len(raw) < 65:
             return None
-        if rpc.confirm_transaction(signature):
-            return signature
-        return None
+        return base58_encode(raw[1:65])
     except Exception:
         return None
+
+
+def _tx_status(rpc, signature: str) -> str | None:
+    """One status check: "confirmed", "failed", or None (unknown).
+    Prefers the client's single-shot transaction_status; older
+    fakes only offer confirm_transaction (a bool), which is used
+    as a one-shot check instead."""
+    check = getattr(rpc, "transaction_status", None)
+    if check is not None:
+        try:
+            return check(signature)
+        except Exception:
+            return None
+    try:
+        return "confirmed" if rpc.confirm_transaction(signature) else None
+    except Exception:
+        return None
+
+
+def _recheck_confirmed(rpc, signature: str) -> bool:
+    """Final on-chain re-check after the main confirmation window
+    closed: wait briefly, then check the chain a few more times.
+    True only when the transaction is confirmed; a "failed"
+    status ends the re-check at once (the chain processed it and
+    it did not succeed). A slow devnet RPC can lag behind the
+    chain by seconds — this is what stops a landed transaction
+    from being reported as a failure."""
+    for delay in (3.0, 2.0, 2.0):
+        time.sleep(delay)
+        status = _tx_status(rpc, signature)
+        if status == "confirmed":
+            return True
+        if status == "failed":
+            return False
+    return False
+
+
+def _is_node_rejection(exc: Exception) -> bool:
+    """True when the node itself rejected the transaction (a
+    preflight/simulation error in the RPC error response). A
+    transport failure — the request never reached the node, or
+    its response never came back — is not a rejection: the
+    transaction may have been accepted anyway."""
+    return isinstance(exc, RpcError) and str(exc).startswith(
+        "rpc error response")
+
+
+def _rejection_reason(exc: Exception) -> str:
+    """The node's own rejection, trimmed for the caller to show.
+    Contains only the program/node error — never key material."""
+    msg = str(exc)
+    prefix = "rpc error response: sendTransaction: "
+    if msg.startswith(prefix):
+        msg = msg[len(prefix):]
+    return "transaction rejected: " + msg[:120]
+
+
+def _send_and_confirm(rpc, signed_b64: str,
+                      signature: str | None = None) -> tuple:
+    """Send and wait for confirmation. Returns (signature, None)
+    when the transaction landed on-chain, else (None, reason)
+    where reason explains the failure for the caller to surface.
+
+    The signature is known before sending (the executor signs
+    locally), so a send or confirmation check that fails
+    transiently is never taken as proof the trade failed: the
+    chain is re-checked for the known signature before giving
+    up. A transaction that landed is always reported as a
+    success. Only a transaction the node rejected in preflight,
+    one the chain reports as failed, or one the chain never
+    confirms after the window plus the final re-check is
+    reported as a failure — and a failed trade is never retried."""
+    if signature is None:
+        signature = _signature_from_signed_tx(signed_b64)
+    try:
+        sent = rpc.send_transaction(signed_b64)
+    except Exception as exc:
+        if _is_node_rejection(exc):
+            return None, _rejection_reason(exc)
+        # The send call itself failed (timeout, dropped response)
+        # — the network may still have accepted the transaction.
+        # The signature is known, so check the chain before
+        # calling it a failure.
+        if signature and _recheck_confirmed(rpc, signature):
+            return signature, None
+        return None, "transaction not confirmed"
+    if not sent:
+        if signature and _recheck_confirmed(rpc, signature):
+            return signature, None
+        return None, "transaction not sent"
+    sig = sent or signature
+    try:
+        confirmed = rpc.confirm_transaction(sig)
+    except Exception:
+        confirmed = False
+    if confirmed:
+        return sig, None
+    if _recheck_confirmed(rpc, sig):
+        return sig, None
+    return None, "transaction not confirmed"
 
 
 def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
@@ -349,9 +459,10 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
             return _skip("no blockhash")
         message = build_message(wallet_pubkey, instructions, blockhash)
         signed_b64, signature = sign_message(seed, message)
-        confirmed = _send_and_confirm(rpc, signed_b64)
+        confirmed, confirm_error = _send_and_confirm(
+            rpc, signed_b64, signature)
         if confirmed is None:
-            return _skip("transaction not confirmed")
+            return _skip(confirm_error or "transaction not confirmed")
         coin_amount = tokens / pumpfun.TOKEN_BASE
         try:
             ata_after = rpc.get_token_account_balance(
@@ -501,9 +612,10 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
             return _skip("no blockhash")
         message = build_message(wallet_pubkey, instructions, blockhash)
         signed_b64, signature = sign_message(seed, message)
-        confirmed = _send_and_confirm(rpc, signed_b64)
+        confirmed, confirm_error = _send_and_confirm(
+            rpc, signed_b64, signature)
         if confirmed is None:
-            return _skip("transaction not confirmed")
+            return _skip(confirm_error or "transaction not confirmed")
         return {"status": "executed", "signature": confirmed,
                 "fee_lamports": fee_lamports,
                 "fee_sol": lamports_to_sol(fee_lamports),

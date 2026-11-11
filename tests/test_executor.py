@@ -32,8 +32,9 @@ from tradingbot.executor import (_check_instructions_only_allowed,
 from tradingbot.security import encrypt_secret
 from tradingbot.signing_bot import get_signing_bot
 from tradingbot.silent_loop import run_once
-from tradingbot.solana import (SYSTEM_PROGRAM, TOKEN_PROGRAM, base58_decode,
-                               base58_encode, generate_keypair)
+from tradingbot.solana import (SYSTEM_PROGRAM, TOKEN_PROGRAM, RpcError,
+                               base58_decode, base58_encode,
+                               generate_keypair)
 
 BUY_DISCRIMINATOR = bytes.fromhex("07051dc4f5176550")
 SELL_DISCRIMINATOR = bytes.fromhex("1c92de7726c469d5")
@@ -451,6 +452,133 @@ class TestExecutorGuards(ExecutorBase):
                                     rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("not confirmed", result["reason"])
+
+
+class TestConfirmationRecheck(ExecutorBase):
+    """A landed transaction is never reported as a failure: the
+    confirmation window is long, and a still-unconfirmed
+    transaction gets a final on-chain re-check before the trade
+    is called failed. A genuinely rejected transaction still
+    fails, with the node's own error surfaced."""
+
+    def _buy(self, rpc):
+        curve = pumpfun.parse_bonding_curve(make_curve())
+        rpc.fill_tokens = pumpfun.buy_quote(curve, 95, 963_500_000)
+        return execute_real_trade(self._bot(), self.user_id, self.mint,
+                                  "buy", 1.0, 100.0, self.db, self.cfg,
+                                  rpc_client=rpc)
+
+    def test_slow_confirmation_reports_executed(self):
+        """The main window never sees the transaction, but the
+        final re-check does: the buy is executed, not failed."""
+
+        class SlowRpc(FakePumpRpc):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.status_calls = 0
+
+            def confirm_transaction(self, signature):
+                return False
+
+            def transaction_status(self, signature):
+                self.status_calls += 1
+                return "confirmed" if self.status_calls >= 3 else None
+
+        rpc = SlowRpc(self.pubkey, self.mint, curve=make_curve())
+        result = self._buy(rpc)
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(result["signature"], FAKE_SIGNATURE)
+        self.assertEqual(rpc.status_calls, 3)
+
+    def test_failed_on_chain_reports_failed(self):
+        """The chain processed the transaction and it failed: the
+        buy is skipped, and the re-check stops at once."""
+
+        class FailedRpc(FakePumpRpc):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.status_calls = 0
+
+            def confirm_transaction(self, signature):
+                return False
+
+            def transaction_status(self, signature):
+                self.status_calls += 1
+                return "failed"
+
+        rpc = FailedRpc(self.pubkey, self.mint, curve=make_curve())
+        result = self._buy(rpc)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("not confirmed", result["reason"])
+        self.assertEqual(rpc.status_calls, 1)
+
+    def test_never_confirmed_reports_failed(self):
+        """The chain never confirms the transaction, even on the
+        final re-check: the buy is skipped, not faked."""
+
+        class UnseenRpc(FakePumpRpc):
+            def confirm_transaction(self, signature):
+                return False
+
+            def transaction_status(self, signature):
+                return None
+
+        rpc = UnseenRpc(self.pubkey, self.mint, curve=make_curve())
+        result = self._buy(rpc)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("not confirmed", result["reason"])
+
+    def test_send_transport_error_but_landed_reports_executed(self):
+        """The send call itself fails (dropped response) but the
+        transaction reached the network: the re-check finds it
+        and the buy is executed, under the locally known
+        signature."""
+
+        class FlakySendRpc(FakePumpRpc):
+            def send_transaction(self, signed_b64):
+                # Credit the fill exactly as the base class does,
+                # then fail the call — the network accepted the
+                # transaction, only the response was lost.
+                super().send_transaction(signed_b64)
+                raise RpcError("rpc request failed")
+
+            def transaction_status(self, signature):
+                return "confirmed"
+
+        rpc = FlakySendRpc(self.pubkey, self.mint, curve=make_curve())
+        result = self._buy(rpc)
+        self.assertEqual(result["status"], "executed")
+        parsed = parse_signed_tx(rpc.sent[0])
+        self.assertEqual(result["signature"],
+                         base58_encode(parsed["signature"]))
+
+    def test_send_preflight_rejection_reports_rejected(self):
+        """The node refuses the transaction in preflight: a real
+        failure, reported with the node's own error — and the
+        chain is not re-checked, because a rejected transaction
+        cannot have landed."""
+
+        class RejectingRpc(FakePumpRpc):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.confirm_calls = 0
+
+            def send_transaction(self, signed_b64):
+                raise RpcError(
+                    "rpc error response: sendTransaction: -32002 "
+                    "Transaction simulation failed: Blockhash not found")
+
+            def confirm_transaction(self, signature):
+                self.confirm_calls += 1
+                return False
+
+        rpc = RejectingRpc(self.pubkey, self.mint, curve=make_curve())
+        result = self._buy(rpc)
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("transaction rejected", result["reason"])
+        self.assertIn("simulation failed", result["reason"])
+        self.assertEqual(rpc.confirm_calls, 0)
+        self.assertEqual(rpc.sent, [])
 
 
 class TestDestinationRestriction(unittest.TestCase):

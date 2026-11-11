@@ -509,16 +509,39 @@ class SolanaRpcClient:
             raise RpcError("sendTransaction returned nothing")
         return result
 
-    def confirm_transaction(self, signature: str, attempts: int = 5,
-                            delay_seconds: float = 1.0) -> bool:
-        for _ in range(attempts):
+    def transaction_status(self, signature: str) -> str | None:
+        """One status check for a transaction: "confirmed" when the
+        chain reports it confirmed or finalized, "failed" when the
+        chain reports a processing error, None when the chain has
+        not seen it yet — or when the status check itself failed
+        transiently. A wobbly RPC is never mistaken for a failed
+        transaction: the caller keeps polling on None."""
+        try:
             result = self._call("getSignatureStatuses", [[signature]])
-            if result and result[0]:
-                status = result[0]
-                if status.get("err") is not None:
-                    return False
-                if status.get("confirmationStatus") in ("confirmed", "finalized"):
-                    return True
+        except Exception:
+            return None
+        if result and result[0]:
+            status = result[0]
+            if status.get("err") is not None:
+                return "failed"
+            if status.get("confirmationStatus") in ("confirmed", "finalized"):
+                return "confirmed"
+        return None
+
+    def confirm_transaction(self, signature: str, attempts: int = 15,
+                            delay_seconds: float = 2.0) -> bool:
+        """Wait until the transaction is confirmed, up to ~30s. A
+        status of "failed" ends the wait at once (the chain
+        processed it and it did not succeed — it can never become
+        confirmed). A missing status or a transient RPC error just
+        keeps the wait going: a slow or lagging devnet RPC must
+        never be reported as a failed trade."""
+        for _ in range(attempts):
+            status = self.transaction_status(signature)
+            if status == "confirmed":
+                return True
+            if status == "failed":
+                return False
             time.sleep(delay_seconds)
         return False
 
