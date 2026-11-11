@@ -419,8 +419,20 @@ class SolanaRpcClient:
                  "params": params})
         except Exception as exc:
             raise RpcError("rpc request failed") from exc
-        if not isinstance(resp, dict) or "error" in resp:
-            raise RpcError("rpc error response")
+        if not isinstance(resp, dict):
+            raise RpcError(
+                f"rpc error response: {method}: not a JSON object")
+        err = resp.get("error")
+        if err is not None:
+            # Surface the node's real error (method + code +
+            # message) instead of a bare "rpc error response" — a
+            # removed method used to fail with no usable detail.
+            if isinstance(err, dict):
+                detail = f"{err.get('code')} {err.get('message')}"
+            else:
+                detail = str(err)
+            raise RpcError(
+                f"rpc error response: {method}: {detail}"[:200])
         return resp.get("result")
 
     def get_balance_lamports(self, pubkey: str) -> int:
@@ -480,12 +492,9 @@ class SolanaRpcClient:
             raise RpcError("no blockhash")
         return blockhash
 
-    def get_recent_blockhash(self) -> str:
-        result = self._call("getRecentBlockhash", [])
-        blockhash = (result or {}).get("value", {}).get("blockhash")
-        if not blockhash:
-            raise RpcError("no blockhash")
-        return blockhash
+    # NOTE: there is deliberately no get_recent_blockhash here —
+    # the devnet RPC removed getRecentBlockhash (returns -32601
+    # "Method not found"); getLatestBlockhash is the replacement.
 
     def send_transaction(self, signed_b64: str) -> str:
         result = self._call(

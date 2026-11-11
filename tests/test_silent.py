@@ -21,7 +21,7 @@ class FakeRpc:
     def get_balance_lamports(self, pubkey):
         return self._balance
 
-    def get_recent_blockhash(self):
+    def get_latest_blockhash(self):
         raise AssertionError("silent loop must not send in tests")
 
     def send_transaction(self, signed_b64):

@@ -7,6 +7,7 @@ from unittest import mock
 
 import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
+from tradingbot.solana import RpcError, SolanaRpcClient
 
 DEST = "11111111111111111111111111111111"
 
@@ -22,7 +23,7 @@ class FakeRpc:
     def get_balance_lamports(self, pubkey):
         return 0
 
-    def get_recent_blockhash(self):
+    def get_latest_blockhash(self):
         return "11111111111111111111111111111111"
 
     def send_transaction(self, signed_b64):
@@ -34,8 +35,19 @@ class FakeRpc:
 
 
 class FailingRpc(FakeRpc):
-    def get_recent_blockhash(self):
+    def get_latest_blockhash(self):
         raise RuntimeError("rpc down")
+
+
+class StrictRpc(FakeRpc):
+    """Explodes if the removed getRecentBlockhash method is ever
+    called — the send flow must use getLatestBlockhash (the devnet
+    RPC removed getRecentBlockhash; it returns -32601)."""
+
+    def get_recent_blockhash(self):
+        raise AssertionError(
+            "getRecentBlockhash was removed by the devnet RPC — "
+            "the send flow must use getLatestBlockhash")
 
 
 class TestSendFlow(unittest.TestCase):
@@ -98,6 +110,41 @@ class TestSendFlow(unittest.TestCase):
                 self.client, f"/wallet/send/{intent['id']}/confirm")})
         all_calls = [c for i in FakeRpc.instances for c in i.send_calls]
         self.assertEqual(len(all_calls), 1)
+
+    def test_confirm_uses_get_latest_blockhash(self):
+        # Regression (2026-11-10): the Send flow asked the devnet
+        # RPC for a blockhash with the removed getRecentBlockhash
+        # method and every send failed with "rpc error response".
+        # StrictRpc explodes if the old method is ever called.
+        with mock.patch.object(routes, "SolanaRpcClient", StrictRpc):
+            intent = self._create_intent()
+            resp = self.client.post(
+                f"/wallet/send/{intent['id']}/confirm",
+                data={"csrf_token": csrf(
+                    self.client, f"/wallet/send/{intent['id']}/confirm")})
+        self.assertEqual(resp.status_code, 302)
+        db = self.app.config["DB"]
+        row = db.execute("SELECT * FROM send_intents WHERE id = ?",
+                         (intent["id"],)).fetchone()
+        self.assertEqual(row["status"], "sent")
+
+    def test_rpc_error_carries_method_and_detail(self):
+        # The old _call swallowed the node's error and raised a
+        # bare "rpc error response" — the real cause (a removed
+        # method, -32601 "Method not found") was invisible.
+        def _post(url, payload):
+            return {"jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32601,
+                              "message": "Method not found"}}
+
+        client = SolanaRpcClient("https://example.invalid",
+                                 http_post=_post)
+        with self.assertRaises(RpcError) as ctx:
+            client.get_latest_blockhash()
+        message = str(ctx.exception)
+        self.assertIn("getLatestBlockhash", message)
+        self.assertIn("-32601", message)
+        self.assertIn("Method not found", message)
 
     def test_rpc_failure_marks_intent_failed(self):
         with mock.patch.object(routes, "SolanaRpcClient", FailingRpc):

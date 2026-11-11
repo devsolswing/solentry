@@ -18,7 +18,7 @@ class FakeRpc:
     def get_balance_lamports(self, pubkey):
         return 500_000_000  # 0.5 SOL
 
-    def get_recent_blockhash(self):
+    def get_latest_blockhash(self):
         raise AssertionError("assistant must never send on-chain")
 
     def send_transaction(self, signed_b64):

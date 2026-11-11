@@ -47,7 +47,7 @@ class FakeRpc:
     def get_balance_lamports(self, pubkey):
         return FakeRpc.balance_lamports
 
-    def get_recent_blockhash(self):
+    def get_latest_blockhash(self):
         return "11111111111111111111111111111111"
 
     def send_transaction(self, signed_b64):

@@ -2549,7 +2549,7 @@ def register_routes(app: Flask) -> None:
                     try:
                         pubkey = wallet["pubkey"]
                         client = SolanaRpcClient(_cfg(app).rpc_url)
-                        blockhash = client.get_recent_blockhash()
+                        blockhash = client.get_latest_blockhash()
                         signed_b64, signature = build_signed_transfer(
                             seed, pubkey, intent["destination"],
                             intent["amount_lamports"], blockhash)
