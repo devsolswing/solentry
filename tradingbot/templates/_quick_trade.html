@@ -4,13 +4,14 @@
    coin endpoints as the popup and detail page. #}
 <div class="overlay overlay-fullscreen hidden" id="quick-trade-overlay" role="dialog" aria-label="Buy or sell a coin"
      data-search-url="{{ url_for('coin_search') }}"
+     data-mode="{{ mode }}"
      data-currency="{{ 'CAD $' if mode == 'paper' else '$' }}"
      data-mode-label="{{ mode_label }}">
   <div class="coin-popup quick-trade-popup">
     <p class="popup-head"><button class="popup-close" type="button" id="quick-trade-close" aria-label="Close">✕</button></p>
     <h2>Buy or Sell Coin</h2>
-    <p class="muted small">Type a coin name — live results appear as you type. Amounts in $ or tokens, at the live price.</p>
-    <label>Coin<input id="quick-trade-search" type="text" placeholder="Type a coin name…" autocomplete="off"></label>
+    <p class="muted small">Type a coin name or paste a token address — live results appear as you type. Amounts in $ or tokens, at the live price.</p>
+    <label>Coin<input id="quick-trade-search" type="text" placeholder="Type a coin name or paste a token address…" autocomplete="off"></label>
     <div id="quick-trade-results" class="search-results"></div>
     <div id="quick-trade-selected" class="hidden">
       <p><strong id="quick-trade-name">—</strong> <span class="muted small" id="quick-trade-symbol"></span></p>

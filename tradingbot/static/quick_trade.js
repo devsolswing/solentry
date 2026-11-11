@@ -18,6 +18,7 @@
   var qtBuyAmount = document.getElementById('quick-trade-buy-amount');
   var qtSellAmount = document.getElementById('quick-trade-sell-amount');
   var searchUrl = qtOverlay.dataset.searchUrl || '/api/coins/search';
+  var mode = qtOverlay.dataset.mode || 'paper';
   var modeLabel = qtOverlay.dataset.modeLabel || '';
   // Paper amounts are CAD (fake money); real-mode amounts are $ at
   // the live USD price. The live coin price itself stays $ (CoinGecko USD).
@@ -60,14 +61,32 @@
     document.getElementById('quick-trade-name').textContent = r.name;
     document.getElementById('quick-trade-symbol').textContent = '(' + r.symbol + ')';
     document.getElementById('quick-trade-price').textContent = r.price_usd != null ? '$' + r.price_usd : 'Price unavailable';
-    document.getElementById('quick-trade-source').textContent = r.price_usd != null ? 'Live price.' : 'No live price right now — the trade will be refused rather than guessed.';
+    // A devnet mint with no feed price is still tradeable in real
+    // mode: the buy is priced from the bonding curve in SOL, and
+    // the executor refuses plainly when there is no devnet curve.
+    // Paper trades need a price, so they stay refused without one.
+    var canTrade = r.price_usd != null || (mode === 'devnet' && r.is_mint);
+    document.getElementById('quick-trade-source').textContent = r.price_usd != null
+      ? 'Live price.'
+      : (canTrade
+        ? 'No live price — the buy is priced from the bonding curve (devnet).'
+        : 'No live price right now — the trade will be refused rather than guessed.');
+    // Token amounts cannot convert without a price: force $ when
+    // there is none, so the ticket never offers a refused trade.
+    var qtTokensRadio = document.querySelector('input[name="quick-amount-kind"][value="tokens"]');
+    if (qtTokensRadio) {
+      qtTokensRadio.disabled = r.price_usd == null;
+      if (r.price_usd == null) {
+        var qtUsdRadio = document.querySelector('input[name="quick-amount-kind"][value="usd"]');
+        if (qtUsdRadio) qtUsdRadio.checked = true;
+      }
+    }
     document.getElementById('quick-trade-held').textContent = (r.held > 0)
       ? 'You hold ' + r.held + ' ' + r.symbol + ' in ' + modeLabel + '.'
       : 'You hold none of this coin in ' + modeLabel + '.';
     qtBuyForm.action = '/coins/' + encodeURIComponent(r.coin_id) + '/buy';
     qtSellForm.action = '/coins/' + encodeURIComponent(r.coin_id) + '/sell';
     qtSellAllForm.action = '/coins/' + encodeURIComponent(r.coin_id) + '/sell';
-    var canTrade = r.price_usd != null;
     document.getElementById('quick-trade-buy-btn').disabled = !canTrade;
     document.getElementById('quick-trade-sell-btn').disabled = !canTrade;
     qtSellAllForm.classList.toggle('hidden', !(r.held > 0));
@@ -93,7 +112,7 @@
         .then(function (res) { return res.json(); })
         .then(function (data) {
           if (!data.results || !data.results.length) {
-            qtResults.innerHTML = '<p class="muted">' + (data.error ? String(data.error).replace(/</g, '&lt;') : 'No coins found — try another name.') + '</p>';
+            qtResults.innerHTML = '<p class="muted">' + (data.error ? String(data.error).replace(/</g, '&lt;') : 'No coins found — try another name or paste a token address.') + '</p>';
             return;
           }
           qtResults.innerHTML = '';

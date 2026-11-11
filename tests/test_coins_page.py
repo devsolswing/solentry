@@ -269,6 +269,75 @@ class TestCoinSearch(CoinsPageBase):
         data = self._search("s")
         self.assertEqual(data["results"], [])
 
+    def test_search_pasted_address_resolves_with_price(self):
+        # A pasted devnet mint address resolves directly to that
+        # coin — name, ticker and live price from the trenches feed.
+        gate = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+        with mock.patch.object(charts_mod, "fetch_prices_for_mints",
+                               return_value={gate: 0.0000005}), \
+                mock.patch.object(charts_mod, "fetch_mint_identities",
+                                  return_value={gate: {"name": "Gate",
+                                                      "symbol": "GATE"}}):
+            charts_mod._search_cache.clear()
+            data = self._search(gate)
+        self.assertEqual(len(data["results"]), 1)
+        entry = data["results"][0]
+        self.assertEqual(entry["coin_id"], gate)
+        self.assertEqual(entry["name"], "Gate")
+        self.assertEqual(entry["symbol"], "GATE")
+        self.assertEqual(entry["price_usd"], 0.0000005)
+        self.assertTrue(entry["is_mint"])
+        self.assertIsNone(data["error"])
+
+    def test_search_pasted_address_without_feed_still_resolves(self):
+        # A devnet mint the feed has never seen still resolves: the
+        # honest label, no price — never a fabricated name or price.
+        # The real buy is priced from the bonding curve, not the
+        # feed, so the coin is still buyable from the popup.
+        gate = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+        with mock.patch.object(charts_mod, "fetch_prices_for_mints",
+                               return_value={}), \
+                mock.patch.object(charts_mod, "fetch_mint_identities",
+                                  return_value={}):
+            charts_mod._search_cache.clear()
+            data = self._search(gate)
+        self.assertEqual(len(data["results"]), 1)
+        entry = data["results"][0]
+        self.assertEqual(entry["coin_id"], gate)
+        self.assertEqual(entry["name"], "Pump.fun token Eu4u…8uLE")
+        self.assertIsNone(entry["price_usd"])
+        self.assertTrue(entry["is_mint"])
+
+    def test_search_pasted_address_is_not_a_name_search(self):
+        # The DexScreener name search would match BFUN for "bfun";
+        # a pasted address must return only the mint it names.
+        gate = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+        with mock.patch.object(charts_mod, "fetch_prices_for_mints",
+                               return_value={}), \
+                mock.patch.object(charts_mod, "fetch_mint_identities",
+                                  return_value={}):
+            charts_mod._search_cache.clear()
+            data = self._search(gate)
+        self.assertEqual([r["coin_id"] for r in data["results"]], [gate])
+        self.assertNotIn("BFUN", [r["symbol"] for r in data["results"]])
+
+    def test_quick_trade_popup_invites_address(self):
+        self._choose_mode("paper")
+        html = self._html("/dashboard")
+        self.assertIn("paste a token address", html)
+        self.assertIn('data-mode="paper"', html)
+
+    def test_pasted_address_opens_coin_detail(self):
+        # The pasted address resolves to the same detail/buy view
+        # as a name search — the buy form is on that page.
+        gate = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+        self._choose_mode("paper")
+        with mock.patch.object(routes, "fetch_prices_for_mints",
+                               return_value={}):
+            html = self._html(f"/coins/{gate}/detail")
+        self.assertIn("Pump.fun token Eu4u…8uLE", html)
+        self.assertIn("Buy", html)
+
     def test_search_requires_login(self):
         self.client.get("/logout")
         resp = self.client.get("/api/coins/search?q=sol")

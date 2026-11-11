@@ -24,7 +24,9 @@ import urllib.parse
 import urllib.request
 
 from .prices import COINS, get_prices
-from .trenches import DEXSCREENER_BASE, TOKENS_URL, _best_pair
+from .solana import is_valid_address
+from .trenches import (DEXSCREENER_BASE, TOKENS_URL, _best_pair,
+                      fetch_mint_identities, fetch_prices_for_mints)
 
 # Range key -> (label shown on the button, CoinGecko `days` value).
 # 24hr and 1day are the same window (1 day of data), shown under both
@@ -72,21 +74,71 @@ SEARCH_CACHE_TTL_SECONDS = 30
 _search_cache: dict = {}
 
 
+def _search_by_address(mint: str, http_get=None) -> dict:
+    """A pasted token address resolves directly, not as a name
+    search: the trenches feed (DexScreener token pairs) gives the
+    price and the real name / ticker when it has them. A devnet mint
+    the feed has never seen still resolves — with the honest
+    "Pump.fun token …" label and no price — because the real buy is
+    priced from the bonding curve, not the feed; the executor
+    refuses plainly at buy time when there is no devnet bonding
+    curve. Nothing is ever fabricated: no name, no price, and no
+    coin the address does not name. One lookup per query is cached
+    30 seconds, keyed by the exact address (base58 is
+    case-sensitive, so the key is never lowercased)."""
+    cached = _search_cache.get(mint)
+    now = time.time()
+    if cached and now - cached["at"] < SEARCH_CACHE_TTL_SECONDS:
+        return {"results": [dict(r) for r in cached["results"]],
+                "error": cached["error"], "source": cached["source"]}
+    price = None
+    name = None
+    symbol = None
+    try:
+        prices = fetch_prices_for_mints([mint], http_get=http_get)
+        price = prices.get(mint)
+    except Exception:
+        pass
+    try:
+        identities = fetch_mint_identities([mint], http_get=http_get)
+        ident = identities.get(mint) or {}
+        name = ident.get("name") or None
+        symbol = ident.get("symbol") or None
+    except Exception:
+        pass
+    if name is None and symbol is None:
+        name = "Pump.fun token " + mint[:4] + "…" + mint[-4:]
+        symbol = mint[:4] + "…"
+    result = {"coin_id": mint, "name": name,
+              "symbol": (symbol or mint[:8]).upper(),
+              "price_usd": price, "change_24h": None, "is_mint": True}
+    _search_cache[mint] = {"at": now, "results": [dict(result)],
+                           "error": None, "source": "live"}
+    return {"results": [dict(result)], "error": None, "source": "live"}
+
+
 def search_coins(query: str, http_get=None, prices_fn=None) -> dict:
     """Live coin search: {"results", "error", "source"}.
 
-    `query` is a name, symbol, or mint fragment the user typed.
-    Known coins (the app's price list) match by name or symbol and
-    carry their live price from the price feed. Anything else comes
-    from DexScreener's free token search (Solana pairs only, best
-    liquidity first, at most 8). A feed that does not answer returns
-    an error and no invented coins — the popup says so instead of
-    guessing. A query shorter than 2 characters returns no results:
-    single letters match nearly everything and are not useful.
+    `query` is a name, symbol, or mint fragment the user typed — or
+    a pasted token address, which resolves directly to that mint
+    instead of being matched as text (a devnet mint has no mainnet
+    pair for a name search to find). Known coins (the app's price
+    list) match by name or symbol and carry their live price from
+    the price feed. Anything else comes from DexScreener's free
+    token search (Solana pairs only, best liquidity first, at most
+    8). A feed that does not answer returns an error and no invented
+    coins — the popup says so instead of guessing. A query shorter
+    than 2 characters returns no results: single letters match
+    nearly everything and are not useful.
     """
     q = (query or "").strip()
     if len(q) < 2:
         return {"results": [], "error": None, "source": "live"}
+    if is_valid_address(q):
+        # A pasted token address is not a name search: resolve the
+        # mint directly.
+        return _search_by_address(q, http_get=http_get)
     key = q.lower()
     now = time.time()
     cached = _search_cache.get(key)
