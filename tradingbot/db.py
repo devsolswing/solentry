@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     salt TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
     recovery_question TEXT NOT NULL DEFAULT '',
     recovery_answer_hash TEXT NOT NULL DEFAULT '',
     recovery_answer_salt TEXT NOT NULL DEFAULT '',
@@ -423,6 +424,10 @@ _MIGRATIONS = (
     ("bots", "silent", "INTEGER NOT NULL DEFAULT 0"),
     ("bots", "max_open_trades", "INTEGER NOT NULL DEFAULT 3"),
     ("users", "recovery_question", "TEXT NOT NULL DEFAULT ''"),
+    # Email collected at signup (used by the forgot-username flow:
+    # email + security answer reveals the username). '' for accounts
+    # created before the field existed.
+    ("users", "email", "TEXT NOT NULL DEFAULT ''"),
     ("users", "recovery_answer_hash", "TEXT NOT NULL DEFAULT ''"),
     ("users", "recovery_answer_salt", "TEXT NOT NULL DEFAULT ''"),
     ("users", "recovery_hint", "TEXT NOT NULL DEFAULT ''"),

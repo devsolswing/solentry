@@ -31,6 +31,7 @@ PAGE_NUMBERS = {
     "forgot_password": 16,
     "forgot_answer": 17,
     "forgot_reset": 18,
+    "forgot_username": 19,
 }
 
 # Display names for the page picker (the "Page N" chip opens it).
@@ -55,6 +56,7 @@ PAGE_NAMES = {
     "forgot_password": "Forgot password",
     "forgot_answer": "Forgot answer",
     "forgot_reset": "Forgot reset",
+    "forgot_username": "Forgot username",
 }
 
 # Where the picker takes the user for each page. Most pages link to

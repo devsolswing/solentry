@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Forgot username — SolEntry{% endblock %}
+{% block header %}<header class="topbar"><div class="top-left">{% include "_page_id.html" %}</div></header>{% endblock %}
+{% block footer %}{% endblock %}
+{% block content %}
+<div class="fox-auth">
+  <div class="fox-brand">
+    <img class="fox-logo" src="{{ url_for('static', filename='fox-red-480.jpg') }}" alt="SolEntry fox">
+    <h1 class="fox-wordmark">SolEntry</h1>
+  </div>
+  <hr class="fox-rule">
+
+  {% if phase == "revealed" %}
+  <div class="fox-reveal">
+    <p class="fox-note">Your username is</p>
+    <p class="fox-username">{{ username }}</p>
+  </div>
+  <a class="fox-btn fox-btn-gold" href="{{ url_for('login') }}">Back to Login</a>
+  {% elif phase == "question" %}
+  <form method="post" action="{{ url_for('forgot_username') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="fox-note">Answer your security question to see your username.</p>
+    <p class="fox-note"><strong>{{ question }}</strong>{% if hint %}<br>Hint: {{ hint }}{% endif %}</p>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">💬</span>
+      <input type="text" name="answer" required autocomplete="off"
+             placeholder="Answer" aria-label="Answer">
+    </div>
+    <button class="fox-btn fox-btn-gold" type="submit">Show my username</button>
+  </form>
+  <a class="fox-btn fox-btn-red" href="{{ url_for('login') }}">↩&nbsp; Back to Login</a>
+  {% else %}
+  <form method="post" action="{{ url_for('forgot_username') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="fox-note">Enter the email you signed up with. If the account has a security question set, you will be asked to answer it.</p>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">✉️</span>
+      <input type="email" name="email" required autocomplete="email"
+             placeholder="Email" aria-label="Email">
+    </div>
+    <button class="fox-btn fox-btn-gold" type="submit">Continue</button>
+  </form>
+  <a class="fox-btn fox-btn-red" href="{{ url_for('login') }}">↩&nbsp; Back to Login</a>
+  {% endif %}
+
+  <div class="fox-hero">
+    <img src="{{ url_for('static', filename='fox-gold-480.jpg') }}" alt="SolEntry fox">
+    <p class="fox-tagline">Still on<br>the $GATE?</p>
+  </div>
+</div>
+{% endblock %}

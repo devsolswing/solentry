@@ -1,13 +1,48 @@
 {% extends "base.html" %}
 {% block title %}Create Account — SolEntry{% endblock %}
+{% block header %}<header class="topbar"><div class="top-left">{% include "_page_id.html" %}</div></header>{% endblock %}
+{% block footer %}{% endblock %}
 {% block content %}
-<div class="card narrow">
-  <h1>Create your account</h1>
-  <p class="muted">Your own app wallet is created for you when you sign up. Username 3–20 letters, numbers, or _. Password at least 8 characters.</p>
+<div class="fox-auth">
+  <div class="fox-brand">
+    <img class="fox-logo" src="{{ url_for('static', filename='fox-red-480.jpg') }}" alt="SolEntry fox">
+    <h1 class="fox-wordmark">SolEntry</h1>
+  </div>
+  <hr class="fox-rule">
+
   <form method="post" action="{{ url_for('signup') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>Username<input name="username" required autocomplete="username"></label>
-    <label>Password<input type="password" name="password" required autocomplete="new-password"></label>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">👤</span>
+      <input type="text" name="username" required autocomplete="username"
+             placeholder="Username" aria-label="Username">
+    </div>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">✉️</span>
+      <input type="email" name="email" required autocomplete="email"
+             placeholder="Email" aria-label="Email">
+    </div>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">🔒</span>
+      <input type="password" name="password" id="fox-password" required
+             autocomplete="new-password" placeholder="Password" aria-label="Password">
+      <button type="button" class="fox-eye" id="fox-eye" aria-label="Show password">👁</button>
+    </div>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">🛡️</span>
+      <input type="text" name="question" required autocomplete="off"
+             placeholder="Security question" aria-label="Security question">
+    </div>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">💬</span>
+      <input type="text" name="answer" required autocomplete="off"
+             placeholder="Answer" aria-label="Answer">
+    </div>
+    <div class="fox-field">
+      <span class="fox-icon" aria-hidden="true">💡</span>
+      <input type="text" name="hint" autocomplete="off"
+             placeholder="Hint" aria-label="Hint">
+    </div>
     {# Honeypot: hidden from humans, filled only by bots that fill every field. #}
     <div style="display:none" aria-hidden="true">
       <label>Website<input name="website" type="text" autocomplete="off" tabindex="-1"></label>
@@ -16,8 +51,28 @@
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}"></div>
     {% endif %}
-    <button class="btn big" type="submit">Sign up</button>
+    <button class="fox-btn fox-btn-gold" type="submit">🔒&nbsp; Create Account</button>
   </form>
-  <p class="muted">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+
+  <a class="fox-btn fox-btn-red" href="{{ url_for('login') }}">↩&nbsp; Back to Login</a>
+
+  <div class="fox-hero">
+    <img src="{{ url_for('static', filename='fox-gold-480.jpg') }}" alt="SolEntry fox">
+    <p class="fox-tagline">Still on<br>the $GATE?</p>
+  </div>
 </div>
+
+<script nonce="{{ csp_nonce }}">
+(function () {
+  var pw = document.getElementById('fox-password');
+  var eye = document.getElementById('fox-eye');
+  eye.addEventListener('click', function () {
+    var show = pw.type === 'password';
+    pw.type = show ? 'text' : 'password';
+    eye.classList.toggle('off', show);
+    eye.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    pw.focus();
+  });
+})();
+</script>
 {% endblock %}

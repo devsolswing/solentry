@@ -959,15 +959,49 @@ def register_routes(app: Flask) -> None:
             if len(password) < 8:
                 flash("Password must be at least 8 characters.")
                 return redirect(url_for("signup"))
+            # The sign-up page also collects the email and the
+            # recovery question/answer/hint (same bounds as the
+            # Settings recovery form). All three are optional here
+            # so username+password-only signups keep working — the
+            # page itself asks for them. A question without an
+            # answer (or the reverse) is refused.
+            email = (request.form.get("email") or "").strip()
+            question = (request.form.get("question") or "").strip()
+            answer = (request.form.get("answer") or "").strip()
+            hint = (request.form.get("hint") or "").strip()
+            if email and ("@" not in email
+                          or "." not in email.rsplit("@", 1)[-1]
+                          or len(email) > 254):
+                flash("Enter a valid email address.")
+                return redirect(url_for("signup"))
+            if question or answer:
+                if not 3 <= len(question) <= 200:
+                    flash("The security question must be 3-200 "
+                          "characters.")
+                    return redirect(url_for("signup"))
+                if not answer or len(answer) > 200:
+                    flash("The security answer must not be empty "
+                          "(max 200 characters).")
+                    return redirect(url_for("signup"))
+            if len(hint) > 200:
+                flash("The hint must be at most 200 characters.")
+                return redirect(url_for("signup"))
             db = _db(app)
             if db.execute("SELECT id FROM users WHERE username = ?",
                           (username,)).fetchone():
                 flash("That username is taken.")
                 return redirect(url_for("signup"))
             salt, pw_hash = hash_password(password)
+            ans_salt, ans_hash = ("", "")
+            if question and answer:
+                ans_salt, ans_hash = hash_password(answer)
             cur = db.execute(
-                "INSERT INTO users (username, password_hash, salt) "
-                "VALUES (?, ?, ?)", (username, pw_hash, salt))
+                "INSERT INTO users (username, password_hash, salt, "
+                "email, recovery_question, recovery_answer_hash, "
+                "recovery_answer_salt, recovery_hint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (username, pw_hash, salt, email, question, ans_hash,
+                 ans_salt, hint))
             user_id = cur.lastrowid
             # Fresh app wallet for this user — generated here, encrypted
             # immediately, never shown in full and never logged. The
@@ -1056,15 +1090,15 @@ def register_routes(app: Flask) -> None:
             # answer is remembered (see _clear_mode_chosen).
             _clear_mode_chosen(_db(app), row["id"])
             return redirect(url_for("wallet"))
-        # SolEntry login page: hero + donate card. The donate card
-        # shows only the MASKED recipient (first 5 characters +
+        # SolEntry login page: fox header + donate card. The donate
+        # card shows only the MASKED recipient (first 5 characters +
         # '*****'); the full address never reaches a template —
         # the donor's browser fetches it from /api/donate/info
         # when it builds the transfer. When the recipient is not
-        # configured the card says so plainly. The field is labeled
-        # "Email Address" per the design; accounts are
-        # username-based, so it accepts the account username (no
-        # email addresses are stored).
+        # configured the card says so plainly. The username field
+        # takes the account username (per the fox design); the email
+        # is collected at sign-up and used by the forgot-username
+        # flow, never as a login name.
         try:
             donation_masked = donations_mod.mask_address(
                 donations_mod.get_donation_recipient(_cfg(app)))
@@ -1227,6 +1261,76 @@ def register_routes(app: Flask) -> None:
             flash("Password changed. Log in with your new password.")
             return redirect(url_for("login"))
         return render_template("forgot_reset.html")
+
+    @app.route("/forgot-username", methods=["GET", "POST"])
+    def forgot_username():
+        """Recover a forgotten username: signup email + security answer.
+
+        The app sends no mail, so the username is revealed on screen
+        — only after the security answer proves ownership. One
+        generic message covers every not-ready case (no such email,
+        no question set) so the page never reveals whether an email
+        is registered. Wrong answers count toward the same 5-try
+        lockout as the forgot-password flow, keyed by username.
+        """
+        if request.method == "POST":
+            _csrf_check()
+            # Phase 2: the security answer, for the account the
+            # email step already resolved.
+            if "answer" in request.form:
+                user_id = session.get("forgot_username_user_id")
+                if not user_id:
+                    return redirect(url_for("forgot_username"))
+                row = _db(app).execute(
+                    "SELECT username, recovery_question, recovery_hint, "
+                    "recovery_answer_hash, recovery_answer_salt FROM users "
+                    "WHERE id = ?", (user_id,)).fetchone()
+                if not row or not row["recovery_question"]:
+                    session.pop("forgot_username_user_id", None)
+                    return redirect(url_for("forgot_username"))
+                if _check_login_lock(app, row["username"]):
+                    flash("Too many failed tries. Locked for 15 minutes.")
+                    return redirect(url_for("login"))
+                answer = request.form.get("answer") or ""
+                if not verify_password(answer, row["recovery_answer_salt"],
+                                       row["recovery_answer_hash"]):
+                    _record_login_fail(app, row["username"])
+                    flash("That answer is wrong.")
+                    return redirect(url_for("forgot_username"))
+                _clear_login_fails(app, row["username"])
+                session.pop("forgot_username_user_id", None)
+                _log(app, user_id, "username_recovered",
+                     "Username revealed through email + security answer.")
+                return render_template(
+                    "forgot_username.html", phase="revealed",
+                    username=row["username"])
+            # Phase 1: the signup email.
+            email = (request.form.get("email") or "").strip()
+            not_ready = ("Account recovery is not set up for this "
+                         "account.")
+            row = _db(app).execute(
+                "SELECT id, recovery_question FROM users "
+                "WHERE LOWER(email) = LOWER(?) AND email != ''",
+                (email,)).fetchone()
+            if not row or not row["recovery_question"]:
+                flash(not_ready)
+                return redirect(url_for("forgot_username"))
+            session["forgot_username_user_id"] = row["id"]
+            return redirect(url_for("forgot_username"))
+        # GET: the question form when the email step already resolved
+        # an account, otherwise the email form.
+        user_id = session.get("forgot_username_user_id")
+        if user_id:
+            row = _db(app).execute(
+                "SELECT recovery_question, recovery_hint FROM users "
+                "WHERE id = ?", (user_id,)).fetchone()
+            if row and row["recovery_question"]:
+                return render_template(
+                    "forgot_username.html", phase="question",
+                    question=row["recovery_question"],
+                    hint=row["recovery_hint"])
+            session.pop("forgot_username_user_id", None)
+        return render_template("forgot_username.html", phase="email")
 
     # ------------------------------------------------------------------
     # Passkeys (WebAuthn): register in Settings, sign in from Login.

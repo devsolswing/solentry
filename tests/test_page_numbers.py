@@ -106,7 +106,8 @@ class TestPageNumbersRender(unittest.TestCase):
 
     def test_logged_out_pages(self):
         for path, number in (("/login", 1), ("/signup", 2),
-                             ("/forgot-password", 16)):
+                             ("/forgot-password", 16),
+                             ("/forgot-username", 19)):
             self._assert_page_id(self._html(self.anon, path), number)
 
     def test_logged_in_pages(self):
