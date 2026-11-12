@@ -37,6 +37,17 @@
 
   <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ "%.4f"|format(coin.avg_price) }}{% endif %} · P&amp;L <strong data-live-pnl="{{ coin.coin_id }}" data-live-amount="{{ coin.held }}" data-live-avg="{{ coin.avg_price }}">{% if coin.pnl is not none %}{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}{% else %}—{% endif %}</strong>{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 
+  {# Wrapped majors picker: a text box that drops down every
+     wrapped major with a live liquid Jupiter pool right now.
+     Identical in look to the quick-trade token selector — the
+     same text input, the same .search-results rows — the only
+     difference is the list: wrapped majors, live-checked, never
+     a static list. Picking one switches this page to that coin. #}
+  <div id="wrapped-majors" data-wrapped-majors-url="{{ url_for('wrapped_majors') }}">
+    <label>Wrapped majors<input id="wrapped-majors-search" type="text" placeholder="Wrapped majors with liquid pools…" autocomplete="off"></label>
+    <div id="wrapped-majors-results" class="search-results"></div>
+  </div>
+
   {# Wallet step FIRST, then the Jupiter route, then Buy. The wallet
      is the user's Solana app wallet, recorded for this coin on the
      first trade; until then Buy stays disabled. A coin with no

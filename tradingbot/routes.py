@@ -2715,6 +2715,31 @@ def register_routes(app: Flask) -> None:
             "fetched_at": quote["fetched_at"], "source": "jupiter",
             "lines": jupiter_mod.summarize_route(quote)})
 
+    @app.route("/api/wrapped-majors")
+    @login_required
+    def wrapped_majors():
+        """The buy page's wrapped-majors picker: every wrapped
+        major with a LIVE liquid Jupiter pool right now. The list
+        is live-checked on every call — a wrapped major whose pool
+        went dead is gone from the answer, and a new liquid one
+        appears. Read-only market data: no money moves, no
+        signing. When Jupiter cannot be reached at all the answer
+        is ok:false (unavailable), never an empty list dressed up
+        as "no liquid majors"; when every pool is genuinely dry
+        the answer is ok:true with an empty list."""
+        majors, any_unverifiable = jupiter_mod.liquid_wrapped_majors()
+        if not majors and any_unverifiable:
+            return jsonify({
+                "ok": False, "majors": [],
+                "error": "Wrapped majors unavailable right now — "
+                         "Jupiter could not be reached to check "
+                         "the pools."})
+        fetched_at = max((m["fetched_at"] for m in majors),
+                         default=None)
+        return jsonify({"ok": True, "majors": majors,
+                        "fetched_at": fetched_at,
+                        "source": "jupiter"})
+
     @app.route("/api/coins/<coin_id>/wallet", methods=["POST"])
     @login_required
     def coin_wallet_create(coin_id: str):

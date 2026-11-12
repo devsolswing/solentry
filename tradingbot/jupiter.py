@@ -474,6 +474,81 @@ def quote_sell(symbol: str, amount_tokens: float,
     return quote
 
 
+# Wrapped majors for the buy page's picker: the major coins whose
+# native chain is NOT Solana, so their Solana token is a wrapped /
+# bridged version. The four in WRAPPED_MINTS are the static wrapped
+# map; the other eight resolve through the token API and all quoted
+# live on 2026-11-11 (DOGE via BisonFi; LINK, AAVE, UNI, INJ,
+# ONDO, SUI and TAO all returned real routes). NOT in this list,
+# on purpose: native Solana coins (SOL, BONK, JUP, PEPE, POPCAT —
+# and RENDER, whose token is native Solana since the RNDR ->
+# RENDER migration) and USDC (a native Solana stablecoin, not a
+# wrapped major). Membership here is candidacy only: a coin
+# appears in the picker only when a live quote proves its pool is
+# liquid right now — never from this list alone.
+WRAPPED_MAJOR_SYMBOLS = [
+    "BTC", "ETH", "XRP", "ZEC", "DOGE", "LINK", "AAVE", "UNI",
+    "INJ", "ONDO", "SUI", "TAO",
+]
+
+
+def liquid_wrapped_majors(
+        amount_sol: float = DEFAULT_BUY_SOL) -> tuple:
+    """The wrapped majors with a LIVE liquid Jupiter route right
+    now, in WRAPPED_MAJOR_SYMBOLS order. Returns (majors,
+    any_unverifiable): each major is {coin_id, symbol,
+    display_name ("Wrapped BTC"), mint, route_labels,
+    price_impact_pct, fetched_at}. A coin whose quote fails with
+    NoRouteError (no liquid route / not tradable / dead pool) is
+    simply left out; a coin whose quote fails any other way
+    (Jupiter unreachable, a bad answer) is unverifiable, not
+    "illiquid" — the caller must never present an unverifiable
+    list as "no liquid majors". Quotes run in parallel (one
+    thread per candidate) so the picker answers in about one
+    quote's time instead of twelve. Read-only market data: no
+    money moves, no signing."""
+    import concurrent.futures
+
+    def _check(symbol: str) -> tuple:
+        coin_name = COINS.get(symbol, {}).get("name")
+        try:
+            quote = quote_buy(symbol, amount_sol,
+                              coin_name=coin_name)
+        except NoRouteError:
+            return (None, False)
+        except JupiterError:
+            return (None, True)
+        return ({
+            "coin_id": symbol,
+            "symbol": symbol,
+            "display_name": f"Wrapped {symbol}",
+            "mint": quote["output_mint"],
+            "route_labels": quote["route_labels"],
+            "price_impact_pct": quote["price_impact_pct"],
+            "fetched_at": quote["fetched_at"],
+        }, False)
+
+    majors = []
+    any_unverifiable = False
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(WRAPPED_MAJOR_SYMBOLS)) as pool:
+        futures = {pool.submit(_check, s): s
+                   for s in WRAPPED_MAJOR_SYMBOLS}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                entry, unverifiable = future.result()
+            except Exception:
+                entry, unverifiable = None, True
+            if unverifiable:
+                any_unverifiable = True
+            if entry is not None:
+                majors.append(entry)
+    # as_completed scrambles the order: restore candidacy order.
+    order = {s: i for i, s in enumerate(WRAPPED_MAJOR_SYMBOLS)}
+    majors.sort(key=lambda m: order[m["coin_id"]])
+    return majors, any_unverifiable
+
+
 def summarize_route(quote: dict) -> list:
     """Plain-language lines for the coin page's route box, from a
     normalised quote. Never invents a step the quote did not take."""
