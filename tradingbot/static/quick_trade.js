@@ -95,18 +95,16 @@
     qtAmountKind();
   }
 
-  /* One small tag per verified network the coin exists on
-     (a multi-chain coin shows each one); a wrapped token gets a
-     Wrapped tag after its network. No network the app verified
-     means a "Network unknown" tag — never a guessed network. */
+  /* One small Solana tag when the coin has a Solana presence;
+     a wrapped token gets a Wrapped tag after it. A coin with no
+     Solana presence gets no tag at all — never another chain,
+     never a guessed network. */
   function qtNetworkTags(r) {
     var tags = [];
-    var networks = (r.networks && r.networks.length)
-      ? r.networks : [null];
-    networks.forEach(function (net) {
+    (r.networks || []).forEach(function (net) {
       var t = document.createElement('span');
       t.className = 'search-result-network';
-      t.textContent = net || 'Network unknown';
+      t.textContent = net;
       tags.push(t);
     });
     if (r.wrapped) {

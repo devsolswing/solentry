@@ -21,8 +21,7 @@ from .solana import is_valid_address
 # Native chain of each known price-list coin. USDC is deliberately
 # absent: it exists on many chains (Solana, Ethereum, and others),
 # so no single network can be named for it — it is refused with the
-# multi-network reason instead (see MULTI_CHAIN_NETWORKS below for
-# the verified list, used by search).
+# multi-network reason instead (see MULTI_CHAIN_COINS below).
 #
 # Chains verified 2026-11-11: the native L1s are the coin itself,
 # the ERC-20s are Ethereum tokens (PEPE, LINK, UNI, AAVE, ONDO),
@@ -69,20 +68,19 @@ COIN_NETWORKS = {
 
 MULTI_CHAIN_COINS = {"USDC"}
 
-# Every network a multi-chain coin REALLY exists on — only networks
-# verified for that coin, never guessed. USDC: CoinGecko's USDC
-# platforms list returned 36 chains on 2026-11-11; the list below
-# is the major networks with real native/canonical USDC presence
-# (all 21 appear in that verified list). Obscure/new chains from
-# the full list where the app cannot verify real USDC presence
-# are left out rather than listed on a guess. Solana first (the
-# app's home chain), then alphabetical.
-MULTI_CHAIN_NETWORKS = {
-    "USDC": ["Solana", "Algorand", "Aptos", "Arbitrum", "Avalanche",
-             "Base", "Celo", "Cronos", "Ethereum", "Hedera",
-             "Injective", "NEAR Protocol", "Optimism", "Polkadot",
-             "Polygon", "Sei", "Starknet", "Stellar", "Sui",
-             "XRP Ledger", "zkSync"],
+
+# Coins with a genuine Solana presence, used by search only.
+# SolEntry is powered by Solana alone, so search shows no other
+# chain: a coin gets the Solana tag only when it really exists on
+# Solana — a native Solana token (SOL, BONK, JUP, WIF, POPCAT) or
+# a wrapped version with a live liquid Jupiter route (verified
+# 2026-11-11, 0.1 SOL buys: AAVE, BTC, DOGE, ETH, INJ, LINK,
+# ONDO, PEPE, RENDER, SUI, TAO, UNI, USDC, XRP, ZEC). Every other
+# known coin has no Solana presence and gets no tag at all.
+SOLANA_PRESENT = {
+    "AAVE", "BONK", "BTC", "DOGE", "ETH", "INJ", "JUP", "LINK",
+    "ONDO", "PEPE", "POPCAT", "RENDER", "SOL", "SUI", "TAO",
+    "UNI", "USDC", "WIF", "XRP", "ZEC",
 }
 
 
@@ -117,23 +115,26 @@ def coin_network(coin_id: str) -> dict:
             "multi_chain": False, "known": False}
 
 
-def coin_networks(coin_id: str) -> list:
-    """Every verified network a coin exists on, as a list.
+def search_result_network(coin_id: str, is_mint: bool,
+                          symbol: str | None = None) -> dict:
+    """Network info for one search result row — Solana only.
 
-    A single-chain coin returns its one native chain; a
-    multi-chain coin returns every verified network from
-    MULTI_CHAIN_NETWORKS; a pump.fun mint returns ["Solana"];
-    an unknown coin returns [] — never guessed.
+    Returns {"networks": [...], "wrapped": bool}. The app is
+    powered by Solana alone, so the only network ever shown is
+    Solana: a mint lists it (a mint is a Solana token by
+    construction), and a known coin lists it only when it really
+    has a Solana presence (see SOLANA_PRESENT). A coin with no
+    Solana presence lists nothing — no tag at all, never another
+    chain, never a guess. A mint is marked wrapped when its
+    symbol names a coin whose native chain is elsewhere (a Solana
+    stand-in for that coin, never the native coin).
     """
-    if not coin_id:
-        return []
-    upper = coin_id.upper()
-    if upper in MULTI_CHAIN_NETWORKS:
-        return list(MULTI_CHAIN_NETWORKS[upper])
-    info = coin_network(coin_id)
-    if info["network"] is not None:
-        return [info["network"]]
-    return []
+    if is_mint:
+        return {"networks": ["Solana"],
+                "wrapped": _symbol_names_foreign_coin(symbol)}
+    if (coin_id or "").upper() in SOLANA_PRESENT:
+        return {"networks": ["Solana"], "wrapped": False}
+    return {"networks": [], "wrapped": False}
 
 
 # Common wrapped-token symbol prefixes on Solana: wBTC, wETH, wZEC,
@@ -166,24 +167,6 @@ def _symbol_names_foreign_coin(symbol: str | None) -> bool:
         if net is not None and net != "Solana":
             return True
     return False
-
-
-def search_result_network(coin_id: str, is_mint: bool,
-                          symbol: str | None = None) -> dict:
-    """Network info for one search result row.
-
-    Returns {"networks": [...], "wrapped": bool}. A known coin
-    lists its native chain — every verified chain for a
-    multi-chain coin. A mint lists Solana, and is marked wrapped
-    when its symbol names a coin whose native chain is elsewhere
-    (a Solana stand-in for that coin, never the native coin).
-    An unknown coin lists nothing: the row says "Network unknown"
-    rather than inventing a network.
-    """
-    if is_mint:
-        return {"networks": ["Solana"],
-                "wrapped": _symbol_names_foreign_coin(symbol)}
-    return {"networks": coin_networks(coin_id), "wrapped": False}
 
 
 def coin_display_name(coin_id: str) -> str:

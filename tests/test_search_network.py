@@ -1,12 +1,12 @@
-"""Search shows the network of every listed coin.
+"""Search is Solana-only.
 
-As the user types, each search result shows its network: known
-coins show their native chain (all 36 — ZEC is Zcash, BTC is
-Bitcoin, ...), a multi-chain coin (USDC) shows EVERY verified
-network as a small tag, a Solana mint shows Solana, and a wrapped
-token shows Solana + Wrapped — never the native coin. The network
-is the coin's real chain, never guessed: an unknown coin lists
-nothing, and the row says "Network unknown" instead.
+SolEntry is powered by Solana alone, so search results show no
+other chain: a coin with a genuine Solana presence (a native
+Solana token, or a wrapped version with a liquid Jupiter route)
+gets exactly one "Solana" tag; a coin with no Solana presence
+gets no tag at all. A Solana mint shows Solana, and a wrapped
+token shows Solana + Wrapped — never the native coin. Nothing
+is ever guessed: no other chain is ever shown.
 """
 
 import tempfile
@@ -17,31 +17,16 @@ import tradingbot.charts as charts_mod
 import tradingbot.routes as routes
 from helpers import make_client, signup
 from tradingbot.networks import (
-    MULTI_CHAIN_NETWORKS, coin_network, coin_networks,
-    search_result_network)
+    SOLANA_PRESENT, coin_network, search_result_network)
 from tradingbot.prices import COINS
 
-USDC_NETWORKS = ["Solana", "Algorand", "Aptos", "Arbitrum", "Avalanche",
-                 "Base", "Celo", "Cronos", "Ethereum", "Hedera",
-                 "Injective", "NEAR Protocol", "Optimism", "Polkadot",
-                 "Polygon", "Sei", "Starknet", "Stellar", "Sui",
-                 "XRP Ledger", "zkSync"]
-
-EXPECTED_NETWORKS = {
-    "BTC": ["Bitcoin"], "ETH": ["Ethereum"], "SOL": ["Solana"],
-    "USDC": USDC_NETWORKS, "DOGE": ["Dogecoin"],
-    "PEPE": ["Ethereum"], "BONK": ["Solana"], "JUP": ["Solana"],
-    "ZEC": ["Zcash"], "XRP": ["XRP Ledger"], "ADA": ["Cardano"],
-    "LTC": ["Litecoin"], "DOT": ["Polkadot"], "LINK": ["Ethereum"],
-    "AVAX": ["Avalanche"], "ATOM": ["Cosmos"], "XLM": ["Stellar"],
-    "ALGO": ["Algorand"], "NEAR": ["NEAR Protocol"],
-    "UNI": ["Ethereum"], "AAVE": ["Ethereum"], "XTZ": ["Tezos"],
-    "ETC": ["Ethereum Classic"], "BCH": ["Bitcoin Cash"],
-    "FIL": ["Filecoin"], "HBAR": ["Hedera"], "SUI": ["Sui"],
-    "APT": ["Aptos"], "SEI": ["Sei"], "INJ": ["Injective"],
-    "TIA": ["Celestia"], "ONDO": ["Ethereum"],
-    "RENDER": ["Ethereum"], "TAO": ["Bittensor"], "WIF": ["Solana"],
-    "POPCAT": ["Solana"],
+# Native Solana tokens (SOL, BONK, JUP, WIF, POPCAT) plus the
+# wrapped versions with a live liquid Jupiter route (verified
+# 2026-11-11, 0.1 SOL buys).
+EXPECTED_SOLANA = {
+    "AAVE", "BONK", "BTC", "DOGE", "ETH", "INJ", "JUP", "LINK",
+    "ONDO", "PEPE", "POPCAT", "RENDER", "SOL", "SUI", "TAO",
+    "UNI", "USDC", "WIF", "XRP", "ZEC",
 }
 
 MINT = "11111111111111111111111111111111"
@@ -65,27 +50,60 @@ def dex_pairs(*entries):
         for mint, name, sym, price, liq in entries]}
 
 
-class TestNetworkData(unittest.TestCase):
-    def test_every_known_coin_has_a_verified_network(self):
-        self.assertEqual(set(EXPECTED_NETWORKS), set(COINS))
-        for symbol, networks in EXPECTED_NETWORKS.items():
-            self.assertEqual(coin_networks(symbol), networks, symbol)
-            self.assertTrue(networks, symbol)
+class TestSolanaOnlyData(unittest.TestCase):
+    def test_solana_set_matches_expected(self):
+        self.assertEqual(SOLANA_PRESENT, EXPECTED_SOLANA)
+        self.assertEqual(len(EXPECTED_SOLANA), 20)
 
-    def test_usdc_lists_every_verified_network(self):
-        self.assertEqual(MULTI_CHAIN_NETWORKS["USDC"], USDC_NETWORKS)
-        self.assertEqual(len(USDC_NETWORKS), 21)
-        self.assertEqual(USDC_NETWORKS[0], "Solana")
-        info = coin_network("USDC")
-        self.assertTrue(info["multi_chain"])
-        self.assertIsNone(info["network"])
+    def test_every_known_coin_is_solana_or_nothing(self):
+        # No coin ever shows another chain: Solana tag or no tag.
+        for symbol in COINS:
+            info = search_result_network(symbol, False)
+            if symbol in EXPECTED_SOLANA:
+                self.assertEqual(info, {"networks": ["Solana"],
+                                        "wrapped": False}, symbol)
+            else:
+                self.assertEqual(info, {"networks": [],
+                                        "wrapped": False}, symbol)
+
+    def test_usdc_has_exactly_one_solana_tag(self):
+        self.assertEqual(
+            search_result_network("USDC", False),
+            {"networks": ["Solana"], "wrapped": False})
+
+    def test_liquid_wrapped_coins_show_solana(self):
+        for symbol in ("ZEC", "BTC", "ETH", "XRP"):
+            self.assertEqual(
+                search_result_network(symbol, False),
+                {"networks": ["Solana"], "wrapped": False}, symbol)
+
+    def test_solana_natives_show_solana(self):
+        for symbol in ("WIF", "POPCAT", "BONK", "SOL", "JUP"):
+            self.assertEqual(
+                search_result_network(symbol, False),
+                {"networks": ["Solana"], "wrapped": False}, symbol)
+
+    def test_no_solana_presence_means_no_tag(self):
+        for symbol in ("ADA", "ALGO", "APT", "ATOM", "AVAX", "BCH",
+                       "DOT", "ETC", "FIL", "HBAR", "LTC", "NEAR",
+                       "SEI", "TIA", "XLM", "XTZ"):
+            self.assertEqual(
+                search_result_network(symbol, False),
+                {"networks": [], "wrapped": False}, symbol)
 
     def test_unknown_coin_lists_nothing_never_guessed(self):
-        self.assertEqual(coin_networks("NOPE"), [])
-        self.assertFalse(coin_network("NOPE")["known"])
         self.assertEqual(
             search_result_network("NOPE", False),
             {"networks": [], "wrapped": False})
+        self.assertFalse(coin_network("NOPE")["known"])
+
+    def test_detail_page_network_still_knows_usdc_is_multi_chain(self):
+        # coin_network (coin detail page + send refusal) is
+        # untouched by the search change: USDC is still multi-chain
+        # there, it just shows one Solana tag in search.
+        info = coin_network("USDC")
+        self.assertTrue(info["multi_chain"])
+        self.assertIsNone(info["network"])
 
 
 class TestWrappedDetection(unittest.TestCase):
@@ -105,7 +123,7 @@ class TestWrappedDetection(unittest.TestCase):
     def test_known_coin_is_never_wrapped(self):
         self.assertEqual(
             search_result_network("ZEC", False),
-            {"networks": ["Zcash"], "wrapped": False})
+            {"networks": ["Solana"], "wrapped": False})
 
 
 class TestSearchCoinsNetwork(unittest.TestCase):
@@ -118,23 +136,32 @@ class TestSearchCoinsNetwork(unittest.TestCase):
     def _prices(self, changes):
         return lambda: make_prices(changes)
 
-    def test_search_zec_shows_zcash(self):
+    def test_search_zec_shows_solana(self):
         data = charts_mod.search_coins(
             "zec", http_get=lambda url: {"pairs": []},
             prices_fn=self._prices({"ZEC": (1000.0, -4.6)}))
         zec = next(r for r in data["results"]
                    if r["coin_id"] == "ZEC")
-        self.assertEqual(zec["networks"], ["Zcash"])
+        self.assertEqual(zec["networks"], ["Solana"])
         self.assertFalse(zec["wrapped"])
 
-    def test_search_usdc_shows_every_network(self):
+    def test_search_usdc_shows_one_solana_tag(self):
         data = charts_mod.search_coins(
             "usdc", http_get=lambda url: {"pairs": []},
             prices_fn=self._prices({"USDC": (1.0, 0.0)}))
         usdc = next(r for r in data["results"]
                     if r["coin_id"] == "USDC")
-        self.assertEqual(usdc["networks"], USDC_NETWORKS)
+        self.assertEqual(usdc["networks"], ["Solana"])
         self.assertFalse(usdc["wrapped"])
+
+    def test_search_ada_shows_no_tag(self):
+        data = charts_mod.search_coins(
+            "ada", http_get=lambda url: {"pairs": []},
+            prices_fn=self._prices({"ADA": (0.5, 1.2)}))
+        ada = next(r for r in data["results"]
+                   if r["coin_id"] == "ADA")
+        self.assertEqual(ada["networks"], [])
+        self.assertFalse(ada["wrapped"])
 
     def test_search_mint_shows_solana(self):
         payload = dex_pairs(
@@ -193,7 +220,7 @@ class TestSearchEndpointNetwork(unittest.TestCase):
             routes, "get_prices",
             return_value=make_prices({
                 "SOL": (10.0, 5.25), "USDC": (1.0, 0.0),
-                "ZEC": (1000.0, -4.6)}))
+                "ZEC": (1000.0, -4.6), "ADA": (0.5, 1.2)}))
         self.prices_patch.start()
         self.search_patch = mock.patch.object(
             charts_mod, "_default_get", return_value={"pairs": []})
@@ -212,19 +239,26 @@ class TestSearchEndpointNetwork(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.get_json()
 
-    def test_endpoint_zec_has_network(self):
+    def test_endpoint_zec_has_solana_tag(self):
         data = self._search("zec")
         zec = next(r for r in data["results"]
                    if r["coin_id"] == "ZEC")
-        self.assertEqual(zec["networks"], ["Zcash"])
+        self.assertEqual(zec["networks"], ["Solana"])
         self.assertFalse(zec["wrapped"])
 
-    def test_endpoint_usdc_has_every_network(self):
+    def test_endpoint_usdc_has_one_solana_tag(self):
         data = self._search("usdc")
         usdc = next(r for r in data["results"]
                     if r["coin_id"] == "USDC")
-        self.assertEqual(usdc["networks"], USDC_NETWORKS)
+        self.assertEqual(usdc["networks"], ["Solana"])
         self.assertFalse(usdc["wrapped"])
+
+    def test_endpoint_ada_has_no_tag(self):
+        data = self._search("ada")
+        ada = next(r for r in data["results"]
+                   if r["coin_id"] == "ADA")
+        self.assertEqual(ada["networks"], [])
+        self.assertFalse(ada["wrapped"])
 
 
 if __name__ == "__main__":
