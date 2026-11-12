@@ -1,7 +1,9 @@
 """SQLite storage. Every query is scoped by user_id at the call site.
 
 Schema:
-  users, wallets (encrypted secret), paper_portfolio, paper_holdings,
+  users, wallets (encrypted secret), coin_wallets (one row per
+  user+coin, written on the first-trade "Create wallet" tap),
+  paper_portfolio, paper_holdings,
   paper_trades, bots, bot_proposals, send_intents, activity,
   login_attempts (rate limiting), passkey_credentials (WebAuthn),
   webauthn_challenges (single-use ceremony challenges), trade_ledger,
@@ -33,6 +35,21 @@ CREATE TABLE IF NOT EXISTS wallets (
     pubkey TEXT NOT NULL,
     encrypted_secret TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Per-coin wallets (first-trade wallet step, 2026-11-11): one row
+-- per (user, coin), written when the user taps "Create wallet" for
+-- that coin. The wallet recorded is the user's existing Solana app
+-- wallet — no new keys are generated here. The row existing is what
+-- makes the button disappear for that coin forever.
+CREATE TABLE IF NOT EXISTS coin_wallets (
+    user_id INTEGER NOT NULL,
+    coin_id TEXT NOT NULL,
+    wallet_pubkey TEXT NOT NULL,
+    network TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, coin_id),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
