@@ -34,19 +34,6 @@ from tradingbot.solana import generate_keypair
 DEST = "11111111111111111111111111111111"
 
 
-def create_coin_wallet(client, coin):
-    """Tap "Create wallet" for a coin (the first-trade wallet step):
-    records the user's Solana app wallet for the coin so Buy works.
-    The gate refuses any Buy before this tap, so tests that buy a
-    non-SOL coin must create its wallet first."""
-    resp = client.post(f"/api/coins/{coin}/wallet", data={
-        "csrf_token": csrf(client, f"/coins/{coin}")})
-    assert resp.status_code == 200, resp.get_data(as_text=True)
-    data = resp.get_json()
-    assert data["ok"], data
-    return data
-
-
 class FakeRpc:
     instances = []
     balance_lamports = 0
@@ -530,9 +517,6 @@ class TestOneScreen(HomeBase):
     def test_coin_rows_link_to_detail_not_popup(self):
         # The coins list shows held coins only — hold both first.
         self._buy_sol()
-        # The first-trade wallet step: a non-SOL Buy is refused
-        # until the coin's wallet is created.
-        create_coin_wallet(self.client, "BTC")
         self.client.post("/coins/BTC/buy", data={
             "csrf_token": csrf(self.client, "/coins/BTC"),
             "usd": "10", "bot_id": ""})

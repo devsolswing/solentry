@@ -39,7 +39,6 @@ from . import assistant as assistant_mod
 from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
 from . import candles as candles_mod
-from . import coin_wallets as coin_wallets_mod
 from . import donations as donations_mod
 from . import fees as fees_mod
 from . import jupiter as jupiter_mod
@@ -2597,15 +2596,9 @@ def register_routes(app: Flask) -> None:
             (user["id"], "real" if mode == "devnet" else "paper")
             ).fetchall()
         wallet = _wallet(app, user["id"])
-        # First-trade wallet step + Jupiter: whether this coin has a
-        # wallet recorded (Buy stays disabled until it does), and
-        # whether the coin trades as a wrapped token on Solana.
+        # Whether the coin trades as a wrapped token on Solana.
         # The wrapped lookup is the static map only — a page render
         # must never wait on a token-API call.
-        coin_wallet = coin_wallets_mod.coin_wallet_state(
-            db, user["id"], coin_id_resolved,
-            wallet["pubkey"] if wallet else None,
-            coin_name=COINS.get(coin_id_resolved, {}).get("name"))
         jupiter_wrapped = (
             jupiter_mod.wrapped_info(coin_id_resolved)
             if coin_id_resolved in COINS else None)
@@ -2624,7 +2617,6 @@ def register_routes(app: Flask) -> None:
             receive_address=wallet["pubkey"] if wallet else "",
             prices_source=prices["source"],
             prices_as_of=prices["as_of"],
-            coin_wallet=coin_wallet,
             jupiter_wrapped=jupiter_wrapped,
             # Page 5 Send/Receive must account for the network: the
             # coin's chain, the plain refusal when it is not a Solana
@@ -2739,29 +2731,6 @@ def register_routes(app: Flask) -> None:
         return jsonify({"ok": True, "majors": majors,
                         "fetched_at": fetched_at,
                         "source": "jupiter"})
-
-    @app.route("/api/coins/<coin_id>/wallet", methods=["POST"])
-    @login_required
-    def coin_wallet_create(coin_id: str):
-        """The "Create wallet" tap for a coin: records the user's
-        existing Solana app wallet for this coin (one row in
-        coin_wallets) and returns the real address, truncated, for
-        the connected indicator. Idempotent — a second tap returns
-        the same row. A coin with no supported wallet refuses
-        plainly instead of faking one."""
-        _csrf_check()
-        user = _current_user(app)
-        db = _db(app)
-        coin_id_resolved, _price, _source = _resolve_coin_price(coin_id)
-        if coin_id_resolved is None:
-            abort(404)
-        wallet = _wallet(app, user["id"])
-        coin_name = COINS.get(coin_id_resolved, {}).get("name")
-        result = coin_wallets_mod.create_coin_wallet(
-            db, user["id"], coin_id_resolved,
-            wallet["pubkey"] if wallet else None,
-            coin_name=coin_name)
-        return jsonify(result)
 
     @app.route("/api/coins/<coin_id>/tick")
     @login_required
@@ -3050,28 +3019,6 @@ def register_routes(app: Flask) -> None:
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
-        # First-trade wallet step: Buy is disabled until the wallet
-        # for this coin is created (coin page, "Create wallet"), and
-        # a coin with no supported wallet cannot be bought at all.
-        # The gate runs in both modes, before any pricing or bot
-        # work — and before the Jupiter refusal below, so the
-        # wallet message is the one the user sees first.
-        wallet = _wallet(app, user["id"])
-        coin_name = COINS.get(coin_id_resolved, {}).get("name")
-        wstate = coin_wallets_mod.coin_wallet_state(
-            db, user["id"], coin_id_resolved,
-            wallet["pubkey"] if wallet else None,
-            coin_name=coin_name)
-        if not wstate["supported"]:
-            return _coin_result(
-                "Nothing was bought",
-                [coin_wallets_mod.WALLET_NOT_AVAILABLE],
-                False, coin_id_resolved, label)
-        if not wstate["recorded"]:
-            return _coin_result(
-                "Nothing was bought",
-                [coin_wallets_mod.WALLET_REQUIRED],
-                False, coin_id_resolved, label)
         if mode == "paper":
             # Buys are in SOL on the detail page and the coin popup:
             # convert at the current SOL price. The old $ form is

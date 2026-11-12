@@ -48,31 +48,17 @@
     <div id="wrapped-majors-results" class="search-results"></div>
   </div>
 
-  {# Wallet step FIRST, then the Jupiter route, then Buy. The wallet
-     is the user's Solana app wallet, recorded for this coin on the
-     first trade; until then Buy stays disabled. A coin with no
-     supported wallet says so plainly instead of faking one. #}
-  <div id="coin-wallet" data-coin-id="{{ coin.coin_id }}" data-wallet-url="{{ url_for('coin_wallet_create', coin_id=coin.coin_id) }}" data-route-url="{{ url_for('jupiter_route', coin_id=coin.coin_id) }}">
-    {% if coin_wallet.recorded %}
-    <p class="muted small" id="wallet-connected"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;vertical-align:middle;"></span> <span>{{ coin_wallet.truncated }}</span></p>
-    {% elif coin_wallet.supported %}
-    <p><button class="btn" type="button" id="wallet-create-btn" data-wallet-create>Create wallet</button></p>
-    <p class="muted small">Create the wallet for {{ coin.name }} to unlock Buy.</p>
-    {% else %}
-    <p class="muted small">Wallet not available for this network yet.</p>
-    {% endif %}
-  </div>
   {% if jupiter_wrapped %}
   <p class="muted small">Trades as {{ jupiter_wrapped.name }} on Solana — the wrapped token, not native {{ coin.name }}.</p>
   {% endif %}
-  <div id="jupiter-route" data-jupiter-route>
+  <div id="jupiter-route" data-jupiter-route data-route-url="{{ url_for('jupiter_route', coin_id=coin.coin_id) }}">
     <p class="muted small" id="jupiter-route-status">Finding route…</p>
   </div>
 
   <div class="coin-actions-row">
     <button class="btn coin-action-btn" type="button" data-overlay-open="coin-send-overlay">↑ Send</button>
     <button class="btn coin-action-btn" type="button" data-overlay-open="coin-receive-overlay">↓ Receive</button>
-    <button class="btn coin-action-btn" type="button" data-overlay-open="coin-buy-overlay" data-buy-btn{% if not coin_wallet.recorded %} disabled{% endif %}>Buy</button>
+    <button class="btn coin-action-btn" type="button" data-overlay-open="coin-buy-overlay">Buy</button>
     <button class="btn coin-action-btn" type="button" data-overlay-open="coin-sell-overlay">Sell</button>
   </div>
   {% include "_coin_action_windows.html" %}

@@ -29,19 +29,6 @@ SECOND_THEME_MARKERS = (
 )
 
 
-def create_coin_wallet(client, coin):
-    """Tap "Create wallet" for a coin (the first-trade wallet step):
-    records the user's Solana app wallet for the coin so Buy works.
-    The gate refuses any Buy before this tap, so tests that buy a
-    non-SOL coin must create its wallet first."""
-    resp = client.post(f"/api/coins/{coin}/wallet", data={
-        "csrf_token": csrf(client, f"/coins/{coin}")})
-    assert resp.status_code == 200, resp.get_data(as_text=True)
-    data = resp.get_json()
-    assert data["ok"], data
-    return data
-
-
 class ThemeBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -118,10 +105,6 @@ class TestChange24h(ThemeBase):
         # The coins list shows held coins only — hold both coins
         # first so their rows (and 24h changes) render.
         for coin in ("SOL", "BTC"):
-            if coin != "SOL":
-                # The first-trade wallet step: a non-SOL Buy is
-                # refused until the coin's wallet is created.
-                create_coin_wallet(self.client, coin)
             self.client.post(f"/coins/{coin}/buy", data={
                 "csrf_token": csrf(self.client, f"/coins/{coin}"),
                 "usd": "10", "bot_id": ""})

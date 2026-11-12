@@ -29,7 +29,7 @@
           {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
         </select>
       </label>
-      <button class="btn big" type="submit" data-buy-submit{% if not coin_wallet.recorded %} disabled{% endif %}>Buy (paper)</button>
+      <button class="btn big" type="submit">Buy (paper)</button>
     </form>
     {% else %}
     <form method="post" action="{{ url_for('coin_buy', coin_id=coin.coin_id) }}">
@@ -41,7 +41,7 @@
           {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
         </select>
       </label>
-      <button class="btn big" type="submit" data-buy-submit{% if not coin_wallet.recorded %} disabled{% endif %}>Buy (real, devnet)</button>
+      <button class="btn big" type="submit">Buy (real, devnet)</button>
     </form>
     <p class="muted small">Buys on pump.fun (devnet), signed by your signing bot, within the bot's limits. If the coin is not a live pump.fun token, the buy is refused plainly and nothing is placed.</p>
     {% endif %}

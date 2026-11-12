@@ -1,5 +1,4 @@
-"""Jupiter route endpoint + per-coin wallet step on the coin page
-(HTTP level).
+"""Jupiter route endpoint + coin page buy flow (HTTP level).
 
 Rules under test:
 - GET /api/coins/<coin>/route shows the "Finding route…" scan's
@@ -8,13 +7,10 @@ Rules under test:
   when Jupiter has no liquid route — never a dead route, never a
   made-up one. TOKEN_NOT_TRADABLE maps to the same plain message;
   Jupiter being unreachable is reported as itself.
-- The first-trade wallet step: Buy is blocked until the user taps
-  "Create wallet" for that coin; the tap records the user's real
-  Solana app wallet for the coin (coin_wallets table); after that
-  the button is gone, replaced by the green-dot + first-4/last-4
-  indicator showing the REAL address; a second trade never brings
-  the button back. A coin with no supported wallet network says so
-  plainly instead of faking one.
+- There is NO per-coin wallet step: the coin page shows no
+  "Create wallet" button and no wallet indicator, the Buy button
+  is enabled, and a Buy goes through with no wallet tap first.
+  The old /api/coins/<coin>/wallet endpoint is gone (404).
 - Wrapped coins are labelled wrapped on the coin page, and paper
   buys price from the live Jupiter quote.
 No SOL moves in these tests; Jupiter's HTTP answers are mocked
@@ -31,8 +27,6 @@ import tradingbot.prices as prices
 import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
 from test_jupiter import REAL_QUOTE
-from tradingbot.coin_wallets import (
-    WALLET_NOT_AVAILABLE, WALLET_REQUIRED)
 from tradingbot.solana import generate_keypair
 
 MINT = "11111111111111111111111111111111"
@@ -163,20 +157,6 @@ class JupiterRoutesBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, path)
         return resp.get_data(as_text=True)
 
-    def _create_wallet(self, coin):
-        """Tap "Create wallet" for a coin; returns the JSON."""
-        resp = self.client.post(f"/api/coins/{coin}/wallet", data={
-            "csrf_token": csrf(self.client, f"/coins/{coin}")})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertTrue(data["ok"], data)
-        return data
-
-    def _app_wallet_pubkey(self):
-        return self.db.execute(
-            "SELECT pubkey FROM wallets WHERE user_id = ?",
-            (self.user_id,)).fetchone()["pubkey"]
-
 
 class TestJupiterRouteEndpoint(JupiterRoutesBase):
     def test_route_buy_returns_real_route(self):
@@ -266,74 +246,34 @@ class TestJupiterRouteEndpoint(JupiterRoutesBase):
         self.assertIn("more than 0", data["error"])
 
 
-class TestCoinWalletStep(JupiterRoutesBase):
-    def test_wallet_create_records_real_truncated_address(self):
-        data = self._create_wallet("ZEC")
-        pubkey = self._app_wallet_pubkey()
-        self.assertEqual(data["wallet_pubkey"], pubkey)
-        self.assertEqual(data["truncated"],
-                         f"{pubkey[:4]}…{pubkey[-4:]}")
-        self.assertTrue(data["created"])
-        row = self.db.execute(
-            "SELECT * FROM coin_wallets WHERE user_id = ? "
-            "AND coin_id = 'ZEC'", (self.user_id,)).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(row["wallet_pubkey"], pubkey)
-        self.assertEqual(row["network"], "Solana")
-
-    def test_wallet_create_is_idempotent(self):
-        first = self._create_wallet("ZEC")
-        second = self._create_wallet("ZEC")
-        self.assertEqual(second["wallet_pubkey"],
-                         first["wallet_pubkey"])
-        self.assertFalse(second["created"])
-        count = self.db.execute(
-            "SELECT COUNT(*) c FROM coin_wallets WHERE user_id = ? "
-            "AND coin_id = 'ZEC'", (self.user_id,)).fetchone()["c"]
-        self.assertEqual(count, 1)
-
-    def test_buy_blocked_until_wallet_created(self):
+class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
+    def test_buy_works_with_no_wallet_step(self):
+        # No tap first: the Buy goes straight through.
         resp = self.client.post("/coins/ZEC/buy", data={
             "csrf_token": csrf(self.client, "/coins/ZEC"),
             "usd": "10", "bot_id": ""})
-        html = resp.get_data(as_text=True)
-        self.assertIn("Nothing was bought", html)
-        # The page HTML-escapes the apostrophe in the message.
-        self.assertIn("Create the wallet for this coin first", html)
+        self.assertIn("Bought", resp.get_data(as_text=True))
         count = self.db.execute(
             "SELECT COUNT(*) c FROM paper_holdings WHERE user_id = ? "
             "AND coin_id = 'ZEC'", (self.user_id,)).fetchone()["c"]
-        self.assertEqual(count, 0)
-        # After the tap, the same Buy goes through.
-        self._create_wallet("ZEC")
-        resp = self.client.post("/coins/ZEC/buy", data={
-            "csrf_token": csrf(self.client, "/coins/ZEC"),
-            "usd": "10", "bot_id": ""})
-        self.assertIn("Bought", resp.get_data(as_text=True))
+        self.assertEqual(count, 1)
 
-    def test_wallet_button_replaced_by_indicator_never_returns(self):
-        html = self._html("/coins/ZEC/detail")
-        self.assertIn("Create wallet", html)
-        self.assertIn("wallet-create-btn", html)
-        self.assertNotIn("wallet-connected", html)
-        data = self._create_wallet("ZEC")
+    def test_detail_has_no_wallet_step_and_buy_enabled(self):
         html = self._html("/coins/ZEC/detail")
         self.assertNotIn("Create wallet", html)
         self.assertNotIn("wallet-create-btn", html)
-        self.assertIn("wallet-connected", html)
-        self.assertIn(data["truncated"], html)
-        # The green dot: an 8px round span in green.
-        self.assertIn("#22c55e", html)
-        # A second trade of the same coin: the button never comes
-        # back, and the indicator still shows the real address.
+        self.assertNotIn("wallet-connected", html)
+        self.assertNotIn("coin-wallet", html)
+        # The Buy button carries no disabled attribute.
+        self.assertNotIn("data-buy-btn", html)
+        # And a Buy from the page goes through with no tap first.
         resp = self.client.post("/coins/ZEC/buy", data={
             "csrf_token": csrf(self.client, "/coins/ZEC"),
             "usd": "10", "bot_id": ""})
         self.assertIn("Bought", resp.get_data(as_text=True))
         html = self._html("/coins/ZEC/detail")
         self.assertNotIn("Create wallet", html)
-        self.assertIn("wallet-connected", html)
-        self.assertIn(data["truncated"], html)
+        self.assertNotIn("wallet-connected", html)
 
     def test_detail_shows_finding_route_state(self):
         html = self._html("/coins/ZEC/detail")
@@ -345,27 +285,23 @@ class TestCoinWalletStep(JupiterRoutesBase):
         self.assertIn("Trades as Zcash on Solana", html)
         self.assertIn("the wrapped token, not native", html)
 
-    def test_unsupported_coin_says_wallet_not_available(self):
-        with mock.patch.object(jup, "resolve_mint",
-                               return_value=None):
-            resp = self.client.post("/api/coins/ADA/wallet", data={
-                "csrf_token": csrf(self.client, "/coins/ADA")})
-            data = resp.get_json()
-            self.assertFalse(data["ok"])
-            self.assertEqual(data["error"], WALLET_NOT_AVAILABLE)
-            resp = self.client.post("/coins/ADA/buy", data={
-                "csrf_token": csrf(self.client, "/coins/ADA"),
-                "usd": "10", "bot_id": ""})
+    def test_wallet_endpoint_is_gone_and_ada_buys_in_paper(self):
+        # The per-coin wallet endpoint no longer exists.
+        resp = self.client.post("/api/coins/ADA/wallet", data={
+            "csrf_token": csrf(self.client, "/coins/ADA")})
+        self.assertEqual(resp.status_code, 404)
+        # And with no wallet gate, an ADA paper buy goes through.
+        resp = self.client.post("/coins/ADA/buy", data={
+            "csrf_token": csrf(self.client, "/coins/ADA"),
+            "usd": "10", "bot_id": ""})
         html = resp.get_data(as_text=True)
-        self.assertIn("Nothing was bought", html)
-        self.assertIn(WALLET_NOT_AVAILABLE, html)
+        self.assertIn("Bought", html)
 
     def test_paper_buy_prices_from_jupiter_quote(self):
         # 0.1 SOL at a $100 SOL price is $10; the Jupiter quote
         # says that buys 0.00853837 wZEC, so the fill price is
         # ~$1,171/wZEC — not the $100 feed price (which would
         # fill 0.09635 wZEC). The fee (3.65%) comes off the $10.
-        self._create_wallet("ZEC")
         with mock.patch.object(jup, "quote_buy",
                                return_value=zec_buy_quote()):
             resp = self.client.post("/coins/ZEC/buy", data={
