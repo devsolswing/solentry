@@ -4120,19 +4120,17 @@ def register_routes(app: Flask) -> None:
         bots = data["bots"]
         memecoin_bots = [b for b in bots
                          if b["category"] == TRENCHES_CATEGORY]
-        # Platform wallets for the Bots-page rotating selector (Page 6
-        # rebuild): the same per-platform wallets Page 8 shows, so
-        # the selector renders real data and its Create buttons post
-        # to the existing create route. Page 8 itself is untouched.
-        # Signer-bot dashboard (Page 6): the signing bot's current
-        # (pending) tasks with the time each was tasked, and how many
-        # real transactions it has signed. Pending bot_proposals are
-        # the task queue (created_at is when the task was tasked);
-        # trade_ledger mode='real' rows are the trades the signing
-        # bot executed on devnet — paper rows are simulated, never
-        # signed, and never counted. A figure that cannot be read is
-        # None, and the template shows "—" instead of a guess. The
-        # Support ID itself already rides along in _dashboard_data.
+        # Signer-bot card (Page 6, owner 2026-11-11): the signing
+        # bot's current (pending) tasks with the time each was
+        # tasked, and how many real transactions it has signed.
+        # Pending bot_proposals are the task queue (created_at is
+        # when the task was tasked); trade_ledger mode='real' rows
+        # are the trades the signing bot executed on devnet — paper
+        # rows are simulated, never signed, and never counted. A
+        # figure that cannot be read is None, and the template
+        # shows "—" instead of a guess. The Support ID and the
+        # user's own 1.7% treasury fee total (gas fees paid) ride
+        # along in _dashboard_data as support_id / fees_total_sol.
         db = _db(app)
         signing_tasks = [dict(row) for row in db.execute(
             "SELECT p.id, p.bot_id, p.kind, p.coin_id, p.side, "
@@ -4175,11 +4173,6 @@ def register_routes(app: Flask) -> None:
         })
         return render_template("bots.html", **data,
                                memecoin_bots=memecoin_bots,
-                               platforms=platforms_mod.PLATFORMS,
-                               platform_labels=platforms_mod.PLATFORM_LABELS,
-                               platform_notes=platforms_mod.PLATFORM_NOTES,
-                               platform_wallets=platforms_mod.get_platform_wallets(
-                                   _db(app), user["id"]),
                                signing_tasks=signing_tasks,
                                signing_tx_count=signing_tx_count,
                                presets=presets,
