@@ -86,17 +86,17 @@
   {# Signer bot card (owner, 2026-11-11): the signing bot as a card
      like the other bot cards above it — same .card bot-card
      classes, icon, bold name, stats lines, chevron. Inside it:
-     the Signer ID, the number of real transactions signed (a
-     running count starting at 1), and the SolEntry fees paid (the
-     user's own 1.7% treasury fee, in SOL, as a gas fee). Tapping
-     the card reveals the signing bot's current tasks below it. #}
+     the Signer ID and the number of real transactions signed (a
+     running count starting at 1). No fee line: the trading fee
+     was removed (James, 2026-11-12), so the card shows no fee
+     figure at all. Tapping the card reveals the signing bot's
+     current tasks below it. #}
   <button class="card bot-card signer-card" type="button" id="signer-card" data-signer-toggle aria-expanded="false" aria-controls="signer-tasks-panel">
     <span class="bot-ico" aria-hidden="true">✍️</span>
     <span class="bot-info">
       <span class="bot-name"><strong>Signer Bot</strong></span>
       <span class="bot-id">Signer ID: {{ support_id or "—" }}</span>
       <span class="muted small" data-signer-tx-count="{{ signing_tx_count if signing_tx_count is not none else '' }}">Transactions signed: {% if signing_tx_count is none %}—{% elif signing_tx_count == 0 %}No signed transactions yet{% else %}{{ signing_tx_count }}{% endif %}</span>
-      <span class="muted small">Gas fees paid: {{ "%.4f"|format(fees_total_sol) }} SOL</span>
     </span>
     <span class="bot-arrow" aria-hidden="true">›</span>
   </button>

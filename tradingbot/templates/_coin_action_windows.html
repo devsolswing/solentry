@@ -18,7 +18,6 @@
   <div class="coin-popup">
     <p class="popup-head"><button class="popup-close" type="button" data-overlay-close aria-label="Close">✕</button></p>
     <h2>Buy {{ coin.name }} ({{ coin.ticker }})</h2>
-    <p class="muted small">Every trade pays a 3.65% fee in SOL — the fee is shown on the confirmation after the trade.</p>
     {% if mode == 'paper' %}
     <form method="post" action="{{ url_for('coin_buy', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -53,7 +52,6 @@
   <div class="coin-popup">
     <p class="popup-head"><button class="popup-close" type="button" data-overlay-close aria-label="Close">✕</button></p>
     <h2>Sell {{ coin.name }} ({{ coin.ticker }})</h2>
-    <p class="muted small">Every trade pays a 3.65% fee in SOL — the fee is shown on the confirmation after the trade.</p>
     {% if mode == 'paper' %}
     <form method="post" action="{{ url_for('coin_sell', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

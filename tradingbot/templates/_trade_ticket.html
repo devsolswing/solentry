@@ -14,7 +14,6 @@
     <label for="ticket-sell">Sell</label>
     <label for="ticket-sellall">Sell all</label>
   </div>
-  <p class="muted small">Every trade pays a 3.65% fee in SOL — the fee is shown on the confirmation after the trade.</p>
   <div class="ticket-panel ticket-buy-panel">
     {% if mode == 'paper' %}
     <form method="post" action="{{ url_for('coin_buy', coin_id=trade_coin.coin_id) }}">
