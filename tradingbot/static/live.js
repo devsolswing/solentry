@@ -38,7 +38,7 @@
      price feed's socket is untouched). The poll stops when the
      page is hidden or closed, so it never runs in the background.
      A failed fetch or a missing figure shows "—", never a guessed
-     number. The home page shows ONLY the user's own fees — no
+     number. The wallet page shows ONLY the user's own fees — no
      app-wide total (James, 2026-11-10). */
   var userFeeEls = collect('[data-fees-user-total]');
   var userPumpFeeEls = collect('[data-fees-user-pump-total]');

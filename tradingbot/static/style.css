@@ -641,39 +641,77 @@ button.bot-card { font: inherit; text-align: left; cursor: pointer; -webkit-appe
 }
 
 /* ------------------------------------------------------------------ */
-/* Home compact (owner, 2026-11-11): Page 3 fits one screen.          */
-/* Lift everything up, shrink the balance box by about a third       */
-/* (the chart keeps its 100px height), nothing under the chart —     */
-/* the coin list follows the balance box immediately, borderless,     */
-/* rows like the Page 6 bot cards (circular icon, name over the       */
-/* ticker in small type, 1hr sparkline fitting smoothly, price +     */
-/* amount, 1h % far right). Home-only classes here — never .bot-*,   */
-/* .bots-*, preset, or any other page's rules.                        */
+/* Home rebuild from scratch (owner, 2026-11-11): Page 3 rebuilt to  */
+/* match the photo exactly — header, four action buttons, BALANCE    */
+/* box, HOLDINGS heading + rows, bottom nav (in base.html). One      */
+/* consolidated block: it supersedes the earlier home layers         */
+/* (redo / lift / mockup / compact) — the LAST rule wins, so this    */
+/* block, sitting at the end of the file, is the home's single       */
+/* source of truth. Home-only classes here — never .bot-*, .bots-*,  */
+/* preset, or any other page's rules. The old compact block        */
+/* above is deleted with this change (restated here, except the      */
+/* holdings-panel rule, which follows the scrollable form: the       */
+/* panel grows with the page and never scrolls internally (owner,   */
+/* 2026-11-12).                                                      */
 /* ------------------------------------------------------------------ */
-.home-top { margin: 0 0 2px; }
-.home-actions-row { margin: 4px 0 6px; }
+body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-direction: column; padding: 4px 12px 84px; }
+.home-screen { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* Header: fox left, wordmark + subtitle right, centred as a group. */
+.home-logo { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 0 0 2px; text-align: left; }
+.home-logo .fox-logo { margin: 0; flex: 0 0 auto; width: clamp(64px, 12dvh, 110px); height: clamp(64px, 12dvh, 110px); }
+.home-logo .home-wordmark { margin: 0; text-align: left; }
+.home-title { text-align: left; min-width: 0; }
+.home-title .home-wordmark { background: none; -webkit-text-fill-color: #ffd700; color: #ffd700; filter: drop-shadow(0 2px 8px rgba(255, 170, 0, .4)); font-size: clamp(38px, 6.5dvh, 56px); }
+.home-subtitle { color: #ff2d20; font-size: clamp(16px, 2.6dvh, 22px); font-weight: 900; letter-spacing: 1px; margin: 2px 0 0; }
+/* Four action buttons, one row: icon stacked over the label. */
+.home-actions-row { display: flex; gap: 8px; margin: 4px 0 6px; }
 .home-actions-row .buy-btn, .home-actions-row .sell-btn, .home-actions-row .send-receive-btn { flex: 1 1 0; padding: 10px 2px; font-size: 16px; text-align: center; }
-/* Balance box: tighter padding, smaller label/total/% — the box
-   drops by about a third. The chart SVG stays 100px tall. */
-.home-total { margin: 2px 0 4px; padding: 6px 12px; }
-.home-total .portfolio-mode { font-size: 12px; }
-.home-balance-label { font-size: 13px; }
+.home-actions-row .send-receive-btn { background: #000; border: 2px solid #ffb300; color: #ffd700; }
+.home-actions-row .btn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: 14px; padding: 10px 2px; }
+.home-action-ico { display: block; line-height: 1; }
+.home-action-ico svg { width: 26px; height: 26px; display: block; }
+.home-action-label { display: block; font-size: 16px; font-weight: 900; }
+/* Balance window: left-aligned total, % change big on the right. */
+.home-total { margin: 2px 0 4px; padding: 6px 12px; text-align: left; }
+.home-total .portfolio-total { font-size: clamp(24px, 4dvh, 32px); color: #fff; }
+.home-total .portfolio-mode { font-size: 12px; text-align: left; }
+.home-balance-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.home-balance-label { color: #ffd700; font-weight: 900; font-size: 13px; letter-spacing: 1px; flex: 0 0 auto; }
+.home-balance-top .home-chart-durations { flex: 1 1 auto; margin: 0; justify-content: flex-end; }
 .home-range-btn { padding: 2px 7px; font-size: 11px; }
 .home-currency summary { font-size: 13px; }
-.home-total .portfolio-total { font-size: clamp(24px, 4dvh, 32px); color: #fff; }
-.home-total-row .portfolio-total { margin: 0; }
-.home-total-pct { font-size: clamp(16px, 2.4dvh, 20px); }
-.home-total-cad { font-size: 13px; margin: 0; }
+.home-total-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.home-total-row .portfolio-total { margin: 0; text-align: left; flex: 1 1 auto; min-width: 0; }
+.home-total-pct { font-size: clamp(16px, 2.4dvh, 20px); font-weight: 900; margin: 0; flex: 0 0 auto; }
+.home-total-cad { margin: 0; font-size: 13px; }
 .home-chart { margin-top: 4px; }
-/* Holdings: no panel border, no row borders, no dividers — the
-   list is clean. The panel takes the remaining space and scrolls
-   internally only if the list genuinely overflows a small screen. */
-.holdings-panel { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; border: none; background: transparent; padding: 0; }
+.home-chart-wrap svg { width: 100%; height: 100px; display: block; }
+/* HOLDINGS heading: gold, no line under it — the photo has none. */
+.home-screen .section-title { margin: 6px 0 4px; font-size: 14px; border-bottom: none; padding-bottom: 0; }
+/* Holdings: no panel border, no row borders, no dividers. */
+.holdings-panel { max-height: none; border: none; background: transparent; padding: 0; }
+.holdings-panel .coin-list { gap: 6px; }
 .holdings-row { font-size: 16px; padding: 6px 8px; border: none; background: transparent; border-radius: 0; }
 .holdings-row .coin-name { flex: 1 1 auto; min-width: 0; }
+.holdings-name { display: block; font-size: 16px; }
 .holdings-row .coin-ticker { display: block; font-size: 12px; }
-/* The support ID line and the two cards below the list stay, but
-   tightened so the whole page still fits one screen. */
+.holdings-row .coin-ico { flex: 0 0 32px; width: 32px; height: 32px; font-size: 14px; }
+.holdings-row .coin-img { flex: 0 0 32px; width: 32px; height: 32px; }
+.holdings-spark { flex: 0 0 64px; display: flex; align-items: center; }
+.holdings-spark svg { width: 64px; height: 16px; display: block; }
+.holdings-spark:empty { display: none; }
+.holdings-price-block { flex: 0 0 auto; text-align: right; min-width: 0; }
+.holdings-price { display: block; font-weight: 800; font-size: 16px; }
+.holdings-amount { display: block; font-size: 12px; margin-top: 1px; }
+.holdings-value-live { display: none; }
+.holdings-1h { flex: 0 0 auto; text-align: right; font-weight: 800; font-size: 14px; }
+/* Below the photo content: Logs link, support ID line, fees + Trenches cards. */
+.home-logs-link { align-self: flex-start; margin: 6px 0 2px; }
 .home-screen > p.muted.small { margin: 2px 0; }
 .fees-card { margin: 6px 0; padding: 8px 12px; }
 .trenches-card { margin: 6px 0 0; padding: 10px 14px; }
+/* Very short screens: shrink the decorative logo so the page still fits one screen. */
+@media (max-height: 740px) {
+  .home-screen .fox-logo { width: 48px; height: 48px; }
+  .home-wordmark { font-size: 30px; }
+}
