@@ -8,7 +8,10 @@
 
    If the socket drops, the page says so plainly (status pill) and
    falls back to polling /api/live every 10 seconds, while the
-   socket reconnects with backoff. The coin detail page's own
+   socket reconnects with backoff. A socket that connects but never
+   delivers a message within 10s counts as down too — the status
+   pill only says "Live" after the first tick arrives, never on
+   connect alone. The coin detail page's own
    1-second REST poller (coin_tick.js) stands down while the socket
    is up and resumes when it drops, so the live chart never gaps.
    A stale tick (older than 30s at the server) is shown dimmed,
@@ -96,6 +99,7 @@
   var ws = null;
   var retryMs = 5000;
   var fallbackTimer = null;
+  var watchdogTimer = null;
   var lastTickAt = null;
   var lastSource = null;
 
@@ -286,9 +290,21 @@
       retryMs = 5000;
       stopFallback();
       ws.send(JSON.stringify({ subscribe: coinList }));
-      setStatus('live', new Date());
+      /* Not "live" yet — only the first tick earns that. A socket
+         that connects but never speaks is not live: if no message
+         arrives within 10s, drop it so the REST fallback takes over
+         and the reconnect backoff runs. */
+      setStatus('connecting');
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      watchdogTimer = setTimeout(function () {
+        if (ws) { try { ws.close(); } catch (e) { /* onclose follows */ } }
+      }, 10000);
     };
     ws.onmessage = function (ev) {
+      if (watchdogTimer) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = null;
+      }
       var data;
       try { data = JSON.parse(ev.data); } catch (e) { return; }
       if (!data) return;
@@ -306,6 +322,10 @@
 
   function onDown() {
     window.__solentryLiveUp = false;
+    if (watchdogTimer) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
     ws = null;
     setStatus('down');
     startFallback();

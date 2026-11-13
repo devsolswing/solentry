@@ -19,11 +19,12 @@
 
    When the app WebSocket is up (live.js sets
    window.__solentryLiveUp), the socket owns the ticks: this poller
-   stands down and live.js feeds ticks into the same applyTick
-   below, so the price and note update from the socket instead.
-   When the socket drops, the flag clears and this poller resumes
-   on its next second — the REST fallback, with no gap in the
-   price. */
+   stands down while socket ticks are actually arriving, and live.js
+   feeds ticks into the same applyTick below, so the price and note
+   update from the socket instead. When the socket drops — or
+   connects but never delivers a tick for 5 seconds — the flag
+   clears (or the stall is detected) and this poller resumes on its
+   next second — the REST fallback, with no gap in the price. */
 (function () {
   'use strict';
   var chart = document.getElementById('live-chart');
@@ -104,10 +105,19 @@
   }
 
   /* The live feed (live.js) calls this for every socket tick. */
-  window.SolEntryTick = { apply: applyTick };
+  var lastWsTickAt = null;
+  window.SolEntryTick = { apply: function (price, asOf, source) {
+    lastWsTickAt = Date.now();
+    applyTick(price, asOf, source);
+  } };
 
   function tick() {
-    if (window.__solentryLiveUp) return;
+    /* Stand down only while socket ticks are actually arriving: a
+       socket that connects but never delivers must not silence this
+       poller — the price box would sit on "Waiting for the first
+       live tick…" forever while a working REST tick exists. */
+    if (window.__solentryLiveUp && lastWsTickAt
+        && Date.now() - lastWsTickAt < 5000) return;
     fetch(url, { credentials: 'same-origin' })
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
