@@ -59,11 +59,12 @@ from .prices import get_prices
 from .rules import load_rules
 from .scanner import (check_top10_concentration, check_top10_rug,
                       clear_watches, detect_regime, gain_3m_pct,
-                      next_ladder_rung, passes_buy_filter, record_marks,
-                      top10_total)
+                      gain_window_pct, next_ladder_rung,
+                      passes_buy_filter, record_marks, top10_total)
 from .signals import signal_for_coin
 from .solana import SolanaRpcClient, lamports_to_sol
 from .trenches import fetch_trenches_scan
+from .devnet_watchlist import enrich_scan
 
 MIN_PAPER_TRADE_USD = 1.0
 REAL_SWAP_UNAVAILABLE = "real swap not available in v1"
@@ -717,7 +718,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             if gain is None or gain < threshold:
                 continue
             ok, why = passes_buy_filter(
-                entry, rules.get("buy_filter"), gain)
+                entry, rules.get("buy_filter"), gain,
+                devnet_watchlist_active=(cfg.network == "devnet"))
             if not ok:
                 filtered.append((gain, entry, why))
                 continue
@@ -727,14 +729,29 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         threshold = float(rules["buy"]["threshold_pct"])
         change_key = _BUY_METRIC_TO_CHANGE_KEY[rules["buy"]["metric"]]
         held = set(_positions(db, bot["id"]))
+        # DEVNET-TEST-ONLY (remove before mainnet): watchlist mints
+        # have no DexScreener 5-minute change — record price marks
+        # for them so the 5-minute gain comes from the loop's own
+        # marks, scanner-style. A mint with no mark at least 5
+        # minutes old has no gain yet and is not bought.
+        _watch = [e for e in trenches_data["candidates"]
+                  if e.get("devnet_watchlist")]
+        if _watch:
+            record_marks(db, bot["id"], _watch, _now())
         for entry in trenches_data["candidates"]:
-            change = entry.get(change_key)
+            if entry.get("devnet_watchlist"):
+                change = gain_window_pct(
+                    db, bot["id"], entry["mint"], entry["price_usd"],
+                    now_ts, 300)
+            else:
+                change = entry.get(change_key)
             if change is None or float(change) < threshold:
                 continue
             if entry["mint"] in held:
                 continue
             ok, why = passes_buy_filter(
-                entry, rules.get("buy_filter"), float(change))
+                entry, rules.get("buy_filter"), float(change),
+                devnet_watchlist_active=(cfg.network == "devnet"))
             if not ok:
                 filtered.append((float(change), entry, why))
                 continue
@@ -1078,6 +1095,16 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             "SELECT DISTINCT coin_id FROM bot_positions WHERE bot_id IN "
             "(SELECT id FROM bots WHERE silent = 1)").fetchall()]
         trenches_data = trenches_fetcher(mints=held_mints)
+        # DEVNET-TEST-ONLY (remove before mainnet): add the
+        # devnet-mint watchlist as extra scan candidates, priced
+        # from their bonding curves. Inert unless NETWORK is
+        # devnet — see tradingbot/devnet_watchlist.py. Enriched
+        # BEFORE the feed sanitizer so a curve price that jumps
+        # absurdly in one scan is dropped like any other bad tick.
+        sol_price_usd = ((prices_data.get("prices") or {})
+                         .get("SOL", {}) or {}).get("price")
+        trenches_data = enrich_scan(trenches_data, cfg, rpc_factory,
+                                    sol_price_usd)
     if feed is not None:
         # Bad-tick guard: an absurd price never becomes a buy/sell
         # signal or a snapshot value. The sanitizers return copies;

@@ -33,6 +33,27 @@ def load_dotenv(path: str = ".env") -> None:
             os.environ.setdefault(key, value)
 
 
+# DEVNET-TEST-ONLY (remove before mainnet): the pump.fun mints the
+# silent loop watches as extra trenches candidates on devnet.
+# Gate is James's own devnet test coin; AuditTest is a barely
+# traded devnet coin made for testing. Both have live devnet
+# bonding curves and no DexScreener data.
+DEVNET_TRENCH_MINTS_DEFAULT = (
+    "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE",  # Gate
+    "3k6ZYa2Wh6P92VN2uGvKsmHiw2RQpcVgxpb447raf2kC",  # AuditTest
+)
+
+
+def _parse_devnet_trench_mints(env: dict) -> list[str]:
+    """DEVNET_TRENCH_MINTS, comma-separated. Unset means the two
+    built-in devnet test mints; set (even empty) means exactly
+    what the operator listed."""
+    raw = env.get("DEVNET_TRENCH_MINTS")
+    if raw is None:
+        return list(DEVNET_TRENCH_MINTS_DEFAULT)
+    return [m.strip() for m in str(raw).split(",") if m.strip()]
+
+
 class Config:
     """All secrets come from env vars. Nothing secret lives in code."""
 
@@ -81,6 +102,18 @@ class Config:
             "LIVE_FEED_ENABLED", "1") == "1"
         self.silent_loop_interval_seconds: int = max(
             10, int(env.get("SILENT_LOOP_INTERVAL_SECONDS", "60")))
+        # DEVNET-TEST-ONLY watchlist for the silent loop (devnet
+        # proof): pump.fun mints the loop watches as extra
+        # trenches candidates, priced from their devnet bonding
+        # curves (DexScreener has no data for them — it returns
+        # pairs:null for both). Comma-separated override via
+        # DEVNET_TRENCH_MINTS; empty means no watchlist. Active
+        # ONLY when NETWORK == devnet — see
+        # tradingbot/devnet_watchlist.py. REMOVE BEFORE MAINNET:
+        # these are devnet test tokens and must never be
+        # candidates on mainnet.
+        self.devnet_trench_mints: list[str] = _parse_devnet_trench_mints(
+            env)
         # WebAuthn passkeys: RP identity comes from env vars only —
         # never hardcode the production domain. Dev defaults point at
         # a local server; Railway must set the real domain + origin.

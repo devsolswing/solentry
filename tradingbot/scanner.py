@@ -107,7 +107,8 @@ def _gte(a: float, b: float) -> bool:
 
 
 def passes_buy_filter(entry, filter_cfg=None,
-                      signal_pct=None) -> tuple[bool, str]:
+                      signal_pct=None,
+                      devnet_watchlist_active=False) -> tuple[bool, str]:
     """Does a feed entry pass the low-performer buy filter?
 
     `signal_pct` is the gain that triggered the buy (3-minute gain
@@ -115,11 +116,32 @@ def passes_buy_filter(entry, filter_cfg=None,
     (True, "") or (False, reason). Fail-closed: any missing or
     unusable input rejects the buy — a coin with no volume data,
     no buy/sell counts, or no signal is never bought on a guess.
+
+    DEVNET-TEST-ONLY carve-out (remove before mainnet): an entry
+    flagged `devnet_watchlist` — a devnet mint priced from its
+    bonding curve, which has no DexScreener data at all — takes a
+    different path, and ONLY when the caller confirms the
+    watchlist is active (`devnet_watchlist_active`, which the
+    silent loop sets from NETWORK == "devnet"). With the flag
+    off, a flagged entry falls through to the normal filter and
+    is rejected for its missing volume data. With it on, the two
+    DexScreener-only checks are replaced: the 5-minute-volume
+    check becomes a bonding-curve liquidity check (real SOL must
+    be sitting in the curve), and the buy/sell-count check is
+    skipped (no on-chain equivalent exists from one curve
+    snapshot). The signal-strength and market-cap checks still
+    apply in full — the signal is still the real gate.
     """
     cfg = filter_cfg or BUY_FILTER_DEFAULT
     for key in cfg:
         if key not in BUY_FILTER_KEYS:
             return False, f"Unknown buy filter setting '{key}'"
+    if entry.get("devnet_watchlist"):
+        if devnet_watchlist_active:
+            return _passes_devnet_watchlist_filter(entry, cfg, signal_pct)
+        # Watchlist flag with the watchlist inactive (any network
+        # other than devnet): no carve-out — the normal filter
+        # below rejects it for its missing DexScreener data.
     try:
         min_vol = float(cfg.get("min_volume_5m_usd",
                                 BUY_FILTER_DEFAULT["min_volume_5m_usd"]))
@@ -172,6 +194,68 @@ def passes_buy_filter(entry, filter_cfg=None,
         # A market-cap minimum is set: the coin must report a market
         # cap at or above it. No market-cap data means no buy —
         # fail-closed, never a guess at the coin's size.
+        mcap = entry.get("market_cap_usd")
+        if mcap is None:
+            return False, "no market cap data"
+        try:
+            mcap = float(mcap)
+        except (TypeError, ValueError):
+            return False, "no market cap data"
+        if not _gte(mcap, min_mcap):
+            return False, (f"market cap ${mcap:,.0f} is below the "
+                           f"${min_mcap:,.0f} minimum")
+    return True, ""
+
+
+def _passes_devnet_watchlist_filter(entry, cfg, signal_pct):
+    """Buy-filter carve-out for a devnet watchlist mint (see
+    passes_buy_filter). DEVNET-TEST-ONLY — remove before mainnet.
+
+    The entry has no DexScreener data by construction, so the
+    volume and buy/sell-count checks cannot apply. In their
+    place: the bonding curve must hold real SOL (curve_real_sol
+    > 0 — the curve-derived equivalent of "real money is in this
+    market"); a missing or zero figure rejects the buy. The
+    signal-strength check (same minimum as the normal filter)
+    and the market-cap check (against the curve-derived market
+    cap the watchlist entry carries) still apply in full.
+    """
+    try:
+        min_signal = float(cfg.get("min_signal_pct",
+                                   BUY_FILTER_DEFAULT["min_signal_pct"]))
+    except (TypeError, ValueError):
+        return False, "buy filter is misconfigured"
+    curve_sol = entry.get("curve_real_sol")
+    if curve_sol is None:
+        return False, "no bonding-curve liquidity data"
+    try:
+        curve_sol = float(curve_sol)
+    except (TypeError, ValueError):
+        return False, "no bonding-curve liquidity data"
+    if not curve_sol > 0:
+        return False, "bonding curve holds no real SOL"
+    if signal_pct is None:
+        # No explicit signal given: fall back to the entry's
+        # 5-minute gain. The loop always passes the gain that
+        # triggered the buy, so this only matters for standalone
+        # use — and a watchlist entry has no feed 5-minute gain,
+        # so it rejects, never a guess.
+        signal_pct = entry.get("change_5m_pct")
+    if signal_pct is None:
+        return False, "no signal strength"
+    try:
+        signal_pct = float(signal_pct)
+    except (TypeError, ValueError):
+        return False, "no signal strength"
+    if not _gte(signal_pct, min_signal):
+        return False, (f"signal {signal_pct:.1f}% is below the "
+                       f"{min_signal:.1f}% minimum")
+    try:
+        min_mcap = float(cfg.get("min_market_cap_usd",
+                                 BUY_FILTER_DEFAULT["min_market_cap_usd"]))
+    except (TypeError, ValueError):
+        return False, "buy filter is misconfigured"
+    if min_mcap > 0:
         mcap = entry.get("market_cap_usd")
         if mcap is None:
             return False, "no market cap data"
@@ -299,14 +383,17 @@ def record_marks(db, bot_id: int, entries, now_str: str) -> None:
     db.commit()
 
 
-def gain_3m_pct(db, bot_id: int, mint: str, price_now: float,
-                now_ts: float):
-    """% gain over the last 3 minutes, from recorded marks.
+def gain_window_pct(db, bot_id: int, mint: str, price_now: float,
+                    now_ts: float, window_seconds: int):
+    """% gain over the last `window_seconds`, from recorded marks.
 
-    Uses the latest mark at least 3 minutes old. None when the coin
-    has not been tracked that long yet — no gain to judge, so no buy.
+    Uses the latest mark at least `window_seconds` old. None when
+    the coin has not been tracked that long yet — no gain to judge,
+    so no buy. This is how a coin with no feed-provided change
+    (a devnet watchlist mint, priced from its bonding curve) gets
+    its buy signal: the loop's own marks, never a guess.
     """
-    cutoff = _fmt(now_ts - MARK_WINDOW_SECONDS)
+    cutoff = _fmt(now_ts - window_seconds)
     row = db.execute(
         "SELECT price_usd FROM scanner_marks WHERE bot_id = ? AND "
         "mint = ? AND recorded_at <= ? ORDER BY recorded_at DESC "
@@ -318,6 +405,17 @@ def gain_3m_pct(db, bot_id: int, mint: str, price_now: float,
     if old <= 0:
         return None
     return (float(price_now) - old) / old * 100.0
+
+
+def gain_3m_pct(db, bot_id: int, mint: str, price_now: float,
+                now_ts: float):
+    """% gain over the last 3 minutes, from recorded marks.
+
+    Uses the latest mark at least 3 minutes old. None when the coin
+    has not been tracked that long yet — no gain to judge, so no buy.
+    """
+    return gain_window_pct(db, bot_id, mint, price_now, now_ts,
+                           MARK_WINDOW_SECONDS)
 
 
 def top10_total(client, mint: str):
