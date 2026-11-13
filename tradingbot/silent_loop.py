@@ -49,7 +49,6 @@ from .db import init_db
 from .executor import execute_real_trade
 from .jupiter import is_jupiter_coin
 from .jupiter_executor import execute_jupiter_swap
-from .fees import record_fee
 from .ledger import record_trade
 from .platforms import REAL_TRADEABLE_PLATFORMS
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
@@ -162,25 +161,10 @@ def _close_position(db: sqlite3.Connection, bot, coin: str,
     db.commit()
 
 
-def _fee_text(fee_usd: float | None = None,
-              fee_sol: float | None = None) -> str:
-    """The fee sentence for an activity-log line, e.g.
-    " Fee (3.65%): $0.37 (≈ 0.0042 SOL)." — empty when no fee was
-    charged (a mock executor that returns no fee fields)."""
-    if fee_usd is None and fee_sol is None:
-        return ""
-    if fee_usd is not None and fee_sol is not None:
-        return f" Fee (3.65%): ${fee_usd:.2f} (≈ {fee_sol:.4f} SOL)."
-    if fee_sol is not None:
-        return f" Fee (3.65%): {fee_sol:.4f} SOL."
-    return f" Fee (3.65%): ${fee_usd:.2f}."
-
-
 def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                    price: float, reason: str, rpc_factory,
                    real_executor, actions: list, amount: float | None = None,
-                   ladder_stage: int | None = None,
-                   sol_price_usd: float | None = None) -> None:
+                   ladder_stage: int | None = None) -> None:
     """Sell a bot's position in `coin` (paper ledger, or the real
     executor). `amount` None means the whole position; otherwise a
     partial sell (sell-ladder rung). `ladder_stage` advances the
@@ -209,10 +193,8 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                                 "reason": "position already sold"})
                 return
             sell_amount = min(amount, held)
-            fee_info: list = []
             usd = paper_sell(db, bot["user_id"], coin, sell_amount, price,
-                             _now(), bot_id=bot["id"], exit_reason=reason,
-                             sol_price_usd=sol_price_usd, fee_out=fee_info)
+                             _now(), bot_id=bot["id"], exit_reason=reason)
             _close_position(db, bot, coin, sell_amount)
             if ladder_stage is not None:
                 db.execute("UPDATE bot_positions SET ladder_stage = ? "
@@ -221,11 +203,9 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                 db.commit()
             kind = ("silent_stop_loss" if reason == "stop_loss"
                     else "silent_sell")
-            fee = fee_info[0] if fee_info else {}
             _log(db, bot["user_id"], kind,
                  f"Silent bot '{bot['name']}' sold {sell_amount:.4f} {coin} "
-                 f"for ${usd:.2f} ({reason})."
-                 f"{_fee_text(fee.get('fee_usd'), fee.get('fee_sol'))}",
+                 f"for ${usd:.2f} ({reason}).",
                  bot["mode"])
             actions.append({"action": "sell", "coin": coin,
                             "amount": sell_amount, "usd": usd,
@@ -252,21 +232,6 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                      pnl_usd=amount * price
                      - amount * float(pos["avg_price"]),
                      exit_reason=reason, mode="real", now=_now())
-        # The 3.65% fee travelled in the same transaction as the
-        # sell (executor.py); record it once, keyed by the trade's
-        # signature, so it is never charged twice.
-        fee_sol = result.get("fee_sol")
-        if fee_sol is not None:
-            record_fee(db, bot["user_id"], bot["id"], coin, "sell",
-                       "real", fee_sol,
-                       fee_lamports=result.get("fee_lamports"),
-                       treasury_sol=result.get("treasury_sol"),
-                       burn_sol=result.get("burn_sol"),
-                       pump_fee_sol=result.get("pump_fee_sol"),
-                       treasury_lamports=result.get("treasury_lamports"),
-                       burn_lamports=result.get("burn_lamports"),
-                       pump_fee_lamports=result.get("pump_fee_lamports"),
-                       signature=result.get("signature"))
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
                        "WHERE bot_id = ? AND coin_id = ?",
@@ -276,8 +241,7 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
              f"Silent bot '{bot['name']}' sold {amount:.4f} {coin} "
              f"({reason}). Signature: "
              f"{str(result.get('signature', ''))[:12]}... "
-             f"Signing bot: {result.get('signing_bot', '')}."
-             f"{_fee_text(None, fee_sol)}", bot["mode"])
+             f"Signing bot: {result.get('signing_bot', '')}.", bot["mode"])
         actions.append({"action": "sell", "coin": coin, "amount": amount,
                         "reason": reason})
     else:
@@ -313,12 +277,9 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             actions.append({"action": "skip", "coin": coin, "reason": why})
             return
         try:
-            fee_info: list = []
             amount, usd = paper_buy(db, bot["user_id"], coin, buy_usd,
                                     price, _now(), bot_id=bot["id"],
-                                    signals=signals,
-                                    sol_price_usd=prices_usd.get("SOL"),
-                                    fee_out=fee_info)
+                                    signals=signals)
         except InsufficientCash:
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': buy of {coin} skipped — "
@@ -327,11 +288,9 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                             "reason": "insufficient paper cash"})
             return
         _open_position(db, bot, coin, amount, price)
-        fee = fee_info[0] if fee_info else {}
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {amount:.4f} {coin} "
-             f"for ${usd:.2f} (paper)."
-             f"{_fee_text(fee.get('fee_usd'), fee.get('fee_sol'))}",
+             f"for ${usd:.2f} (paper).",
              bot["mode"])
         actions.append({"action": "buy", "coin": coin, "amount": amount,
                         "usd": usd})
@@ -379,27 +338,11 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             record_trade(db, bot["user_id"], bot["id"], coin, "buy",
                          coin_amount, price, coin_amount * price,
                          mode="real", now=_now())
-        # The 3.65% fee travelled in the same transaction as the
-        # buy (executor.py); record it once, keyed by the trade's
-        # signature, so it is never charged twice.
-        fee_sol = result.get("fee_sol")
-        if fee_sol is not None:
-            record_fee(db, bot["user_id"], bot["id"], coin, "buy",
-                       "real", fee_sol,
-                       fee_lamports=result.get("fee_lamports"),
-                       treasury_sol=result.get("treasury_sol"),
-                       burn_sol=result.get("burn_sol"),
-                       pump_fee_sol=result.get("pump_fee_sol"),
-                       treasury_lamports=result.get("treasury_lamports"),
-                       burn_lamports=result.get("burn_lamports"),
-                       pump_fee_lamports=result.get("pump_fee_lamports"),
-                       signature=result.get("signature"))
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {coin} for "
              f"{amount_sol:.4f} SOL. Signature: "
              f"{str(result.get('signature', ''))[:12]}... "
-             f"Signing bot: {result.get('signing_bot', '')}."
-             f"{_fee_text(None, fee_sol)}", bot["mode"])
+             f"Signing bot: {result.get('signing_bot', '')}.", bot["mode"])
         actions.append({"action": "buy", "coin": coin,
                         "amount_sol": amount_sol})
     else:
@@ -544,11 +487,6 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     stop_loss_pct = float(bot["stop_loss_pct"])
     trailing_pct = float(rules["trailing_stop_pct"])
     ladder = rules["sell_ladder"]
-    # The SOL price for the 3.65% fee's SOL equivalent on paper
-    # sells (CoinGecko prices; None when unknown — the fee is then
-    # recorded in USD and converted at the live price on display).
-    sol_price_usd = ((prices_data.get("prices") or {})
-                     .get("SOL", {}).get("price"))
     # Top-10 wallets watch state (scanner only): one RPC client per
     # evaluation, created lazily; a failed client or a failed lookup
     # is logged once per bot per scan and the watch is skipped.
@@ -577,8 +515,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                                  now_ts)
             if reason:
                 _sell_position(db, cfg, bot, coin, price, reason,
-                               rpc_factory, real_executor, actions,
-                               sol_price_usd=sol_price_usd)
+                               rpc_factory, real_executor, actions)
                 continue
             db.execute("UPDATE bot_positions SET last_price = ?, "
                        "last_price_at = ? WHERE bot_id = ? AND coin_id = ?",
@@ -624,8 +561,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                             sell_reason += " — proceeds in SOL"
                         _sell_position(db, cfg, bot, coin, price,
                                        sell_reason, rpc_factory,
-                                       real_executor, actions,
-                                       sol_price_usd=sol_price_usd)
+                                       real_executor, actions)
                         continue
         avg_price = float(pos["avg_price"])
         peak = pos["peak_price"]
@@ -639,14 +575,12 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         stop_price = avg_price * (1 - stop_loss_pct / 100.0)
         if _lte(price, stop_price):
             _sell_position(db, cfg, bot, coin, price, "stop_loss",
-                           rpc_factory, real_executor, actions,
-                           sol_price_usd=sol_price_usd)
+                           rpc_factory, real_executor, actions)
             continue
         trail_price = peak * (1 - trailing_pct / 100.0)
         if _lte(price, trail_price):
             _sell_position(db, cfg, bot, coin, price, "trailing stop",
-                           rpc_factory, real_executor, actions,
-                           sol_price_usd=sol_price_usd)
+                           rpc_factory, real_executor, actions)
             continue
         stage = int(pos["ladder_stage"] or 0)
         if kind == "scanner" and rules.get("trending_ladder"):
@@ -676,8 +610,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     f"sell ladder ({regime}): {sell_frac * 100:.0f}% at "
                     f"+{target:.0f}% profit",
                     rpc_factory, real_executor, actions,
-                    amount=orig * sell_frac, ladder_stage=stage + 1,
-                    sol_price_usd=sol_price_usd)
+                    amount=orig * sell_frac, ladder_stage=stage + 1)
         elif stage < len(ladder):
             rung = ladder[stage]
             target = avg_price * (1 + float(rung["profit_pct"]) / 100.0)
@@ -691,8 +624,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     f"sell ladder: {rung['pct_of_position']:.0f}% at "
                     f"+{rung['profit_pct']:.0f}% profit",
                     rpc_factory, real_executor, actions, amount=amount,
-                    ladder_stage=stage + 1,
-                    sol_price_usd=sol_price_usd)
+                    ladder_stage=stage + 1)
 
     # 2. Buys: strongest qualifying gainer, at most max_new per scan.
     bought = 0
@@ -845,10 +777,6 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
     actions: list = []
     prices = prices_data["prices"]
     prices_usd = {c: e.get("price", 0.0) for c, e in prices.items()}
-    # The SOL price for the 3.65% fee's SOL equivalent on paper
-    # sells (None when unknown — the fee is then recorded in USD
-    # and converted at the live price on display).
-    sol_price_usd = prices.get("SOL", {}).get("price")
     coins = json.loads(bot["coins"])
     positions = _positions(db, bot["id"])
     stop_loss_pct = float(bot["stop_loss_pct"])
@@ -867,15 +795,13 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
         stop_price = float(pos["avg_price"]) * (1 - stop_loss_pct / 100.0)
         if _lte(price, stop_price):
             _sell_position(db, cfg, bot, coin, price, "stop_loss",
-                           rpc_factory, real_executor, actions,
-                           sol_price_usd=sol_price_usd)
+                           rpc_factory, real_executor, actions)
             continue
         side, _detail = signal_for_coin(
             coin, entry.get("change_24h"), bot["strategy"])
         if side == "sell":
             _sell_position(db, cfg, bot, coin, price, "sell signal",
-                           rpc_factory, real_executor, actions,
-                           sol_price_usd=sol_price_usd)
+                           rpc_factory, real_executor, actions)
 
     # 2. Buy signals on coins not already held.
     positions = _positions(db, bot["id"])

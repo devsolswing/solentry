@@ -123,11 +123,13 @@ class Config:
             "WEBAUTHN_ORIGIN", "http://localhost:5000")
         # Admin for /admin/donations. Empty = the first registered user.
         self.admin_username: str = env.get("ADMIN_USERNAME", "").strip()
-        # Fee + donation recipient: the ONE wallet that ever
-        # receives the 3.65% trading fee or a login-screen donation
-        # (James's own wallet, set in Railway). Fail-closed: when
-        # unset, empty, or not a valid base58 32-byte address, real
-        # trades refuse and the donate flow refuses — never fall
+        # Donation + future bot-rental recipient: the ONE wallet
+        # that receives login-screen donations (James's own wallet,
+        # set in Railway), reserved for bot-rental payments when
+        # that system is built later. The trading fee was REMOVED
+        # (James, 2026-11-12) — no trade reads this var any more.
+        # Fail-closed: when unset, empty, or not a valid base58
+        # 32-byte address, the donate flow refuses — never fall
         # back to a generated wallet, never a guessed address.
         self.fee_recipient_pubkey: str = env.get(
             "FEE_RECIPIENT_PUBKEY", "").strip()

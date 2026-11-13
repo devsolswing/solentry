@@ -6,9 +6,9 @@ come from the chain at send time. Gate is only the first use.
 The send transaction contains ONLY the recipient's associated-token-
 account creation (when the recipient has no token account for the
 mint yet) plus the token transfer. No trading fee is charged on a
-send — the 3.65% fee applies to trades, not sends; the only cost is
-the network fee plus the ATA rent, both paid from the app wallet's
-SOL. The balance is always read on-chain (getTokenAccountBalance on
+send — no fee applies to trades either (the trading fee was
+removed, James, 2026-11-12); the only cost is the network fee
+plus the ATA rent, both paid from the app wallet's SOL. The balance is always read on-chain (getTokenAccountBalance on
 the sender's ATA) — never only from the app's real_holdings table —
 so a holding the app never recorded is still sendable.
 

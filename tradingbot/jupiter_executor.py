@@ -62,25 +62,11 @@ HOW IT WORKS:
      executor never rewrites its bytes.
   7. Settlement: the signed swap is sent and confirmed
      (executor._send_and_confirm, same as pump.fun trades).
-  8. THE FEE (mainnet, fees.py): 1.9% of the trade, ALL to the
-     Treasury dev wallet (FEE_RECIPIENT_PUBKEY), NO burn on
-     mainnet. The fee travels as its OWN System transfer
-     transaction, sent right after the swap confirms, from the
-     unspent fee portion (buys: the fee was held back from the
-     swap amount; sells: the fee comes out of the proceeds).
-     Why not in the same transaction: Jupiter builds the swap
-     as a v0 transaction with address lookup tables, and the
-     lite API rejects `asLegacyTransaction` (verified live
-     2026-11-11: HTTP 400 / timeout), so appending the fee
-     would mean rewriting a v0 message — the highest-risk byte
-     surgery in the app, unprovable until mainnet. The separate
-     fee transaction keeps the swap bytes exactly as Jupiter
-     built them, and the fee is recorded once by swap signature
-     (record_fee, INSERT OR IGNORE), so a retry can never
-     double-charge. If the fee transfer fails, the trade still
-     stands (the swap landed) and the fee is reported as
-     "pending" — `settle_jupiter_fee` sends it later, and the
-     caller records the fee only when it is paid.
+  8. NO FEE (removed 2026-11-12, James): trades used to pay a
+     1.9% mainnet fee to the Treasury dev wallet as a separate
+     System transfer after the swap confirmed. That is gone —
+     the whole trade amount is swapped, nothing is held back,
+     and no fee transfer is ever built or sent.
 
 The signing bot holds no key itself — the app wallet key stays
 encrypted in the wallets table, and the executor decrypts it
@@ -104,7 +90,6 @@ from datetime import datetime, timezone
 from .config import Config
 from .executor import (FEE_RESERVE_LAMPORTS, _load_wallet,
                        _send_and_confirm, _skip)
-from .fees import get_fee_recipient_pubkey, mainnet_fee_split_lamports
 from .jupiter import (JUPITER_PROGRAM_ID, SOL_MINT, JupiterError,
                       fetch_swap_transaction, no_liquid_route_message,
                       quote_buy, quote_sell, request_real_swap,
@@ -113,7 +98,7 @@ from .security import wipe_secret
 from .signing_bot import ensure_signing_bot
 from .solana import (ASSOCIATED_TOKEN_PROGRAM, SYSTEM_PROGRAM,
                      TOKEN_2022_PROGRAM, TOKEN_PROGRAM, base58_decode,
-                     base58_encode, build_signed_transfer, compact_u16_encode,
+                     base58_encode, compact_u16_encode,
                      ed25519_publickey_from_seed, ed25519_sign,
                      find_associated_token_address, lamports_to_sol,
                      sol_to_lamports, SolanaRpcClient)
@@ -139,8 +124,6 @@ LOOKUP_TABLE_META_SIZE = 56
 MAX_CREATE_ACCOUNT_LAMPORTS = 10_000_000
 # A token account is 165 bytes.
 TOKEN_ACCOUNT_SIZE = 165
-# The fee transfer needs its own transaction fee on top of the fee.
-FEE_TX_RESERVE_LAMPORTS = 5_000
 
 COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111"
 
@@ -589,91 +572,6 @@ def _token_balance_or_zero(rpc, ata: str) -> int:
         return 0
 
 
-def _send_fee_transfer(rpc, seed: bytes, wallet_pubkey: str,
-                       recipient_pubkey: str,
-                       fee_lamports: int) -> dict:
-    """The mainnet fee as its own transaction: a plain System
-    transfer from the user's wallet to the Treasury dev wallet,
-    for exactly the fee lamports. Returns {"status": "paid",
-    "fee_signature": ...} or {"status": "pending", "reason": ...}
-    — a failed fee transfer never fails the trade (the swap
-    already landed); the caller reports it as pending and
-    `settle_jupiter_fee` sends it later."""
-    if fee_lamports <= 0:
-        return {"status": "paid", "fee_signature": None}
-    try:
-        blockhash = rpc.get_latest_blockhash()
-    except Exception:
-        return {"status": "pending",
-                "reason": "no blockhash for the fee transfer"}
-    try:
-        balance = rpc.get_balance_lamports(wallet_pubkey)
-    except Exception:
-        balance = None
-    if (balance is not None
-            and balance < fee_lamports + FEE_TX_RESERVE_LAMPORTS):
-        return {"status": "pending",
-                "reason": "insufficient SOL left for the fee transfer"}
-    try:
-        signed_b64, fee_sig = build_signed_transfer(
-            seed, wallet_pubkey, recipient_pubkey, fee_lamports,
-            blockhash)
-    except ValueError as exc:
-        return {"status": "pending", "reason": str(exc)[:80]}
-    confirmed, err = _send_and_confirm(rpc, signed_b64, fee_sig)
-    if confirmed is None:
-        return {"status": "pending",
-                "reason": err or "fee transfer not confirmed"}
-    return {"status": "paid", "fee_signature": confirmed}
-
-
-def settle_jupiter_fee(db, user_id: int, fee_lamports: int,
-                       cfg: Config, rpc_client=None) -> dict:
-    """Send just the mainnet fee transfer for a Jupiter swap whose
-    swap landed but whose fee is still pending (the swap's fee
-    transfer failed or was never sent). The fee goes to the
-    Treasury dev wallet for exactly `fee_lamports`; the caller
-    records the fee row only when this returns "paid", so a
-    retry can never double-charge. Returns {"status": "paid",
-    "fee_signature": ...} or {"status": "pending"/"skipped",
-    "reason": ...}. Never raises for a refused fee."""
-    try:
-        request_real_swap(cfg)
-    except JupiterError as exc:
-        return _skip(str(exc))
-    if cfg.network != "mainnet":
-        return _skip("Jupiter swaps need mainnet")
-    if fee_lamports is None or fee_lamports <= 0:
-        return _skip("no fee to settle")
-    try:
-        recipient_pubkey = get_fee_recipient_pubkey(cfg)
-    except ValueError:
-        return _skip("fee recipient not configured "
-                     "(FEE_RECIPIENT_PUBKEY)")
-    wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
-    if wallet_pubkey is None:
-        return _skip("no app wallet")
-    recipient_buf = bytearray(recipient_pubkey.encode("ascii"))
-    recipient_pubkey = bytes(recipient_buf).decode("ascii")
-    try:
-        rpc = rpc_client if rpc_client is not None \
-            else SolanaRpcClient(cfg.rpc_url)
-        result = _send_fee_transfer(rpc, seed, wallet_pubkey,
-                                    recipient_pubkey, fee_lamports)
-        if result["status"] == "paid":
-            return {"status": "paid",
-                    "fee_signature": result["fee_signature"],
-                    "fee_lamports": fee_lamports}
-        return {"status": "pending",
-                "reason": result.get("reason", "fee transfer failed")}
-    except Exception as exc:
-        return _skip(f"fee settlement failed: {str(exc)[:80]}")
-    finally:
-        if seed is not None:
-            wipe_secret(seed)
-        wipe_secret(recipient_buf)
-
-
 def execute_jupiter_swap(bot, user_id: int, symbol: str, side: str,
                          amount: float, db, cfg: Config,
                          rpc_client=None, quote: dict | None = None,
@@ -688,13 +586,10 @@ def execute_jupiter_swap(bot, user_id: int, symbol: str, side: str,
     SOL for buys and whole tokens for sells. `quote` is a test
     injection (a fresh quote dict); in production the quote is
     always fetched here. Returns {"status": "executed",
-    "signature", "coin_amount", "fee_lamports", "fee_sol",
-    "treasury_lamports", "treasury_sol", "burn_lamports": 0,
-    "burn_sol": 0.0, "pump_fee_lamports": 0, "pump_fee_sol": 0.0,
-    "fee_status": "paid"|"pending", "fee_signature",
-    "signing_bot": ...} or {"status": "skipped", "reason": ...}.
-    The fee is 1.9% of the trade, ALL to the treasury, NO burn
-    on mainnet. Never raises for a refused trade."""
+    "signature", "coin_amount", "signing_bot": ...} or {"status":
+    "skipped", "reason": ...}. There is NO trading fee (removed
+    2026-11-12): the whole trade amount is swapped. Never raises
+    for a refused trade."""
     # The gate: James's explicit go-ahead AND mainnet. Either
     # missing refuses plainly — nothing is built, signed or sent.
     try:
@@ -718,11 +613,6 @@ def execute_jupiter_swap(bot, user_id: int, symbol: str, side: str,
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
-    # The fee recipient pubkey is held in this mutable buffer while
-    # the trade is built and sent, and wiped in place in the
-    # finally block below — the moment the trade is done. It is
-    # never logged.
-    recipient_buf = None
     try:
         try:
             resolved = resolve_mint(symbol, coin_name=coin_name)
@@ -732,49 +622,33 @@ def execute_jupiter_swap(bot, user_id: int, symbol: str, side: str,
             return _skip("No Jupiter route for this coin")
         mint = resolved["mint"]
         decimals = resolved["decimals"]
-        # The fee recipient comes from FEE_RECIPIENT_PUBKEY
-        # (fees.py) — fail closed when it is not configured: the
-        # trade is refused before anything is signed or sent,
-        # never a fallback wallet.
-        try:
-            recipient_pubkey = get_fee_recipient_pubkey(cfg)
-        except ValueError:
-            return _skip("fee recipient not configured "
-                         "(FEE_RECIPIENT_PUBKEY)")
-        recipient_buf = bytearray(recipient_pubkey.encode("ascii"))
-        recipient_pubkey = bytes(recipient_buf).decode("ascii")
         wsol_ata = find_associated_token_address(wallet_pubkey,
                                                  SOL_MINT)
         if side == "buy":
             return _execute_jupiter_buy(
                 bot, user_id, symbol, mint, decimals, float(amount),
                 db, cfg, rpc, signing_bot, wallet_pubkey, seed,
-                wsol_ata, quote, recipient_pubkey)
+                wsol_ata, quote)
         return _execute_jupiter_sell(
             bot, user_id, symbol, mint, decimals, float(amount),
             db, cfg, rpc, signing_bot, wallet_pubkey, seed,
-            wsol_ata, quote, recipient_pubkey)
+            wsol_ata, quote)
     except Exception as exc:
         # A failed signing attempt is a loud skip, never a retry
         # loop and never a fake fill.
         return _skip(f"jupiter execution failed: {str(exc)[:80]}")
     finally:
         # Wipe the seed IN PLACE the moment the trade is done —
-        # success, refusal, or failure. The fee recipient buffer
-        # is wiped the same way.
+        # success, refusal, or failure.
         if seed is not None:
             wipe_secret(seed)
-        if recipient_buf is not None:
-            wipe_secret(recipient_buf)
 
 
 def _execute_jupiter_buy(bot, user_id, symbol, mint, decimals,
                          amount_sol, db, cfg, rpc, signing_bot,
-                         wallet_pubkey, seed, wsol_ata, quote,
-                         recipient_pubkey):
-    """One real Jupiter BUY: `amount_sol` SOL total (fee included).
-    The 1.9% fee is held back from the swap amount; the rest is
-    swapped for the wrapped token."""
+                         wallet_pubkey, seed, wsol_ata, quote):
+    """One real Jupiter BUY: `amount_sol` SOL, all of it swapped
+    for the wrapped token (no fee — removed 2026-11-12)."""
     amount_lamports = sol_to_lamports(amount_sol)
     try:
         balance = rpc.get_balance_lamports(wallet_pubkey)
@@ -785,14 +659,9 @@ def _execute_jupiter_buy(bot, user_id, symbol, mint, decimals,
         return _skip("amount exceeds bot buy size")
     if balance - amount_lamports < FEE_RESERVE_LAMPORTS:
         return _skip("insufficient SOL left for fees")
-    # The mainnet fee: 1.9% of the trade, ALL to the treasury, NO
-    # burn. It comes out of the trade amount — the user still
-    # spends amount_sol in total, but only amount_sol minus the
-    # fee is swapped for tokens.
-    split = mainnet_fee_split_lamports(amount_lamports)
-    fee_lamports = split["fee_lamports"]
-    treasury_lamports = split["treasury_lamports"]
-    swap_lamports = amount_lamports - fee_lamports
+    # No fee (removed 2026-11-12): the whole trade amount is
+    # swapped for tokens.
+    swap_lamports = amount_lamports
     swap_sol = lamports_to_sol(swap_lamports)
     if quote is None:
         try:
@@ -833,29 +702,17 @@ def _execute_jupiter_buy(bot, user_id, symbol, mint, decimals,
         coin_amount = (ata_after - ata_before) / (10 ** decimals)
     except Exception:
         pass
-    fee = _send_fee_transfer(rpc, seed, wallet_pubkey,
-                             recipient_pubkey, fee_lamports)
     return {"status": "executed", "signature": confirmed,
             "coin_amount": coin_amount,
-            "fee_lamports": fee_lamports,
-            "fee_sol": lamports_to_sol(fee_lamports),
-            "treasury_lamports": treasury_lamports,
-            "treasury_sol": lamports_to_sol(treasury_lamports),
-            "burn_lamports": 0, "burn_sol": 0.0,
-            "pump_fee_lamports": 0, "pump_fee_sol": 0.0,
-            "fee_status": fee["status"],
-            "fee_signature": fee.get("fee_signature"),
-            "fee_error": fee.get("reason"),
             "signing_bot": signing_bot["support_id"]}
 
 
 def _execute_jupiter_sell(bot, user_id, symbol, mint, decimals,
                           amount_tokens, db, cfg, rpc, signing_bot,
-                          wallet_pubkey, seed, wsol_ata, quote,
-                          recipient_pubkey):
+                          wallet_pubkey, seed, wsol_ata, quote):
     """One real Jupiter SELL: `amount_tokens` of the wrapped token
-    -> SOL. The 1.9% fee comes out of the SOL proceeds and is
-    sent after the swap confirms."""
+    -> SOL. All proceeds go to the seller's wallet (no fee —
+    removed 2026-11-12)."""
     token_base = int(round(amount_tokens * (10 ** decimals)))
     if token_base <= 0:
         return _skip("amount too small to sell")
@@ -878,14 +735,10 @@ def _execute_jupiter_sell(bot, user_id, symbol, mint, decimals,
         _check_price_impact(quote)
     except ValueError as exc:
         return _skip(str(exc))
-    # The fee is 1.9% of the expected SOL proceeds (the quote's
-    # out amount, in lamports). Proceeds are at least 99% of the
-    # quote even at worst slippage, so the fee is always covered
-    # by what lands in the wallet.
+    # The expected SOL proceeds (the quote's out amount, in
+    # lamports) — the fallback for what the sell returned, when
+    # the wallet balance cannot be read before/after.
     expected_sol_lamports = int(quote["out_amount"])
-    split = mainnet_fee_split_lamports(expected_sol_lamports)
-    fee_lamports = split["fee_lamports"]
-    treasury_lamports = split["treasury_lamports"]
     try:
         sol_before = rpc.get_balance_lamports(wallet_pubkey)
     except Exception:
@@ -916,17 +769,6 @@ def _execute_jupiter_sell(bot, user_id, symbol, mint, decimals,
             sol_received = lamports_to_sol(sol_after - sol_before)
         except Exception:
             pass
-    fee = _send_fee_transfer(rpc, seed, wallet_pubkey,
-                             recipient_pubkey, fee_lamports)
     return {"status": "executed", "signature": confirmed,
             "coin_amount": sol_received, "sol_received": sol_received,
-            "fee_lamports": fee_lamports,
-            "fee_sol": lamports_to_sol(fee_lamports),
-            "treasury_lamports": treasury_lamports,
-            "treasury_sol": lamports_to_sol(treasury_lamports),
-            "burn_lamports": 0, "burn_sol": 0.0,
-            "pump_fee_lamports": 0, "pump_fee_sol": 0.0,
-            "fee_status": fee["status"],
-            "fee_signature": fee.get("fee_signature"),
-            "fee_error": fee.get("reason"),
             "signing_bot": signing_bot["support_id"]}

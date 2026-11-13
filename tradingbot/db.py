@@ -344,7 +344,8 @@ CREATE TABLE IF NOT EXISTS trade_ledger (
 );
 
 -- The app's former SolEntry Treasury wallet: RETIRED 2026-11-10.
--- ALL fees go only to the recipient in FEE_RECIPIENT_PUBKEY; the
+-- The trading fee was REMOVED 2026-11-12, so no trade writes
+-- here and no trade reads FEE_RECIPIENT_PUBKEY any more; the
 -- generated wallet's row is purged at startup and nothing ever
 -- writes here. The table stays (empty) so old databases keep
 -- their shape.
@@ -355,13 +356,14 @@ CREATE TABLE IF NOT EXISTS treasury_wallet (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- One row per fee charged: 3.65% of a trade. fee_sol is the SOL the
--- fee was worth (real trades: exact lamports in the same tx;
--- paper trades: the USD fee converted at the trade-time SOL price,
--- or NULL when no SOL price was available — the display converts
--- at the live price instead, never a guessed rate). signature is
--- unique and NULL for paper trades, so a real trade recorded twice
--- is one fee, never two.
+-- One row per fee charged, from when the trading fee existed
+-- (removed 2026-11-12, James): 3.65% of a trade. fee_sol is the
+-- SOL the fee was worth (real trades: exact lamports in the same
+-- tx; paper trades: the USD fee converted at the trade-time SOL
+-- price, or NULL when no SOL price was available). signature is
+-- unique and NULL for paper trades, so a real trade recorded
+-- twice is one fee, never two. HISTORY ONLY: no new rows are
+-- recorded — the table is kept so past trades keep their record.
 CREATE TABLE IF NOT EXISTS trade_fees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -558,12 +560,12 @@ _MIGRATIONS = (
     # make the chooser reappear mid-session — the user can still
     # switch modes any time from the HUD.
     ("users", "mode_chosen_at", "TEXT NOT NULL DEFAULT ''"),
-    # Fee split (James, 2026-11-10/11): the per-trade treasury /
-    # burned / pump.fun-program-fee shares, in SOL and in
-    # lamports. NULL for paper trades and for rows recorded before
-    # the split existed — the display derives the treasury share
-    # and treats the burn as 0 for those rows, and leaves the
-    # pump fee unknown rather than guessing it.
+    # Fee split (James, 2026-11-10/11) — HISTORY ONLY: the per-trade
+    # treasury / burned / pump.fun-program-fee shares, in SOL and in
+    # lamports, for rows recorded while the trading fee existed.
+    # The fee was removed 2026-11-12; no new rows are recorded.
+    # NULL for paper trades and for rows recorded before the split
+    # existed.
     ("trade_fees", "treasury_sol", "REAL"),
     ("trade_fees", "burn_sol", "REAL"),
     ("trade_fees", "pump_fee_sol", "REAL"),
@@ -681,8 +683,9 @@ def _reset_paper_100_cad(conn: sqlite3.Connection) -> None:
 
 def _purge_generated_fee_wallets(conn: sqlite3.Connection) -> None:
     """One-time purge (2026-11-10): the app-generated Treasury and
-    donation wallets are retired — ALL fees and donations go only
-    to the recipient in FEE_RECIPIENT_PUBKEY. Any treasury_wallet
+    donation wallets are retired — ALL donations go only to the
+    recipient in FEE_RECIPIENT_PUBKEY (the trading fee was removed
+    2026-11-12, so no trade uses it any more). Any treasury_wallet
     or donation_wallet row is deleted so neither wallet can ever
     receive again. Runs once: a marker row in meta() records it, so
     later restarts never touch these tables again. On a fresh

@@ -1,11 +1,17 @@
-"""Donations to the one fee/donation recipient (FEE_RECIPIENT_PUBKEY).
+"""Donations to the one donation recipient (FEE_RECIPIENT_PUBKEY).
 
 All donations from the login screen go ONLY to the recipient in the
-FEE_RECIPIENT_PUBKEY env var (James's own wallet, set in Railway) —
-the same single wallet that receives the 3.65% trading fee. There
-is no app-generated donation wallet any more: the generated wallet
-is retired (its row is purged at startup by
+FEE_RECIPIENT_PUBKEY env var (James's own wallet, set in Railway).
+There is no app-generated donation wallet any more: the generated
+wallet is retired (its row is purged at startup by
 db._purge_generated_fee_wallets) and must never receive anything.
+
+The trading fee was REMOVED (James, 2026-11-12): no trade charges
+a fee any more, paper or real. FEE_RECIPIENT_PUBKEY stays set for
+donations, and is reserved for the future bot-rental system (the
+wallet will receive rental payments when that is built — another
+day, not this build). The recipient address is never shown in full
+on any page and never logged.
 
 Donations are paid by the donor's own Phantom wallet (client-side,
 Phantom signs). The server only records confirmed donations: donor
@@ -24,14 +30,33 @@ display, not the signed transaction (see the README).
 
 from __future__ import annotations
 
-from .fees import get_fee_recipient_pubkey
 from .solana import (base58_decode, is_valid_address, lamports_to_sol,
                      sol_to_lamports)
 
 
+def get_fee_recipient_pubkey(cfg) -> str:
+    """Return the donation / future bot-rental recipient pubkey from
+    the FEE_RECIPIENT_PUBKEY env var (Config.fee_recipient_pubkey).
+    Moved here from the deleted fees.py when the trading fee was
+    removed (James, 2026-11-12): no trade reads this var any more,
+    but donations still do, and the same wallet is reserved for
+    bot-rental payments later.
+
+    Raises ValueError when the var is unset, empty, or not a valid
+    base58 32-byte Solana address — the caller must fail closed
+    (donations refuse), never fall back to a generated wallet or a
+    guessed address. No wallet is ever created here; the recipient
+    is configured, not generated."""
+    raw = (cfg.fee_recipient_pubkey or "").strip()
+    if not raw or not is_valid_address(raw):
+        raise ValueError(
+            "FEE_RECIPIENT_PUBKEY is not set or not a valid wallet "
+            "address")
+    return raw
+
+
 def get_donation_recipient(cfg) -> str:
-    """Return the donation recipient pubkey: the same single
-    recipient as the trading fee (FEE_RECIPIENT_PUBKEY).
+    """Return the donation recipient pubkey (FEE_RECIPIENT_PUBKEY).
 
     Raises ValueError when it is unset, empty, or invalid — the
     donate flow must refuse plainly, never fall back to a

@@ -40,7 +40,6 @@ from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
 from . import candles as candles_mod
 from . import donations as donations_mod
-from . import fees as fees_mod
 from . import jupiter as jupiter_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
@@ -2332,25 +2331,6 @@ def register_routes(app: Flask) -> None:
         portfolio_line_svg = candles_mod.line_svg(_candles)
         activity = _activity_for_mode(db, user["id"], mode)
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
-        # Trading fees (3.65% of every trade, fees.py): this user's
-        # total REAL fees paid in SOL and their real fee payments
-        # (newest first), plus the live SOL price for display. The
-        # fee total starts at zero for everyone — trades that
-        # predate the fee are never charged. Paper fees are never
-        # shown here: they are play money, not SOL paid (James,
-        # 2026-11-10). The home page shows ONLY the user's own
-        # fees: no app-wide total, and the fee recipient address
-        # is never shown here (James, 2026-11-10).
-        fees_rows = fees_mod.user_fees(db, user["id"], limit=20,
-                                       mode="real")
-        for _row in fees_rows:
-            _split = fees_mod.fee_row_split(_row, sol_price)
-            _row["fee_sol_display"] = _split["treasury_sol"]
-            _row["burn_sol_display"] = _split["burn_sol"]
-            _row["pump_fee_sol_display"] = _split["pump_fee_sol"]
-        fees_totals = fees_mod.user_fee_totals(
-            db, user["id"], sol_price_usd=sol_price)
-        fees_total_sol = fees_totals["treasury_sol"]
         trenches_rows, trenches_error = (
             _trenches_list() if include_trenches else ([], None))
         return {"wallet": wallet if mode == "devnet" else None,
@@ -2374,10 +2354,6 @@ def register_routes(app: Flask) -> None:
                 "chart_range": chart_range,
                 "support_id": signing_bot["support_id"]
                 if signing_bot else "",
-                "fees_total_sol": fees_total_sol,
-                "fees_pump_total_sol": fees_totals["pump_fee_sol"],
-                "fees_burn_total_sol": fees_totals["burn_sol"],
-                "fees_rows": fees_rows,
                 "sol_price_usd": sol_price,
                 "popup_coin": popup_coin,
                 "trenches_rows": trenches_rows,
@@ -2863,35 +2839,6 @@ def register_routes(app: Flask) -> None:
             out[coin_id] = svg or None
         return jsonify({"ok": True, "sparklines": out, "as_of": _now()})
 
-    @app.route("/api/fees")
-    @login_required
-    def fees_snapshot():
-        """Live fee totals for the homepage 5-second poll: the
-        app-wide totals and this user's own totals, both in SOL,
-        for each of the three displayed numbers — the SolEntry
-        (treasury) fee, the pump.fun program fee, and the burned
-        amount — plus the live SOL price. One lightweight request
-        per tick covers all six figures. The totals are sums of
-        recorded fee rows only, never guessed. The home page shows
-        only the user's own figures; the app-wide figures are in
-        this response for any surface that shows them."""
-        db = _db(app)
-        user = _current_user(app)
-        sol_price = _sol_price_usd()
-        user_totals = fees_mod.user_fee_totals(
-            db, user["id"], sol_price_usd=sol_price)
-        app_totals = fees_mod.app_fee_totals(db, sol_price_usd=sol_price)
-        return jsonify({"ok": True,
-                        "app_total_sol": app_totals["treasury_sol"],
-                        "user_total_sol": user_totals["treasury_sol"],
-                        "app_treasury_sol": app_totals["treasury_sol"],
-                        "user_treasury_sol": user_totals["treasury_sol"],
-                        "app_pump_sol": app_totals["pump_fee_sol"],
-                        "user_pump_sol": user_totals["pump_fee_sol"],
-                        "app_burn_sol": app_totals["burn_sol"],
-                        "user_burn_sol": user_totals["burn_sol"],
-                        "sol_price_usd": sol_price})
-
     sock = app.config["SOCK"]
 
     @sock.route("/ws/live")
@@ -3161,13 +3108,11 @@ def register_routes(app: Flask) -> None:
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
                 db, _cfg(app),
                 coin_name=COINS.get(coin_id_resolved, {}).get("name"))
-            fee_pct_label = "1.9%"
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
                 price or 0.0, db, _cfg(app))
-            fee_pct_label = "3.65%"
             venue_label = "on pump.fun (devnet)"
         if result.get("status") != "executed":
             return _coin_result(
@@ -3184,43 +3129,14 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)
-        # The fee: for a pump.fun buy it travelled in the same
-        # transaction as the buy; for a Jupiter buy it was sent
-        # right after the swap confirmed, as its own transfer to
-        # the Treasury dev wallet. Either way it is recorded once,
-        # keyed by the trade's signature, so it is never charged
-        # twice — and only when it was actually paid (a Jupiter
-        # fee still pending is not recorded yet).
-        fee_sol = result.get("fee_sol")
-        fee_paid = result.get("fee_status") in (None, "paid")
-        if fee_sol is not None and fee_paid:
-            fees_mod.record_fee(db, user["id"], bot["id"],
-                                coin_id_resolved, "buy", "real", fee_sol,
-                                fee_lamports=result.get("fee_lamports"),
-                                treasury_sol=result.get("treasury_sol"),
-                                burn_sol=result.get("burn_sol"),
-                                pump_fee_sol=result.get("pump_fee_sol"),
-                                treasury_lamports=result.get(
-                                    "treasury_lamports"),
-                                burn_lamports=result.get("burn_lamports"),
-                                pump_fee_lamports=result.get(
-                                    "pump_fee_lamports"),
-                                signature=result.get("signature"))
-        if fee_sol is not None and fee_paid:
-            fee_sentence = (
-                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
-        elif fee_sol is not None:
-            fee_sentence = (
-                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
-                f"— the swap landed but the fee transfer has not "
-                f"confirmed yet.")
-        else:
-            fee_sentence = ""
+        # No trading fee (removed 2026-11-12): the whole trade
+        # amount is swapped / paid out, and nothing is recorded
+        # as a fee.
         _log(app, user["id"], "real_buy",
              f"Bought {coin_amount:.4f} {coin_id_resolved} for "
              f"{amount_sol:.4f} SOL {venue_label}. Signature: "
              f"{str(result.get('signature', ''))[:12]}... Signing bot: "
-             f"{result.get('signing_bot', '')}.{fee_sentence}", "real")
+             f"{result.get('signing_bot', '')}.", "real")
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
@@ -3229,13 +3145,6 @@ def register_routes(app: Flask) -> None:
                  f"{amount_sol:.4f} SOL {venue_label}.",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
-        if fee_sol is not None and fee_paid:
-            lines.append(f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
-        elif fee_sol is not None:
-            lines.append(
-                f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
-                f"— the swap landed but the fee transfer has not "
-                f"confirmed yet.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Bought", lines, True, coin_id_resolved, label)
@@ -3397,13 +3306,11 @@ def register_routes(app: Flask) -> None:
                 bot, user["id"], coin_id_resolved, "sell", amount,
                 db, _cfg(app),
                 coin_name=COINS.get(coin_id_resolved, {}).get("name"))
-            fee_pct_label = "1.9%"
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
                 bot, user["id"], coin_id_resolved, "sell", amount,
                 price or 0.0, db, _cfg(app))
-            fee_pct_label = "3.65%"
             venue_label = "on pump.fun (devnet)"
         if result.get("status") != "executed":
             return _coin_result(
@@ -3415,43 +3322,14 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)
-        # The fee: for a pump.fun sell it travelled in the same
-        # transaction as the sell; for a Jupiter sell it was sent
-        # right after the swap confirmed, as its own transfer to
-        # the Treasury dev wallet. Either way it is recorded once,
-        # keyed by the trade's signature, so it is never charged
-        # twice — and only when it was actually paid (a Jupiter
-        # fee still pending is not recorded yet).
-        fee_sol = result.get("fee_sol")
-        fee_paid = result.get("fee_status") in (None, "paid")
-        if fee_sol is not None and fee_paid:
-            fees_mod.record_fee(db, user["id"], bot["id"],
-                                coin_id_resolved, "sell", "real", fee_sol,
-                                fee_lamports=result.get("fee_lamports"),
-                                treasury_sol=result.get("treasury_sol"),
-                                burn_sol=result.get("burn_sol"),
-                                pump_fee_sol=result.get("pump_fee_sol"),
-                                treasury_lamports=result.get(
-                                    "treasury_lamports"),
-                                burn_lamports=result.get("burn_lamports"),
-                                pump_fee_lamports=result.get(
-                                    "pump_fee_lamports"),
-                                signature=result.get("signature"))
-        if fee_sol is not None and fee_paid:
-            fee_sentence = (
-                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
-        elif fee_sol is not None:
-            fee_sentence = (
-                f" Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
-                f"— the swap landed but the fee transfer has not "
-                f"confirmed yet.")
-        else:
-            fee_sentence = ""
+        # No trading fee (removed 2026-11-12): the whole sale
+        # proceeds go to the seller's wallet, and nothing is
+        # recorded as a fee.
         _log(app, user["id"], "real_sell",
              f"Sold {amount:.4f} {coin_id_resolved} {venue_label}. "
              f"Signature: "
              f"{str(result.get('signature', ''))[:12]}... Signing bot: "
-             f"{result.get('signing_bot', '')}.{fee_sentence}", "real")
+             f"{result.get('signing_bot', '')}.", "real")
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
@@ -3459,13 +3337,6 @@ def register_routes(app: Flask) -> None:
         lines = [f"Sold {amount:.4f} {coin_id_resolved} {venue_label}.",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
-        if fee_sol is not None and fee_paid:
-            lines.append(f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL.")
-        elif fee_sol is not None:
-            lines.append(
-                f"Fee ({fee_pct_label}): {fee_sol:.4f} SOL is pending "
-                f"— the swap landed but the fee transfer has not "
-                f"confirmed yet.")
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Sold", lines, True, coin_id_resolved, label)
@@ -3500,9 +3371,9 @@ def register_routes(app: Flask) -> None:
     def wallet():
         """The homepage: the user's portfolio total, 24h change and
         chart (recorded snapshots only), BUY/SELL, and the coins
-        held — in the fox layout. One screen: the holdings list
-        lives in a fixed-height panel that scrolls internally; the
-        page itself never scrolls. The wallet itself (deposit /
+        held — in the fox layout. The page scrolls (owner,
+        2026-11-12): the holdings list grows with the page; the
+        photo layout is unchanged. The wallet itself (deposit /
         send / withdraw / platform wallets) lives on /wallet/details.
         `?range=` picks the chart range (1h/1d/1w/1mo/1y/all);
         anything else falls back to 24h."""
@@ -3938,19 +3809,6 @@ def register_routes(app: Flask) -> None:
             return coin, None, "trenches feed"
         return None, None, None
 
-    def _fee_sentence(fee_info: list) -> str:
-        """The fee sentence for a buy/sell confirmation or log line,
-        e.g. " Fee (3.65%): $0.37 (≈ 0.0042 SOL)" — '' when no fee
-        was charged. No trailing period: the caller supplies the
-        sentence's end punctuation."""
-        if not fee_info:
-            return ""
-        fee = fee_info[0]
-        text = f" Fee (3.65%): ${fee['fee_usd']:.2f}"
-        if fee.get("fee_sol") is not None:
-            text += f" (≈ {fee['fee_sol']:.4f} SOL)"
-        return text
-
     def _jupiter_buy_price_usd(coin: str, amount_sol: float) -> float | None:
         """Implied USD price for a paper BUY of `amount_sol` SOL
         worth, from a live Jupiter quote — None when Jupiter cannot
@@ -4028,12 +3886,9 @@ def register_routes(app: Flask) -> None:
             return {"ok": False,
                     "message": "Price unavailable right now."}
         try:
-            fee_info: list = []
             amount, usd = ledger_buy(db, user["id"], coin_id, usd, price,
                                      _now(),
-                                     bot_id=bot["id"] if bot else None,
-                                     sol_price_usd=_sol_price_usd(),
-                                     fee_out=fee_info)
+                                     bot_id=bot["id"] if bot else None)
         except InsufficientCash:
             return {"ok": False, "message": "Not enough paper cash."}
         if bot is not None:
@@ -4044,7 +3899,6 @@ def register_routes(app: Flask) -> None:
         _log(app, user["id"], "paper_buy",
              f"Bought {amount:.4f} {coin_id} for ${usd:.2f} (paper, "
              f"price source: {source})"
-             f"{_fee_sentence(fee_info)}"
              + (f" — looked after by bot '{bot['name']}'." if bot else "."),
              "paper")
         _record_pnl_snapshot(
@@ -4054,8 +3908,7 @@ def register_routes(app: Flask) -> None:
         cash = _paper(app, user["id"])
         return {"ok": True,
                 "message": f"Bought {amount:.4f} {coin_id} for "
-                           f"${usd:.2f} (paper)"
-                           f"{_fee_sentence(fee_info)}.",
+                           f"${usd:.2f} (paper).",
                 "amount": amount, "usd": usd, "bot": bot, "cash": cash,
                 "coin": coin_id}
 
@@ -4080,18 +3933,14 @@ def register_routes(app: Flask) -> None:
             return {"ok": False,
                     "message": "Price unavailable right now."}
         try:
-            fee_info: list = []
             usd = ledger_sell(db, user["id"], coin_id, amount, price,
-                              _now(), exit_reason="manual sell",
-                              sol_price_usd=_sol_price_usd(),
-                              fee_out=fee_info)
+                              _now(), exit_reason="manual sell")
         except InsufficientHolding:
             return {"ok": False,
                     "message": "You don't hold that much."}
         _log(app, user["id"], "paper_sell",
              f"Sold {amount:.4f} {coin_id} for ${usd:.2f} (paper, "
-             f"price source: {source})"
-             f"{_fee_sentence(fee_info)}.", "paper")
+             f"price source: {source}).", "paper")
         _record_pnl_snapshot(
             app, user["id"],
             {c: e.get("price", 0.0)
@@ -4099,8 +3948,7 @@ def register_routes(app: Flask) -> None:
         cash = _paper(app, user["id"])
         return {"ok": True,
                 "message": f"Sold {amount:.4f} {coin_id} for "
-                           f"${usd:.2f} (paper)"
-                           f"{_fee_sentence(fee_info)}.",
+                           f"${usd:.2f} (paper).",
                 "amount": amount, "usd": usd, "cash": cash,
                 "coin": coin_id}
 
@@ -4120,17 +3968,16 @@ def register_routes(app: Flask) -> None:
         bots = data["bots"]
         memecoin_bots = [b for b in bots
                          if b["category"] == TRENCHES_CATEGORY]
-        # Signer-bot card (Page 6, owner 2026-11-11): the signing
-        # bot's current (pending) tasks with the time each was
+        # The Signer Bot card at the bottom shows what the signing
+        # bot is doing: its current tasks, each with the time it was
         # tasked, and how many real transactions it has signed.
         # Pending bot_proposals are the task queue (created_at is
         # when the task was tasked); trade_ledger mode='real' rows
         # are the trades the signing bot executed on devnet — paper
         # rows are simulated, never signed, and never counted. A
         # figure that cannot be read is None, and the template
-        # shows "—" instead of a guess. The Support ID and the
-        # user's own 1.7% treasury fee total (gas fees paid) ride
-        # along in _dashboard_data as support_id / fees_total_sol.
+        # shows "—" instead of a guess. The Support ID rides along
+        # in _dashboard_data as support_id.
         db = _db(app)
         signing_tasks = [dict(row) for row in db.execute(
             "SELECT p.id, p.bot_id, p.kind, p.coin_id, p.side, "
@@ -4625,11 +4472,11 @@ def register_routes(app: Flask) -> None:
                    (bot_id, user_id))
         db.execute("DELETE FROM bot_positions WHERE bot_id = ? AND user_id = ?",
                    (bot_id, user_id))
-        # The bot's fee rows stay — the user still paid those fees
-        # to the app — but they are detached from the deleted bot
+        # The bot's historical fee rows stay — they are history
+        # (trades made while the fee existed, before its removal
+        # 2026-11-12) — but they are detached from the deleted bot
         # (bot_id NULL), like the paper holdings that survive a bot
-        # delete. Deleting the rows instead would understate the
-        # user's fees-paid total and the app-wide total.
+        # delete. Deleting the rows instead would erase history.
         db.execute("UPDATE trade_fees SET bot_id = NULL WHERE bot_id = ?",
                    (bot_id,))
         db.execute("DELETE FROM bots WHERE id = ? AND user_id = ?",
