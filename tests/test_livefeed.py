@@ -324,14 +324,16 @@ class TestLoopSanitization(LiveFeedBase):
             rows = _coin_rows(self.db, self.user_id, "paper", prices)
             row = next(r for r in rows if r["coin_id"] == MINT)
             self.assertAlmostEqual(row["value"], 1000.0 * 400.0)
-            # Feed seeded at the good price: the spike is dropped,
-            # the row has no price and no inflated value.
+            # Feed seeded at the good price: the validated feed tick
+            # IS the price — the spiked DexScreener fetch is ignored
+            # and the row is valued at the feed's $0.002, never at
+            # the $400 spike.
             self.feed.ingest(MINT, 0.002, "dexscreener")
             rows = _coin_rows(self.db, self.user_id, "paper", prices,
                               feed=self.feed)
             row = next(r for r in rows if r["coin_id"] == MINT)
-            self.assertIsNone(row["price"])
-            self.assertIsNone(row["value"])
+            self.assertEqual(row["price"], 0.002)
+            self.assertAlmostEqual(row["value"], 2.0)
 
 
 class TestApiLive(LiveFeedBase):

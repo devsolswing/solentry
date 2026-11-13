@@ -88,8 +88,12 @@ class _FakeScan:
 
 
 def _prices_with_sol(price=SOL_PRICE_USD):
+    # Production get_prices() returns source "live" on a real fetch
+    # and "snapshot" on the baked fallback — never anything else.
+    # The accuracy build prices curve trades only off a live SOL
+    # price, so this fixture must say "live".
     return {"prices": {"SOL": {"price": price, "change_24h": 0.0}},
-            "source": "test", "as_of": "test"}
+            "source": "live", "as_of": "test"}
 
 
 def _empty_prices():
