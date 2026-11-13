@@ -1,16 +1,35 @@
 {% extends "base.html" %}
 {% block title %}Home — SolEntry{% endblock %}
-{% block body_class %}fit-screen{% endblock %}
 {% block content %}
+{# ================================================================== #}
+{# Home — rebuilt FROM SCRATCH to match the owner's photo    #}
+{# exactly (workspace/user/files/1000001363_0_54qd.png):              #}
+{#   header: red fox in a gold circle + big gold "SolEntry" + red     #}
+{#     "HOME of the $GATE"                                            #}
+{#   four action buttons: BUY (gold, cart), SELL (red, download),    #}
+{#     Send / Receive (black, gold border)                            #}
+{#   BALANCE box: BALANCE + duration pills + CAD selector, TOTAL      #}
+{#     PORTFOLIO VALUE, big total with the % change beside it,        #}
+{#     ≈ $ CAD, candlestick chart                                    #}
+{#   HOLDINGS: gold heading, one row per coin actually held — icon,   #}
+{#     name over the ticker, 1hr gold line chart next to the name,    #}
+{#     price over the amount held next to that, 1h % far right.      #}
+{#     Every row is a button to that coin's info page.                #}
+{#   bottom nav (Home / Bots / Wallet / Settings) lives in base.html  #}
+{#     and each button goes to its page.                              #}
+{# REAL DATA ONLY: the photo's numbers (2.45 SOL, $185.20 CAD,       #}
+{# +5.82%, Pepe / Bitcoin / Solana / Dogecoin / Ethereum) are        #}
+{# mockup examples, never the user's data — every number here comes   #}
+{# from the route's live data (balance, holdings, prices,            #}
+{# sparklines, 1h %). A missing price is "—", never invented.        #}
+{# The features the mockup predates (Logs, support ID, Trenches)    #}
+{# live BELOW the holdings, so the photo layout stays exact above   #}
+{# them. (The fees card moved to the wallet page, 2026-11-12.)      #}
+{# ================================================================== #}
 <div class="home-screen">
-  <div class="home-top">
-    <a class="btn ghost small" href="{{ url_for('logs') }}">Logs</a>
-  </div>
-
-  {# Header (owner's Home screenshot): circular red fox logo in a
-     gold ring, "SolEntry" in big gold letters, "HOME of the $GATE"
-     in red underneath. The fox is the static file (byte-identical
-     to the base64 blob this replaced) — no embedded image. #}
+  {# Header: circular red fox logo in a gold ring, "SolEntry" in big
+     gold letters, "HOME of the $GATE" in red underneath. The fox is
+     the static file — no embedded image. #}
   <div class="home-logo">
     <img src="{{ url_for('static', filename='fox-red-480.jpg') }}" alt="SolEntry fox logo" class="fox-logo">
     <div class="home-title">
@@ -19,12 +38,12 @@
     </div>
   </div>
 
-  {# Four action buttons (owner's screenshot): BUY gold with a cart
-     icon, SELL red with a download icon, Send black/gold-border
-     with a paper-plane icon, Receive black/gold-border with a
-     download icon. All four are wired to the existing flows —
-     BUY/SELL open the quick-trade popup, Send goes to the Send
-     page, Receive opens the address window. #}
+  {# Four action buttons: BUY gold with a cart icon, SELL red with a
+     download icon, Send black/gold-border with a paper-plane icon,
+     Receive black/gold-border with a download icon. All four are
+     wired to the existing flows — BUY/SELL open the quick-trade
+     popup, Send goes to the Send page, Receive opens the address
+     window. #}
   <div class="home-actions-row">
     <button class="btn buy-btn" type="button" data-quick-trade-open data-trade="buy"><span class="home-action-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg></span><span class="home-action-label">BUY</span></button>
     <button class="btn sell-btn" type="button" data-quick-trade-open data-trade="sell"><span class="home-action-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="home-action-label">SELL</span></button>
@@ -32,16 +51,13 @@
     <button class="btn ghost send-receive-btn" type="button" data-overlay-open="home-receive-overlay"><span class="home-action-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="home-action-label">Receive</span></button>
   </div>
 
-  {# Balance window (owner's screenshot): gold-bordered card with
-     BALANCE + duration pills + the CAD selector on top, TOTAL
-     PORTFOLIO VALUE, the big total in SOL with the % change beside
-     it, the ≈ $ CAD equivalent, and the candlestick chart of P&L
-     (real candles from recorded snapshots only — never invented).
-     All numbers are the real data the route passes: the total is
+  {# Balance window: gold-bordered card with BALANCE + duration
+     pills + the CAD selector on top, TOTAL PORTFOLIO VALUE, the
+     big total in SOL with the % change beside it, the ≈ $ CAD
+     equivalent, and the candlestick chart of P&L (real candles
+     from recorded snapshots only — never invented). The total is
      the on-chain SOL balance (real) or paper cash + holdings
-     (paper); the % is the 24h change from recorded snapshots.
-     The screenshot's figures (2.45 SOL, $185.20, +5.82%) are
-     examples, never hardcoded here. #}
+     (paper); the % is the 24h change from recorded snapshots. #}
   <div class="card portfolio-head home-total">
     <div class="home-balance-top">
       <span class="home-balance-label">BALANCE</span>
@@ -82,23 +98,24 @@
     </div>
   </div>
 
-  {# Holdings (owner, 2026-11-11): one row per coin the user
-     actually holds, listed IMMEDIATELY under the balance box —
-     no headings, no summary lines, no borders. Rows look like
-     the bot cards on the Bots page: circular icon, name over the ticker in
-     small type, a small 1hr line-chart sparkline (only when at
-     least 2 real prices exist in the last hour — never faked; the
-     span stays in the DOM, empty, while the chart builds, so the
-     60s refresh can fill it), the price per coin with the amount
-     held underneath it, and the 1-hour % change. Rows tap through
-     to the coin detail page. The price is rendered server-side
+  {# Holdings: gold HOLDINGS heading, then one row per coin the user
+     actually holds, listed IMMEDIATELY under the balance box — no
+     summary lines, no borders. Rows look like the bot cards on the
+     Bots page: circular icon, name over the ticker in small type, a
+     small 1hr gold line-chart sparkline (only when at least 2 real
+     prices exist in the last hour — never faked; the span stays in
+     the DOM, empty, while the chart builds, so the 60s refresh can
+     fill it), the price per coin with the amount held underneath
+     it, and the 1-hour % change far right. EVERY row is a button
+     to that coin's info page. The price is rendered server-side
      with decimals that fit its size (live.js ticks prices at a
      fixed 4 decimals, which would render a sub-$0.0001 price as
-     $0.0000, so the price does not carry data-live-price; the
-     1h% still ticks live). The per-coin $ value is kept in the
-     DOM, hidden, so live.js still recomputes the paper
-     portfolio total from it — the screenshot shows the amount
-     under the price, not the $ value. #}
+     $0.0000, so the price does not carry data-live-price; the 1h%
+     still ticks live). The per-coin $ value is kept in the DOM,
+     hidden, so live.js still recomputes the paper portfolio total
+     from it — the photo shows the amount under the price, not the
+     $ value. #}
+  <h2 class="section-title">HOLDINGS</h2>
   <div class="coin-list-panel holdings-panel">
     <div class="coin-list">
       {% for row in coin_rows %}
@@ -119,39 +136,15 @@
       {% endif %}
     </div>
   </div>
+
+  {# Below the photo content: the features the mockup predates.
+     Logs is one tap from here (it used to sit above the header —
+     the photo has nothing above the header). The signing-bot
+     support ID and the Trenches card stay below the holdings,
+     as before. (The fees card moved to the wallet page,
+     2026-11-12.) #}
+  <a class="btn ghost small home-logs-link" href="{{ url_for('logs') }}">Logs</a>
   {% if support_id %}<p class="muted small">Your signing bot — Support ID: <b>{{ support_id }}</b> (for tech support — this ID cannot be changed)</p>{% endif %}
-  {# Trading fees (3.65% of every trade, fees.py): this user's total
-     paid in SOL, as a clickable dropdown listing their fee payments
-     to the app, with the live SOL price beside the total. The fee
-     total starts at zero — trades that predate the fee are never
-     charged. The dropdown stays closed by default so the home page
-     still fits on one screen. The fees view shows TWO balances —
-     the SolEntry fee balance (the treasury's 1.7% share) and the
-     pump.fun fee balance (the actual program fee) — with a
-     dropdown switcher to flip between them (James, 2026-11-11);
-     the burned amount stays visible underneath, not part of the
-     dropdown. #}
-  <details class="card fees-card" id="fees" data-fee-view="solentry">
-    <summary><span class="fees-total" data-fee-view-solentry>Fees paid to SolEntry: <b><span data-fees-user-total>{{ "%.4f"|format(fees_total_sol) }} SOL</span></b></span><span class="fees-total" data-fee-view-pumpfun>Pump.fun fees: <b><span data-fees-user-pump-total>{{ "%.4f"|format(fees_pump_total_sol) }} SOL</span></b></span> <span class="muted small">· SOL <span data-live-price="SOL">{% if sol_price_usd is not none %}${{ "%.4f"|format(sol_price_usd) }}{% else %}—{% endif %}</span></span></summary>
-    <p class="muted small">Every trade pays a 3.65% fee in SOL. Fees are in SOL.</p>
-    <div class="fees-switcher">
-      <button type="button" class="fees-switcher-btn" data-fee-switcher-toggle aria-haspopup="listbox" aria-expanded="false"><span data-fee-switcher-current>SolEntry fee balance</span><span class="fees-switcher-chevron" aria-hidden="true">▾</span></button>
-      <ul class="fees-switcher-menu" role="listbox" aria-label="Fee balance">
-        <li><button type="button" class="fees-switcher-option" role="option" aria-selected="true" data-fee-switch="solentry">SolEntry fee balance</button></li>
-        <li><button type="button" class="fees-switcher-option" role="option" aria-selected="false" data-fee-switch="pumpfun">Pump.fun fee balance</button></li>
-      </ul>
-    </div>
-    <p class="muted small">Burned: <span data-fees-user-burn-total>{{ "%.4f"|format(fees_burn_total_sol) }} SOL</span></p>
-    {% if fees_rows %}
-    <ul class="fees-list">
-      {% for fee in fees_rows %}
-      <li><span class="fees-coin">{{ fee.coin }} · {{ fee.side }} · {{ fee.mode }}</span> <span class="fees-amount"><span data-fee-view-solentry>{% if fee.fee_sol_display is not none %}{{ "%.6f"|format(fee.fee_sol_display) }} SOL{% else %}—{% endif %}</span><span data-fee-view-pumpfun>{% if fee.pump_fee_sol_display is not none %}{{ "%.6f"|format(fee.pump_fee_sol_display) }} SOL{% else %}—{% endif %}</span></span><br><span class="muted small">{{ fee.created_at }}{% if fee.signature %} · <span class="addr">{{ fee.signature[:12] }}…</span>{% else %} · paper{% endif %}{% if fee.burn_sol_display is not none and fee.burn_sol_display > 0 %} · burned {{ "%.6f"|format(fee.burn_sol_display) }} SOL{% endif %}</span></li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="muted small">No fees paid yet — the first trade starts the count.</p>
-    {% endif %}
-  </details>
 
   <a class="card trenches-card" href="{{ url_for('trenches') }}">
     <span class="trenches-card-title">🔥 Trenches</span>
