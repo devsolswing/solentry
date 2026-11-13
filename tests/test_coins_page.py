@@ -242,8 +242,9 @@ class TestCoinSearch(CoinsPageBase):
         self._buy_sol()
         data = self._search("sol")
         sol = next(r for r in data["results"] if r["coin_id"] == "SOL")
-        # 1 SOL bought at $10: the 3.65% fee leaves 0.9635 SOL held.
-        self.assertAlmostEqual(sol["held"], 0.9635, places=9)
+        # 1 SOL bought at $10: no fee (removed 2026-11-12), so 1.0
+        # SOL held.
+        self.assertAlmostEqual(sol["held"], 1.0, places=9)
 
     def test_search_nonsense_returns_nothing_invented(self):
         with mock.patch.object(charts_mod, "_default_get",
@@ -353,19 +354,20 @@ class TestQuickTradeAmounts(CoinsPageBase):
             "amount_tokens": "2", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Bought", resp.get_data(as_text=True))
-        # 2 tokens at $10: $20 spent, fee $0.73, net $19.27 = 1.927.
-        self.assertAlmostEqual(self._holding("SOL"), 1.927, places=9)
+        # 2 tokens at $10: $20 spent, no fee (removed 2026-11-12),
+        # net $20 = 2.0.
+        self.assertAlmostEqual(self._holding("SOL"), 2.0, places=9)
 
     def test_sell_by_usd_amount(self):
         self._choose_mode("paper")
         self._buy_sol()
-        self.assertAlmostEqual(self._holding("SOL"), 0.9635, places=9)
+        self.assertAlmostEqual(self._holding("SOL"), 1.0, places=9)
         resp = self.client.post("/coins/SOL/sell", data={
             "csrf_token": csrf(self.client, "/coins/SOL"),
             "amount_usd": "5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertAlmostEqual(self._holding("SOL"), 0.4635, places=9)
+        self.assertAlmostEqual(self._holding("SOL"), 0.5, places=9)
 
     def test_sell_by_token_amount_still_works(self):
         self._choose_mode("paper")
@@ -375,7 +377,7 @@ class TestQuickTradeAmounts(CoinsPageBase):
             "amount": "0.5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertAlmostEqual(self._holding("SOL"), 0.4635, places=9)
+        self.assertAlmostEqual(self._holding("SOL"), 0.5, places=9)
 
     def test_buy_tokens_without_price_refuses_plainly(self):
         self._choose_mode("paper")

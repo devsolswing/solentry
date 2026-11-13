@@ -26,6 +26,10 @@ page (/wallet/details), and Page 3 scrolls (the one-screen fit is
 gone) — the photo layout is unchanged. The signing-bot info STAYS
 on Page 3 (James said no to removing it, 2026-11-12); it is also
 on Page 6, in the Signer Bot card.
+
+2026-11-12 (owner): the trading fee was REMOVED entirely — the
+fees card is gone from the wallet page too, and the Signer Bot
+card keeps Signer ID + signed-transaction count but no fee line.
 """
 
 import re
@@ -60,8 +64,6 @@ def _direct_ctx(coin_rows):
                               "1mo": "1m", "1y": "1y", "all": "All"},
         "portfolio_candles_svg": "", "portfolio_line_svg": "",
         "coin_rows": coin_rows, "holdings_value": 0.0,
-        "fees_total_sol": 0.0, "fees_pump_total_sol": 0.0,
-        "fees_burn_total_sol": 0.0, "fees_rows": [],
         "sol_price_usd": 86.14, "support_id": "12345678",
         "receive_address": "11111111111111111111111111111111",
         "bots": [],
@@ -301,34 +303,36 @@ class TestHomeFeesMoveScrollable(HomeMockupBase):
         self.assertIn("HOLDINGS", html)
         self.assertIn("holdings-panel", html)
 
-    def test_fees_card_is_on_wallet_details(self):
-        # The whole card, with the dropdown switcher and the
-        # burned line, in paper mode and in real mode.
+    def test_fees_card_is_gone_from_wallet_details(self):
+        # The trading fee was removed (James, 2026-11-12): the
+        # whole fees card is gone from the wallet page, in paper
+        # mode and in real mode — no card, no dropdown switcher,
+        # no burned line, no fee figures.
         for mode in ("paper", "devnet"):
             self._choose_mode(mode)
             html = self._html("/wallet/details")
-            self.assertIn('id="fees"', html)
-            self.assertIn("fees-card", html)
-            self.assertIn("Fees paid to SolEntry", html)
-            self.assertIn("Pump.fun fees", html)
-            self.assertIn("SolEntry fee balance", html)
-            self.assertIn("Pump.fun fee balance", html)
-            self.assertIn("Burned:", html)
-            self.assertIn("data-fees-user-total", html)
-            self.assertIn("data-fees-user-pump-total", html)
-            self.assertIn("data-fees-user-burn-total", html)
-            self.assertIn("fees-switcher", html)
+            self.assertNotIn('id="fees"', html)
+            self.assertNotIn("fees-card", html)
+            self.assertNotIn("Fees paid to SolEntry", html)
+            self.assertNotIn("Pump.fun fees", html)
+            self.assertNotIn("SolEntry fee balance", html)
+            self.assertNotIn("Pump.fun fee balance", html)
+            self.assertNotIn("Burned:", html)
+            self.assertNotIn("data-fees-user-total", html)
+            self.assertNotIn("data-fees-user-pump-total", html)
+            self.assertNotIn("data-fees-user-burn-total", html)
+            self.assertNotIn("fees-switcher", html)
 
     def test_signer_info_is_on_bots_page(self):
         # Page 6 already had it (Signer Bot card, Page 6 rework):
-        # Signer ID, signed-transaction count, 1.7% fees in SOL
-        # as a gas fee.
+        # Signer ID and signed-transaction count. No fee line: the
+        # trading fee was removed (James, 2026-11-12).
         self._choose_mode("paper")
         html = self._html("/bots")
         self.assertIn("Signer Bot", html)
         self.assertIn("Signer ID:", html)
         self.assertIn("Transactions signed:", html)
-        self.assertIn("Gas fees paid:", html)
+        self.assertNotIn("Gas fees paid:", html)
 
 
 def _last_rule(css, selector):

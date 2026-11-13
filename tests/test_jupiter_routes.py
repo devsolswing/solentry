@@ -301,7 +301,7 @@ class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
         # 0.1 SOL at a $100 SOL price is $10; the Jupiter quote
         # says that buys 0.00853837 wZEC, so the fill price is
         # ~$1,171/wZEC — not the $100 feed price (which would
-        # fill 0.09635 wZEC). The fee (3.65%) comes off the $10.
+        # fill 0.1 wZEC). No fee (removed 2026-11-12).
         with mock.patch.object(jup, "quote_buy",
                                return_value=zec_buy_quote()):
             resp = self.client.post("/coins/ZEC/buy", data={
@@ -311,9 +311,9 @@ class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
         amount = self.db.execute(
             "SELECT amount FROM paper_holdings WHERE user_id = ? "
             "AND coin_id = 'ZEC'", (self.user_id,)).fetchone()["amount"]
-        expected = 10.0 * (1 - 0.0365) / (0.1 * 100.0 / 0.00853837)
+        expected = 10.0 / (0.1 * 100.0 / 0.00853837)
         self.assertAlmostEqual(amount, expected, places=5)
-        self.assertNotAlmostEqual(amount, 0.09635, places=3)
+        self.assertNotAlmostEqual(amount, 0.1, places=3)
 
 
 if __name__ == "__main__":

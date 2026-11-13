@@ -80,8 +80,8 @@ class TestHomeCompactLayout(HomeMockupBase):
 
     def test_name_over_ticker_in_small_type(self):
         row = {"coin_id": "SOL", "name": "Solana", "ticker": "SOL",
-               "price": 10.0, "change_1h": 2.5, "held": 0.9635,
-               "value": 9.63, "is_mint": False}
+               "price": 10.0, "change_1h": 2.5, "held": 1.0,
+               "value": 10.0, "is_mint": False}
         with mock.patch.object(routes, "_coin_rows",
                                return_value=[row]):
             self._choose_mode("paper")
@@ -105,13 +105,13 @@ class TestHomeCompactLayout(HomeMockupBase):
         html = self._html("/wallet")
         # Circular icon (image when there is one, ticker-initial
         # fallback otherwise) + sparkline slot + price + amount +
-        # 1h % far right. 1 SOL at the mocked $10 price, 3.65%
-        # fee leaves 0.9635 SOL worth $9.63; 1h +2.50%.
+        # 1h % far right. 1 SOL at the mocked $10 price, no fee
+        # (removed 2026-11-12), leaves 1.0000 SOL worth $10.00; 1h +2.50%.
         self.assertTrue("coin-ico" in html or "coin-img" in html)
         self.assertIn("holdings-spark", html)
         self.assertIn('data-sparkline-coin="SOL"', html)
         self.assertIn("$10.00", html)
-        self.assertIn("0.9635 SOL", html)
+        self.assertIn("1.0000 SOL", html)
         self.assertIn("holdings-1h", html)
         self.assertIn("+2.50%", html)
         # The name column takes the free space so the sparkline

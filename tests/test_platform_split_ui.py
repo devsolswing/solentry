@@ -189,7 +189,7 @@ class TestModeSeparation(SplitBase):
         # mode (the old /pnl page, where this was checked, is gone).
         home = self._html("/wallet")
         self.assertIn("Real trading — devnet", home)
-        self.assertNotIn("$99.64 CAD", home)
+        self.assertNotIn("$100.00 CAD", home)
 
     def test_real_data_hidden_in_paper_mode(self):
         self._choose_mode("paper")
@@ -200,7 +200,7 @@ class TestModeSeparation(SplitBase):
         # (the old /pnl page, where this was checked, is gone).
         home = self._html("/wallet")
         self.assertIn("Demo trading (paper)", home)
-        self.assertIn("$99.64 CAD", home)
+        self.assertIn("$100.00 CAD", home)
 
     def test_activity_rows_are_mode_tagged_and_filtered(self):
         rows = self.db.execute(

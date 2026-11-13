@@ -461,10 +461,10 @@ class TestHomeMockupLayout(HomeMockupBase):
         html = self._html("/wallet")
         self.assertIn("Solana", html)
         self.assertIn("(SOL)", html)
-        # 1 SOL bought at the mocked $10 price: the 3.65% fee leaves
-        # 0.9635 SOL worth $9.63; the price is $10.00.
-        self.assertIn("0.9635 SOL", html)
-        self.assertIn("$9.63", html)
+        # 1 SOL bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
+        # 1.0000 SOL worth $10.00; the price is $10.00.
+        self.assertIn("1.0000 SOL", html)
+        self.assertIn("$10.00", html)
         self.assertIn("$10.00", html)
         self.assertIn("+2.50%", html)
         # The screenshot's figures are examples, never the data:
@@ -480,8 +480,8 @@ class TestHomeMockupLayout(HomeMockupBase):
         # the route): the template must render the real image and
         # the real sparkline when the row carries them.
         row = {"coin_id": "SOL", "name": "Solana", "ticker": "SOL",
-               "price": 10.0, "change_1h": 2.5, "held": 0.9635,
-               "value": 9.63, "is_mint": False,
+               "price": 10.0, "change_1h": 2.5, "held": 1.0,
+               "value": 10.0, "is_mint": False,
                "image_url": "https://assets.coingecko.com/sol.png",
                "sparkline_svg": hh.sparkline_svg([9.0, 10.0, 11.0])}
         with mock.patch.object(routes, "_coin_rows",
@@ -496,8 +496,8 @@ class TestHomeMockupLayout(HomeMockupBase):
 
     def test_holdings_row_without_image_falls_back_to_initial(self):
         row = {"coin_id": "SOL", "name": "Solana", "ticker": "SOL",
-               "price": 10.0, "change_1h": 2.5, "held": 0.9635,
-               "value": 9.63, "is_mint": False}
+               "price": 10.0, "change_1h": 2.5, "held": 1.0,
+               "value": 10.0, "is_mint": False}
         with mock.patch.object(routes, "_coin_rows",
                                return_value=[row]):
             self._choose_mode("paper")

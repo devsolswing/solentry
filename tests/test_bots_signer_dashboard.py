@@ -6,15 +6,14 @@ Owner's spec (2026-11-11 ~19:25 PST, "data glitch" on Page 6):
 - The old signer-bot dashboard block is REPLACED by a Signer Bot
   card in the bottom half: a bot card like the ones above it
   (same .card bot-card classes, icon, bold name, stats lines,
-  chevron), showing inside it the Signer ID, the number of real
-  transactions signed (a running count starting at 1), and the
-  gas fees paid (the user's own 1.7% treasury fee, in SOL).
-  Tapping the card reveals the signing bot's current tasks.
+  chevron), showing inside it the Signer ID and the number of
+  real transactions signed (a running count starting at 1).
+  No fee line: the trading fee was removed (James, 2026-11-12),
+  so the card shows no fee figure at all. Tapping the card
+  reveals the signing bot's current tasks.
 - The numbers are real app data, never invented: the transaction
   count is trade_ledger rows with mode='real' only (paper rows
-  are simulated, never signed, never counted); the gas fee is
-  the user's own treasury total from trade_fees, mode='real'
-  only (never the pump.fun fee, never the burn). "—" when a
+  are simulated, never signed, never counted). "—" when a
   figure cannot be read, and an honest empty state when there
   is nothing to count yet.
 No SOL moves in these tests; real execution is a recording mock.
@@ -24,7 +23,6 @@ import unittest
 
 from helpers import csrf  # noqa: F401  (kept for symmetry with siblings)
 from test_ui_rebuild import UiBase
-from tradingbot import fees as fees_mod
 from tradingbot.ledger import record_trade
 
 
@@ -135,29 +133,15 @@ class TestSignerCard(UiBase):
         self.assertIn("No signed transactions yet", html)
         self.assertIn('data-signer-tx-count="0"', html)
 
-    def test_gas_fees_paid_show_real_treasury_total_only(self):
-        # One real fee row: treasury 0.017 SOL, burn 0.0195 SOL,
-        # pump.fun program fee 0.00915325 SOL. The card shows ONLY
-        # the treasury share, as a gas fee — never the burn, never
-        # the pump.fun fee. A paper fee row never counts either.
-        fees_mod.record_fee(self.db, self.user_id, None, "SOL", "buy",
-                            "real", 0.0365, fee_lamports=36_500_000,
-                            signature="sig-signer-gas-1",
-                            treasury_sol=0.017, burn_sol=0.0195,
-                            pump_fee_sol=0.00915325)
-        fees_mod.record_fee(self.db, self.user_id, None, "SOL", "buy",
-                            "paper", 0.0365, fee_usd=3.65,
-                            treasury_sol=0.5, burn_sol=0.5,
-                            pump_fee_sol=0.5)
+    def test_no_gas_fee_line_on_card(self):
+        # The trading fee was removed (James, 2026-11-12): the card
+        # shows Signer ID + signed-transaction count only, no fee
+        # line and no fee figure of any kind.
         html = self._dashboard()
-        self.assertIn("Gas fees paid: 0.0170 SOL", html)
-        self.assertNotIn("Gas fees paid: 0.0195 SOL", html)
-        self.assertNotIn("Gas fees paid: 0.0092 SOL", html)
-        self.assertNotIn("Gas fees paid: 0.5000 SOL", html)
-
-    def test_gas_fees_zero_when_none_paid(self):
-        html = self._dashboard()
-        self.assertIn("Gas fees paid: 0.0000 SOL", html)
+        self.assertIn("Signer Bot", html)
+        self.assertIn("Transactions signed", html)
+        self.assertNotIn("Gas fees paid", html)
+        self.assertNotIn("fees_total_sol", html)
 
 
 if __name__ == "__main__":

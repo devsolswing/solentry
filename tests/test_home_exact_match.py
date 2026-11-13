@@ -138,18 +138,18 @@ class TestHoldingsRowExact(HomeMockupBase):
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
-        # 1 SOL bought at the mocked $10 price: the 3.65% fee leaves
-        # 0.9635 SOL worth $9.63; the price is $10.00; 1h +2.50%.
-        self.assertIn("0.9635 SOL", html)
+        # 1 SOL bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
+        # 1.0000 SOL worth $10.00; the price is $10.00; 1h +2.50%.
+        self.assertIn("1.0000 SOL", html)
         self.assertIn("$10.00", html)
         self.assertIn("+2.50%", html)
         # The amount comes after the price and before the % — it is
         # under the price on the right, not under the name.
-        self.assertLess(html.index("$10.00"), html.index("0.9635 SOL"))
-        self.assertLess(html.index("0.9635 SOL"), html.index("+2.50%"))
+        self.assertLess(html.index("$10.00"), html.index("1.0000 SOL"))
+        self.assertLess(html.index("1.0000 SOL"), html.index("+2.50%"))
         # The $ value is still in the page (hidden, for the live
         # paper total) but not a visible row line.
-        self.assertIn("$9.63", html)
+        self.assertIn("$10.00", html)
         self.assertIn("holdings-value-live", html)
         self.assertIn("display: none", _rule(_css(), ".holdings-value-live"))
 
@@ -166,8 +166,8 @@ class TestHoldingsRowExact(HomeMockupBase):
         # A row with no sparkline yet still renders the span (empty
         # while the chart builds) so the 60s refresh can fill it.
         row = {"coin_id": "SOL", "name": "Solana", "ticker": "SOL",
-               "price": 10.0, "change_1h": 2.5, "held": 0.9635,
-               "value": 9.63, "is_mint": False}
+               "price": 10.0, "change_1h": 2.5, "held": 1.0,
+               "value": 10.0, "is_mint": False}
         with mock.patch.object(routes, "_coin_rows",
                                return_value=[row]):
             self._choose_mode("paper")

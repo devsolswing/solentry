@@ -13,9 +13,10 @@ Owner's spec (2026-11-11 ~19:25 PST, "data glitch" on Page 6):
   route still works — it just no longer shows anything on Page 6.
 - The bottom half is the Signer Bot card (see
   test_bots_signer_dashboard.py): a bot card like the ones above
-  it, showing the Signer ID, the number of real transactions
-  signed, and the gas fees paid (the user's own 1.7% treasury
-  fee, in SOL). Tapping it reveals the current tasks.
+  it, showing the Signer ID and the number of real transactions
+  signed. No fee line: the trading fee was removed (James,
+  2026-11-12), so the card shows no fee figure. Tapping it
+  reveals the current tasks.
 - Edit Bot is the same size as Add Bot (one shared sizing rule).
 - App name + logo are bigger on the Bots page than the base sizes.
 - A black crown-tipped banner sits underneath the logo. (The thin

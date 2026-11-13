@@ -5,17 +5,16 @@ quote -> swap -> sign -> settle path in simulation.
 No real SOL moves in any test: the RPC is fake, the wallet is a
 throwaway keypair, Jupiter's HTTP answers are mocked, and every
 signed transaction is decoded and checked — including a
-cryptographic signature verification against the wallet key and a
-decode of the fee transfer proving it goes to the Treasury dev
-wallet for exactly the 1.9% fee.
+cryptographic signature verification against the wallet key.
 
 Covers: parsing a REAL captured Jupiter swap transaction (base64
 captured live 2026-11-11, SOL -> wZEC, throwaway fee payer);
 parsing + allowlist accept/refuse on a synthetic v0 transaction
 built to the same shape; signing; the gate OFF (refuses, nothing
-sent) and ON (executes in simulation, mainnet only); the 1.9%
-mainnet fee (all treasury, zero burn); stale-quote / price-impact /
-bot-limit / insufficient-balance refusals; and settle_jupiter_fee.
+sent) and ON (executes in simulation, mainnet only); stale-quote /
+price-impact / bot-limit / insufficient-balance refusals. NO fee:
+the 1.9% mainnet fee was removed 2026-11-12 — the whole trade
+amount is swapped, and only ONE transaction (the swap) is sent.
 """
 
 import base64
@@ -27,14 +26,13 @@ from unittest import mock
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey)
 
-from helpers import (TEST_ENCRYPTION_KEY, TEST_FEE_RECIPIENT,
+from helpers import (TEST_ENCRYPTION_KEY,
                      TEST_SESSION_SECRET, make_client, signup)
 from test_executor import parse_signed_tx
 from test_jupiter import REAL_QUOTE
 from tradingbot import jupiter as jup
 from tradingbot import jupiter_executor as jex
 from tradingbot.config import Config
-from tradingbot.fees import mainnet_fee_split_lamports
 from tradingbot.security import encrypt_secret
 from tradingbot.signing_bot import get_signing_bot
 from tradingbot.solana import (
@@ -231,7 +229,6 @@ class JupiterExecutorBase(unittest.TestCase):
             "NETWORK": "mainnet",
             "DATABASE_PATH": self.cfg.database_path,
             "PAPER_START_CASH": "100",
-            "FEE_RECIPIENT_PUBKEY": TEST_FEE_RECIPIENT,
             "SECURITY_CODE_DEV_ECHO": "1",
             "JUPITER_REAL_SWAPS": "1",
         })
@@ -248,7 +245,7 @@ class JupiterExecutorBase(unittest.TestCase):
             self.pubkey, self.wzec_ata, self.table_pubkey,
             [jup.SOL_MINT, self.wzec_mint], **kwargs)
 
-    def _buy_tx(self, swap_lamports=98_100_000, **kwargs):
+    def _buy_tx(self, swap_lamports=100_000_000, **kwargs):
         return build_swap_tx(
             self.pubkey, self.wsol_ata, self.wzec_ata,
             jup.SOL_MINT, self.wzec_mint, "buy", swap_lamports,
@@ -267,7 +264,7 @@ class JupiterExecutorBase(unittest.TestCase):
             timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return {"side": side, "symbol": "ZEC", "wrapped": True,
                 "display_name": "Zcash",
-                "in_amount": 98_100_000 if side == "buy" else 100_000,
+                "in_amount": 100_000_000 if side == "buy" else 100_000,
                 "out_amount": out_amount,
                 "in_amount_ui": 0.1 if side == "buy" else 0.001,
                 "out_amount_ui": out_amount_ui,
@@ -339,7 +336,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         self.assertEqual(keys[9], self.wzec_mint)
         # No raise: the allowlist accepts the real shape.
         jex.verify_jupiter_transaction(
-            parsed, keys, self.pubkey, jup.SOL_MINT, 98_100_000,
+            parsed, keys, self.pubkey, jup.SOL_MINT, 100_000_000,
             "buy", self.wsol_ata)
 
     def test_verify_accepts_synthetic_sell_tx(self):
@@ -358,7 +355,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         keys = jex.resolved_account_keys(parsed, self._rpc())
         with self.assertRaisesRegex(ValueError, "no Jupiter swap"):
             jex.verify_jupiter_transaction(
-                parsed, keys, self.pubkey, jup.SOL_MINT, 98_100_000,
+                parsed, keys, self.pubkey, jup.SOL_MINT, 100_000_000,
                 "buy", self.wsol_ata)
 
     def test_verify_refuses_wrap_to_wrong_destination(self):
@@ -370,7 +367,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         with self.assertRaisesRegex(ValueError,
                                     "not the SOL wrap"):
             jex.verify_jupiter_transaction(
-                parsed, keys, self.pubkey, jup.SOL_MINT, 98_100_000,
+                parsed, keys, self.pubkey, jup.SOL_MINT, 100_000_000,
                 "buy", self.wsol_ata)
 
     def test_verify_refuses_wrong_fee_payer(self):
@@ -380,7 +377,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         _, other, _ = generate_keypair()
         with self.assertRaisesRegex(ValueError, "fee payer"):
             jex.verify_jupiter_transaction(
-                parsed, keys, other, jup.SOL_MINT, 98_100_000,
+                parsed, keys, other, jup.SOL_MINT, 100_000_000,
                 "buy", self.wsol_ata)
 
     def test_verify_refuses_compute_price_too_high(self):
@@ -390,7 +387,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         with self.assertRaisesRegex(ValueError,
                                     "compute-unit price too high"):
             jex.verify_jupiter_transaction(
-                parsed, keys, self.pubkey, jup.SOL_MINT, 98_100_000,
+                parsed, keys, self.pubkey, jup.SOL_MINT, 100_000_000,
                 "buy", self.wsol_ata)
 
     def test_verify_refuses_unknown_program(self):
@@ -402,7 +399,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         keys = jex.resolved_account_keys(parsed, self._rpc())
         with self.assertRaisesRegex(ValueError, "unexpected program"):
             jex.verify_jupiter_transaction(
-                parsed, keys, self.pubkey, jup.SOL_MINT, 98_100_000,
+                parsed, keys, self.pubkey, jup.SOL_MINT, 100_000_000,
                 "buy", self.wsol_ata)
 
 
@@ -456,28 +453,17 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
         self.assertEqual(result["status"], "executed", result)
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         self.assertAlmostEqual(result["coin_amount"], 0.00838)
-        # The mainnet fee: 1.9% of 0.1 SOL, ALL to the treasury,
-        # NO burn.
-        self.assertEqual(result["fee_lamports"], 1_900_000)
-        self.assertEqual(result["treasury_lamports"], 1_900_000)
-        self.assertEqual(result["burn_lamports"], 0)
-        self.assertEqual(result["pump_fee_lamports"], 0)
-        self.assertAlmostEqual(result["fee_sol"], 0.0019)
-        self.assertEqual(result["fee_status"], "paid")
-        self.assertEqual(result["fee_signature"], FAKE_SIGNATURE)
+        # NO fee (removed 2026-11-12): no fee keys at all, and
+        # exactly ONE send — the swap itself. The swap wraps the
+        # FULL 0.1 SOL (the mock tx's wrap instruction carries
+        # 100,000,000 lamports); nothing is held back.
+        for key in ("fee_lamports", "fee_sol", "treasury_lamports",
+                    "treasury_sol", "burn_lamports", "burn_sol",
+                    "pump_fee_lamports", "pump_fee_sol", "fee_status",
+                    "fee_signature", "fee_error"):
+            self.assertNotIn(key, result)
         self.assertEqual(result["signing_bot"], self.support_id)
-        # Two sends: the swap, then the fee transfer — and the fee
-        # transfer really is a System transfer to the Treasury dev
-        # wallet for exactly the fee.
-        self.assertEqual(len(rpc.sent), 2)
-        fee_tx = parse_signed_tx(rpc.sent[1])
-        self.assertEqual(len(fee_tx["instructions"]), 1)
-        fee_ins = fee_tx["instructions"][0]
-        self.assertEqual(fee_ins["program_id"], SYSTEM_PROGRAM)
-        self.assertEqual(fee_ins["accounts"],
-                         [self.pubkey, TEST_FEE_RECIPIENT])
-        self.assertEqual(int.from_bytes(fee_ins["data"][4:12], "little"),
-                         1_900_000)
+        self.assertEqual(len(rpc.sent), 1)
         # The swap itself was signed by the wallet key (a versioned
         # transaction — parsed with the v0 parser, not the legacy
         # one).
@@ -499,12 +485,15 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
         self.assertEqual(result["status"], "executed", result)
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         self.assertAlmostEqual(result["coin_amount"], 0.011713224)
-        # 1.9% of the 11,713,224-lamport proceeds, all treasury.
-        self.assertEqual(result["fee_lamports"], 222_551)
-        self.assertEqual(result["treasury_lamports"], 222_551)
-        self.assertEqual(result["burn_lamports"], 0)
-        self.assertEqual(result["fee_status"], "paid")
-        self.assertEqual(len(rpc.sent), 2)
+        # NO fee (removed 2026-11-12): no fee keys at all, and
+        # exactly ONE send — the swap itself. All proceeds go to
+        # the seller's wallet.
+        for key in ("fee_lamports", "fee_sol", "treasury_lamports",
+                    "treasury_sol", "burn_lamports", "burn_sol",
+                    "pump_fee_lamports", "pump_fee_sol", "fee_status",
+                    "fee_signature", "fee_error"):
+            self.assertNotIn(key, result)
+        self.assertEqual(len(rpc.sent), 1)
 
     def test_paper_bot_refuses(self):
         rpc = self._rpc()
@@ -583,45 +572,6 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
         self.assertEqual(result["status"], "skipped")
         self.assertIn("insufficient token balance", result["reason"])
         self.assertEqual(rpc.sent, [])
-
-
-class TestSettleJupiterFee(JupiterExecutorBase):
-    def test_settle_gate_off_skips(self):
-        rpc = self._rpc()
-        result = jex.settle_jupiter_fee(
-            self.db, self.user_id, 1_900_000, self.cfg,
-            rpc_client=rpc)
-        self.assertEqual(result["status"], "skipped")
-        self.assertIn("not enabled yet", result["reason"])
-        self.assertEqual(rpc.sent, [])
-
-    def test_settle_pays_when_gate_open(self):
-        rpc = self._rpc()
-        result = jex.settle_jupiter_fee(
-            self.db, self.user_id, 1_900_000, self._mainnet_cfg(),
-            rpc_client=rpc)
-        self.assertEqual(result["status"], "paid")
-        self.assertEqual(result["fee_signature"], FAKE_SIGNATURE)
-        self.assertEqual(len(rpc.sent), 1)
-        fee_tx = parse_signed_tx(rpc.sent[0])
-        fee_ins = fee_tx["instructions"][0]
-        self.assertEqual(fee_ins["program_id"], SYSTEM_PROGRAM)
-        self.assertEqual(fee_ins["accounts"],
-                         [self.pubkey, TEST_FEE_RECIPIENT])
-        self.assertEqual(int.from_bytes(fee_ins["data"][4:12], "little"),
-                         1_900_000)
-
-
-class TestMainnetFeeMath(unittest.TestCase):
-    def test_mainnet_fee_is_1_9_percent_all_treasury_no_burn(self):
-        split = mainnet_fee_split_lamports(100_000_000)
-        self.assertEqual(split["fee_lamports"], 1_900_000)
-        self.assertEqual(split["treasury_lamports"], 1_900_000)
-        self.assertEqual(split["burn_lamports"], 0)
-        split = mainnet_fee_split_lamports(200_000_000)
-        self.assertEqual(split["fee_lamports"], 3_800_000)
-        self.assertEqual(split["treasury_lamports"], 3_800_000)
-        self.assertEqual(split["burn_lamports"], 0)
 
 
 if __name__ == "__main__":

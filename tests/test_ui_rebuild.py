@@ -382,10 +382,10 @@ class TestHomePage(UiBase):
         self.assertIn("Solana", html)
         self.assertIn("SOL", html)
         self.assertIn("holdings-row", html)
-        # 1 SOL bought at the mocked $10 price: the 3.65% fee leaves
-        # 0.9635 SOL worth $9.63.
-        self.assertIn("0.9635 SOL", html)
-        self.assertIn("$9.63", html)
+        # 1 SOL bought at the mocked $10 price: no fee (removed
+        # 2026-11-12), so 1.0000 SOL worth $10.00.
+        self.assertIn("1.0000 SOL", html)
+        self.assertIn("$10.00", html)
         self.assertNotIn("coin-pnl", html)
         self.assertNotIn("coin-change", html)
         self.assertIn("/coins/SOL/detail", html)

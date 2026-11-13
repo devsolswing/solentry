@@ -194,15 +194,15 @@ class TestPnlPage(PnlBase):
             "SELECT * FROM portfolio_snapshots WHERE user_id = ?",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1)
-        # $10 buy: cash $90 + 0.09635 SOL at $100 ($9.635) = $99.635
-        # — the 3.65% fee is a cost, so the total is under $100.
-        self.assertAlmostEqual(rows[0]["total_value_usd"], 99.635,
+        # $10 buy: cash $90 + 0.1 SOL at $100 ($10) = $100.00 — no
+        # fee (removed 2026-11-12), so the total is the full $100.
+        self.assertAlmostEqual(rows[0]["total_value_usd"], 100.0,
                                places=1)
         # The home page now shows the portfolio total (the old /pnl
-        # page is gone): $99.635 rounds to $99.64 CAD.
+        # page is gone): $100.00 CAD.
         html = self.client.get("/wallet").get_data(as_text=True)
         self.assertIn("SOL", html)
-        self.assertIn("$99.64 CAD", html)
+        self.assertIn("$100.00 CAD", html)
 
     def test_silent_loop_evaluation_records_snapshot(self):
         self.db.execute(
