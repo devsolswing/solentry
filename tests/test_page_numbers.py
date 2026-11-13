@@ -167,19 +167,24 @@ class TestPageNumbersRender(unittest.TestCase):
                          sorted(f"/bots/{i}" for i in ids.values()))
         # The lower scrolling section is gone (Page 6 rebuild): no
         # Trenches link, no memecoin card, no create button on this
-        # page — the Trenches bot is created through the assistant.
+        # page. (Owner, 2026-11-11: the assistant hint that used to
+        # mention "create the trenches bot" is gone with the Page 6
+        # assistant box — the Trenches preset itself is unchanged
+        # and is still created through the assistant endpoint.)
         self.assertNotIn("trenches-card", html)
         self.assertNotIn("trenches-link", html)
         self.assertNotIn("memecoin-card", html)
         self.assertNotIn("+ Create the Trenches bot", html)
         self.assertNotIn("Your Trenches bot is in the carousel above.",
                          html)
-        self.assertIn("create the trenches bot", html)
+        self.assertNotIn("create the trenches bot", html)
 
     def test_no_create_trenches_button_on_bots_page(self):
         # Page 6 rebuild: the "+ Create the Trenches bot" button is
-        # gone from the Bots page — the assistant is the way to
-        # create the Trenches bot now.
+        # gone from the Bots page. (Owner, 2026-11-11: the Page 6
+        # assistant box is deleted, so its "create the trenches
+        # bot" hint is gone too — the preset is still created
+        # through the assistant endpoint.)
         html = self._html(self.client, "/bots")
         self.assertNotIn("+ Create the Trenches bot", html)
-        self.assertIn("create the trenches bot", html)
+        self.assertNotIn("create the trenches bot", html)

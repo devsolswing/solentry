@@ -610,12 +610,15 @@ class TestRulesRoutes(unittest.TestCase):
         # description + "+ Create the Trenches bot" button) is gone
         # from the Bots page — the lower scrolling section was
         # removed. The Trenches preset itself is unchanged and is
-        # created through the assistant (see test_assistant_preset_create).
+        # created through the assistant endpoint (see
+        # test_assistant_preset_create). (Owner, 2026-11-11: the
+        # Page 6 assistant box is deleted, so its "create the
+        # trenches bot" hint is gone from the page too.)
         resp = self.client.get("/bots")
         html = resp.get_data(as_text=True)
         self.assertNotIn("memecoin-card", html)
         self.assertNotIn("Create the Trenches bot", html)
-        self.assertIn("create the trenches bot", html)
+        self.assertNotIn("create the trenches bot", html)
 
     def test_assistant_preset_create(self):
         data = self._ask("create the trenches bot")

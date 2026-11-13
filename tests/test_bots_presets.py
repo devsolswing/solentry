@@ -68,12 +68,12 @@ class TestBotsPresets(UiBase):
         self.assertNotIn("preset-list", html)
         self.assertNotIn("bots-presets", html)
         # The Clyde card lives INSIDE the one carousel, after the
-        # active bot cards and before the assistant.
+        # active bot cards and before the signer card.
         carousel = html.find('id="active-bots-list"')
         self.assertGreater(carousel, -1, "carousel not found")
         clyde = html.find("data-preset-item", carousel)
         self.assertGreater(clyde, -1, "Clyde card not in carousel")
-        self.assertLess(clyde, html.find("bots-assistant", carousel))
+        self.assertLess(clyde, html.find('id="signer-card"', carousel))
         # Hidden until the Presets button opens it.
         m = re.search(r'<form[^>]*data-preset-item[^>]*>', html)
         self.assertIsNotNone(m, "Clyde form not found")
@@ -166,9 +166,9 @@ class TestBotsPresets(UiBase):
         # No separate preset list element anywhere.
         self.assertNotIn("preset-list", html)
         # Scope to the one carousel (the words "Trenches" and
-        # "Scanner" still appear in the assistant hint below it).
+        # "Scanner" must not appear in the window at all).
         start = html.find('id="active-bots-list"')
-        end = html.find("bots-assistant", start)
+        end = html.find('id="signer-card"', start)
         window = html[start:end]
         # The Clyde card is a carousel item, hidden by default.
         self.assertIn("data-preset-item", window)

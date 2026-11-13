@@ -1,19 +1,21 @@
-"""Page 6 (Bots) rebuild — the owner's spec (2026-11-10/11).
+"""Page 6 (Bots) — assistant + platform wallets DELETED, signer card.
 
-Rules under test:
-- The scrolling section on the lower half is gone: no
-  page-scroll-panel, no Memecoin build card, no Trenches link on
-  the Bots page (the Trenches page is still reachable from home).
-- The AI assistant lives on the Bots page: robo logo, BLACK card
-  with a GOLD border, RED letters, and a working chatbox wired to
-  the existing /api/assistant flow (it answers, it is not a dead
-  box). (2026-11-11: the solid yellow washed the whole page out,
-  so the yellow background was replaced by black + gold.)
-- Platform wallets moved from Page 8 as a rotating selector: two
-  side arrows cycle through the real platforms (pump.fun, Phantom,
-  pumpSwap), black card with a gold border, red writing; a wallet
-  that exists shows its address, one that does not shows a Create
-  button that really creates it. Page 8 itself is untouched.
+Owner's spec (2026-11-11 ~19:25 PST, "data glitch" on Page 6):
+- The AI assistant is GONE from Page 6: no robo logo, no yellow
+  chat box, no red letters, no chatbox, no /api/assistant wiring
+  on this page — it must look like it was never there. The
+  /api/assistant endpoint itself still exists and still answers
+  (test_assistant.py covers it); builderBot (Page 9) is untouched.
+- The platform-wallet rotating selector is GONE from Page 6: no
+  "Platform wallets" section, no side arrows, no wallet panels,
+  no Create buttons, no wallet addresses on this page. Page 8
+  itself (the platform wallets) is untouched, and the create
+  route still works — it just no longer shows anything on Page 6.
+- The bottom half is the Signer Bot card (see
+  test_bots_signer_dashboard.py): a bot card like the ones above
+  it, showing the Signer ID, the number of real transactions
+  signed, and the gas fees paid (the user's own 1.7% treasury
+  fee, in SOL). Tapping it reveals the current tasks.
 - Edit Bot is the same size as Add Bot (one shared sizing rule).
 - App name + logo are bigger on the Bots page than the base sizes.
 - A black crown-tipped banner sits underneath the logo. (The thin
@@ -53,76 +55,85 @@ class TestBotsPage6(UiBase):
         # from home.
         self.assertIn('href="/trenches"', self._html("/wallet"))
 
-    def test_assistant_present_black_gold_red_robo(self):
+    def test_assistant_gone_from_bots_page(self):
+        # Owner, 2026-11-11 ~19:25 PST: the AI assistant is
+        # deleted from Page 6 — no trace of it may remain: no
+        # card, no robo logo, no chatbox, no wiring, no CSS, and
+        # not even a mention in the empty-bots line.
         self._choose_mode("paper")
         html = self._html("/bots")
-        self.assertIn("bots-assistant", html)
-        self.assertIn("🤖", html)
-        self.assertIn('id="bots-chat-form"', html)
-        self.assertIn('id="bots-chat-input"', html)
-        self.assertIn('id="bots-chat-log"', html)
-        # Wired to the existing assistant endpoint, not a dead box.
-        self.assertIn("/api/assistant", html)
+        self.assertNotIn("bots-assistant", html)
+        self.assertNotIn("robo-logo", html)
+        self.assertNotIn('id="bots-chat-form"', html)
+        self.assertNotIn('id="bots-chat-input"', html)
+        self.assertNotIn('id="bots-chat-log"', html)
+        self.assertNotIn("/api/assistant", html)
+        self.assertNotIn("ask the assistant", html)
+        self.assertNotIn("Assistant", html)
         css = self._css()
-        self.assertIn(".bots-assistant", css)
-        # Black card, gold border, red letters — no yellow wash.
-        self.assertRegex(css, r"\.bots-assistant\s*\{[^}]*background:\s*#000")
-        self.assertRegex(css, r"\.bots-assistant\s*\{[^}]*#ffd700")
-        self.assertRegex(css, r"\.bots-assistant[^{]*\{[^}]*#b91c1c")
-        first = css.split(".bots-assistant")[1].split("}")[0]
-        self.assertNotIn("linear-gradient(180deg, #ffd700", first)
+        self.assertNotIn(".bots-assistant", css)
+        self.assertNotIn(".robo-logo", css)
+        # The generic .chat-log rule stays: builderBot (Page 9)
+        # still uses it.
+        self.assertIn(".chat-log", css)
+        # The endpoint itself still answers (covered by
+        # test_assistant.py) — only the Page 6 box is gone.
 
-    def test_assistant_answers(self):
-        self._choose_mode("paper")
-        self._html("/bots")
-        resp = self.client.post(
-            "/api/assistant",
-            json={"message": "show my balance",
-                  "csrf_token": csrf(self.client, "/bots")})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertTrue((data.get("reply") or "").strip())
-
-    def test_platform_wallet_rotator_present(self):
+    def test_platform_wallet_selector_gone_from_bots_page(self):
+        # Owner, 2026-11-11 ~19:25 PST: the platform-wallet
+        # rotating selector is deleted from Page 6 — no section,
+        # no arrows, no panels, no Create buttons, no addresses,
+        # no CSS, no JS. Page 8 itself is untouched.
         self._choose_mode("paper")
         html = self._html("/bots")
-        self.assertIn("wallet-rotator", html)
-        self.assertIn("data-wallet-prev", html)
-        self.assertIn("data-wallet-next", html)
-        self.assertIn("data-wallet-panel", html)
-        # All three real platforms, in order.
-        for label in ("pump.fun", "Phantom", "pumpSwap"):
-            self.assertIn(label, html)
-        # No wallet exists yet: each platform offers a Create button
-        # that posts to the existing create route.
-        self.assertIn("/platforms/pump.fun/create", html)
-        self.assertIn("Create pump.fun wallet", html)
+        self.assertNotIn("bots-wallets", html)
+        self.assertNotIn("Platform wallets", html)
+        self.assertNotIn("wallet-rotator", html)
+        self.assertNotIn("data-wallet-prev", html)
+        self.assertNotIn("data-wallet-next", html)
+        self.assertNotIn("data-wallet-panel", html)
+        self.assertNotIn("data-wallet-counter", html)
+        self.assertNotIn("wallet-counter", html)
+        # No platform wallet create buttons or addresses on Page 6.
+        self.assertNotIn("/platforms/pump.fun/create", html)
+        self.assertNotIn("/platforms/phantom/create", html)
+        self.assertNotIn("/platforms/pumpswap/create", html)
+        self.assertNotIn("Wallet ready.", html)
         css = self._css()
-        self.assertIn(".wallet-rotator", css)
-        self.assertIn(".wallet-panel", css)
-        # Black card, gold border, red writing — no yellow wash.
-        self.assertRegex(css, r"\.bots-wallets\s*\{[^}]*background:\s*#000")
-        self.assertRegex(css, r"\.bots-wallets\s*\{[^}]*#ffd700")
-        self.assertRegex(css, r"\.bots-wallets[^{]*\{[^}]*#b91c1c")
-        first = css.split(".bots-wallets")[1].split("}")[0]
-        self.assertNotIn("linear-gradient(180deg, #ffd700", first)
+        self.assertNotIn(".bots-wallets", css)
+        self.assertNotIn(".wallet-rotator", css)
+        self.assertNotIn(".wallet-panel", css)
+        self.assertNotIn(".wallet-arrow", css)
+        self.assertNotIn(".wallet-counter", css)
+        js = open("tradingbot/static/ui.js").read()
+        self.assertNotIn("data-wallet-rotator", js)
+        self.assertNotIn("data-wallet-panel", js)
 
-    def test_platform_wallet_shows_address_once_created(self):
+    def test_platform_wallet_create_still_works_but_not_on_bots(self):
+        # The create route (a Page 8 feature) still works — the
+        # wallet is really created — but nothing about it shows
+        # on Page 6 anymore.
         self._choose_mode("paper")
         resp = self.client.post(
             "/platforms/pump.fun/create",
             data={"csrf_token": csrf(self.client, "/bots"),
                   "return_to": "/bots"})
         self.assertIn(resp.status_code, (200, 302))
-        html = self._html("/bots")
         db = self.app.config["DB"]
         row = db.execute(
             "SELECT pubkey FROM platform_wallets "
             "WHERE user_id = ? AND platform = 'pump.fun'",
             (self.user_id,)).fetchone()
         self.assertIsNotNone(row)
-        self.assertIn(row["pubkey"], html)
-        self.assertIn("Wallet ready.", html)
+        # The create route flashes the new address once on the
+        # redirect target — that flash is the route's own message,
+        # not the deleted selector. Load the page again (flash
+        # consumed) and nothing about the wallet may remain.
+        self._html("/bots")
+        html = self._html("/bots")
+        self.assertNotIn(row["pubkey"], html)
+        self.assertNotIn("Wallet ready.", html)
+        self.assertNotIn("Platform wallets", html)
 
     def test_edit_bot_same_size_as_add_bot(self):
         self._choose_mode("paper")
