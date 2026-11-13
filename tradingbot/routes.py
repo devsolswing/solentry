@@ -491,23 +491,43 @@ def _remove_real_holding(db, user_id: int, mint: str,
 
 def _real_avg_price(app, mint: str, amount_sol: float,
                     coin_amount: float) -> float:
-    """USD cost basis for a real buy: the mint's current price when
-    the feed has it, else the price implied by the SOL spent (SOL
-    price x SOL paid / tokens received). 0 when neither is known —
-    the holding is then shown with P&L '—', never guessed."""
-    try:
-        from .trenches import fetch_prices_for_mints
-        prices = fetch_prices_for_mints([mint])
-        if mint in prices:
-            return float(prices[mint])
-    except Exception:
-        pass
-    try:
-        sol_price, _s, _a = _paper_price("SOL")
-    except Exception:
-        sol_price = None
-    if sol_price and coin_amount > 0:
-        return amount_sol * float(sol_price) / coin_amount
+    """USD cost basis for a real buy, from the EXECUTED amounts: the
+    SOL actually spent (what the chain took) priced at the live SOL
+    price, over the tokens actually received. The mint's CURRENT
+    price is never the cost basis — that is what the coin is worth
+    now, not what was paid, and using it erases the trade's P&L from
+    the first render. 0.0 when the executed cost cannot be computed
+    — the holding is then shown with P&L '—', never guessed. The live
+    SOL price comes from the feed first, else the REST price only
+    when its source is live (never the baked snapshot). `mint` is
+    kept for the caller's signature; it is not priced here."""
+    if not amount_sol or amount_sol <= 0 or not coin_amount \
+            or coin_amount <= 0:
+        return 0.0
+    sol_price = None
+    feed = app.config.get("LIVE_FEED") if app is not None else None
+    if feed is not None:
+        try:
+            tick = feed.snapshot(["SOL"]).get("SOL")
+        except Exception:
+            tick = None
+        if tick is not None and not tick.get("stale"):
+            try:
+                sol_price = float(tick["price"])
+            except (TypeError, ValueError):
+                sol_price = None
+    if sol_price is None:
+        try:
+            price, source, _as_of = _paper_price("SOL")
+        except Exception:
+            price, source = None, None
+        if source == "live" and price:
+            try:
+                sol_price = float(price)
+            except (TypeError, ValueError):
+                sol_price = None
+    if sol_price and sol_price > 0:
+        return amount_sol * sol_price / coin_amount
     return 0.0
 
 
@@ -523,10 +543,14 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     cost basis (on-chain only, e.g. Gate, whose buys were recorded
     as failed) has avg_price None and P&L None — never guessed.
     A holding with no 1h figure in the feed has change_1h None
-    ("—" on the page). When a live feed is passed, any price it
-    rejects against its last good tick is dropped here too, so a
-    bad tick can never inflate a balance on render; with no feed
-    (or no reference yet) every price passes unchanged. In devnet
+    ("—" on the page). When a live feed is passed, held mints are
+    priced from its fresh ticks first — that is the only live price
+    for a devnet mint with no DEX pool (bonding-curve price) — and
+    only mints the feed has no fresh tick for fall back to
+    DexScreener; any price the feed rejects against its last good
+    tick is dropped too, so a bad tick can never inflate a balance
+    on render; with no feed (or no reference yet) every price passes
+    unchanged. In devnet
     mode with `app`, holdings are reconciled with the wallet's
     on-chain token balances first (see _reconciled_real_holdings),
     so coins the chain holds but the DB never recorded appear.
@@ -548,12 +572,37 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     changes_1h: dict = {}
     identities: dict = {}
     if mint_ids:
-        try:
-            for mint, price in fetch_prices_for_mints(
-                    mint_ids).items():
-                price_map[mint] = price
-        except Exception:
-            pass
+        # The live feed first: a fresh validated tick (DexScreener
+        # poll, or the bonding-curve price for a devnet mint with no
+        # DEX pool) is the price — that is how Gate/AuditTest get a
+        # live price here at all. Only mints the feed has no fresh
+        # tick for fall through to DexScreener; a stale feed tick is
+        # never presented as live.
+        feed_ticks = {}
+        if feed is not None:
+            try:
+                feed_ticks = feed.snapshot(mint_ids)
+            except Exception:
+                feed_ticks = {}
+        uncovered = []
+        for mint in mint_ids:
+            tick = feed_ticks.get(mint)
+            if tick is not None and not tick.get("stale"):
+                try:
+                    price = float(tick["price"])
+                except (TypeError, ValueError):
+                    price = None
+                if price is not None and price > 0:
+                    price_map[mint] = price
+                    continue
+            uncovered.append(mint)
+        if uncovered:
+            try:
+                for mint, price in fetch_prices_for_mints(
+                        uncovered).items():
+                    price_map[mint] = price
+            except Exception:
+                pass
         try:
             changes_1h = fetch_mint_1h_changes(mint_ids)
         except Exception:
@@ -571,6 +620,20 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     if feed is not None:
         price_map = {c: p for c, p in price_map.items()
                      if p is None or feed.would_accept(c, p)}
+    # A price of 0 or less is not a price: treat it as missing, so a
+    # dead quote can never value a holding at $0 or invent a loss.
+    clean_map = {}
+    for c, p in price_map.items():
+        if p is None:
+            clean_map[c] = None
+            continue
+        try:
+            p = float(p)
+        except (TypeError, ValueError):
+            clean_map[c] = None
+            continue
+        clean_map[c] = p if p > 0 else None
+    price_map = clean_map
     rows = []
     for symbol, info in COINS.items():
         h = held.get(symbol)
@@ -656,21 +719,36 @@ def _header_balance(app, user):
         text = f"{sol:.4f} SOL" if sol is not None else "unavailable"
         return {"mode": "devnet", "label": "Devnet", "text": text}
     prices = get_prices()
-    price_map = {c: e.get("price", 0.0)
-                 for c, e in prices["prices"].items()}
-    cash = _paper(app, user["id"])
-    holdings = db.execute(
-        "SELECT coin_id, amount FROM paper_holdings WHERE user_id = ?",
-        (user["id"],)).fetchall()
-    value = cash + sum(h["amount"] * price_map.get(h["coin_id"], 0.0)
-                       for h in holdings)
-    return {"mode": "paper", "label": "Paper", "text": f"${value:,.2f}"}
+    price_map = {}
+    for c, e in prices["prices"].items():
+        price = (e or {}).get("price")
+        try:
+            price = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            price = None
+        if price is not None and price > 0:
+            price_map[c] = price
+    # Same totals as the P&L page: a holding with no usable price is
+    # valued at its average cost, never $0.
+    totals = pnl_mod.portfolio_totals(db, user["id"], price_map)
+    return {"mode": "paper", "label": "Paper",
+            "text": f"${totals['total_value_usd']:,.2f}"}
 
 
 def _record_pnl_snapshot(app, user_id: int, price_map: dict) -> None:
-    """One P&L snapshot after a trade. Never breaks the trade itself."""
+    """One P&L snapshot after a trade. Never breaks the trade itself.
+    A price of 0 or less is dropped from the map — missing, never
+    zero — so a snapshot can never value a holding at $0."""
     try:
-        totals = pnl_mod.portfolio_totals(_db(app), user_id, price_map)
+        clean = {}
+        for c, p in (price_map or {}).items():
+            try:
+                p = float(p) if p is not None else None
+            except (TypeError, ValueError):
+                p = None
+            if p is not None and p > 0:
+                clean[c] = p
+        totals = pnl_mod.portfolio_totals(_db(app), user_id, clean)
         wallet = _wallet(app, user_id)
         real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
         pnl_mod.record_snapshot(_db(app), user_id, totals["cash_usd"],
@@ -2285,13 +2363,39 @@ def register_routes(app: Flask) -> None:
                     if wallet and mode == "devnet" else None)
         prices = get_prices()
         coin_rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
-        holdings_value = sum(r["held"] * (r["price"] or 0.0)
-                             for r in coin_rows)
+        # A holding with no live price is valued at cost, like the
+        # P&L page — never $0. (A mint the feed cannot price yet
+        # still has its cost basis.)
+        holdings_value = 0.0
+        for r in coin_rows:
+            if r["price"] is not None:
+                holdings_value += r["held"] * r["price"]
+            elif r["avg_price"] is not None:
+                holdings_value += r["held"] * r["avg_price"]
         # Portfolio header (Kraken-style): total balance + chart from
         # recorded snapshots only — never invented history. Paper
         # totals cash + holdings in USD; real totals the on-chain SOL
         # balance (with a USD approx. when SOL has a price).
-        sol_price = prices["prices"].get("SOL", {}).get("price")
+        # The USD total is only as live as its SOL price: the feed's
+        # fresh SOL tick first, the REST price only when its source
+        # is live — a snapshot SOL price would make the total a
+        # 4-day-old number, so the page shows SOL only until a live
+        # price exists. SOL is the unit of account here, not a listed
+        # coin.
+        sol_price = None
+        feed = app.config.get("LIVE_FEED")
+        if feed is not None:
+            try:
+                tick = feed.snapshot(["SOL"]).get("SOL")
+            except Exception:
+                tick = None
+            if tick is not None and not tick.get("stale"):
+                try:
+                    sol_price = float(tick["price"])
+                except (TypeError, ValueError):
+                    sol_price = None
+        if sol_price is None and prices.get("source") == "live":
+            sol_price = prices["prices"].get("SOL", {}).get("price")
         if chart_range not in pnl_mod.RANGES:
             chart_range = "all"
         if mode == "devnet":
@@ -3121,8 +3225,19 @@ def register_routes(app: Flask) -> None:
                  f"{result.get('reason', 'real execution failed')}."],
                 False, coin_id_resolved, label)
         coin_amount = float(result.get("coin_amount") or 0)
-        avg_price = _real_avg_price(app, coin_id_resolved, amount_sol,
-                                    coin_amount)
+        # Cost basis from the SOL the chain actually took, when the
+        # executor reported it — the amount asked for is not what
+        # landed (slippage + network fee).
+        sol_spent = result.get("sol_spent")
+        try:
+            sol_spent = (float(sol_spent)
+                         if sol_spent is not None else None)
+        except (TypeError, ValueError):
+            sol_spent = None
+        avg_price = _real_avg_price(
+            app, coin_id_resolved,
+            sol_spent if sol_spent is not None else amount_sol,
+            coin_amount)
         if coin_amount > 0:
             _record_real_holding(db, user["id"], coin_id_resolved,
                                  coin_amount, avg_price)
@@ -3800,12 +3915,35 @@ def register_routes(app: Flask) -> None:
             price, source, _as_of = _paper_price(upper)
             return upper, price, source
         if is_valid_address(coin):
+            # The live feed first: a fresh validated tick — the
+            # bonding-curve price for a devnet mint with no DEX pool
+            # (Gate/AuditTest have no trenches-feed price at all).
+            # Only a mint the feed has no fresh tick for falls
+            # through to DexScreener; a stale tick is never live.
+            feed = app.config.get("LIVE_FEED")
+            if feed is not None:
+                try:
+                    tick = feed.snapshot([coin]).get(coin)
+                except Exception:
+                    tick = None
+                if tick is not None and not tick.get("stale"):
+                    try:
+                        price = float(tick["price"])
+                    except (TypeError, ValueError):
+                        price = None
+                    if price is not None and price > 0:
+                        return coin, price, tick.get("source") or "feed"
             try:
                 prices = fetch_prices_for_mints([coin])
             except Exception:
                 prices = {}
             if coin in prices:
-                return coin, float(prices[coin]), "trenches feed"
+                try:
+                    price = float(prices[coin])
+                except (TypeError, ValueError):
+                    price = None
+                if price is not None and price > 0:
+                    return coin, price, "trenches feed"
             return coin, None, "trenches feed"
         return None, None, None
 

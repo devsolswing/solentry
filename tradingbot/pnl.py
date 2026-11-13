@@ -83,6 +83,11 @@ def current_holdings(db: sqlite3.Connection, user_id: int,
             price = float(raw_price) if raw_price is not None else None
         except (TypeError, ValueError):
             price = None
+        # A price of 0 or less is not a price: the holding is valued
+        # at its average cost with pnl None, so a dead quote can
+        # never value it at $0 or invent a loss.
+        if price is not None and price <= 0:
+            price = None
         amount = float(r["amount"])
         avg = float(r["avg_price"])
         if price is not None:
@@ -171,11 +176,15 @@ def change_24h(db: sqlite3.Connection, user_id: int,
                real: bool = False) -> dict | None:
     """Change over the last 24 hours from recorded snapshots only.
 
-    Compares the live `current_total` against the oldest snapshot
-    recorded in the last 24 hours. Returns {"delta": ..., "pct": ...}
-    or None when there is no usable baseline (no snapshot in the
-    window, a zero baseline, or no current total). Never invents a
-    figure — a missing baseline means the page shows "—".
+    Compares the live `current_total` against the snapshot NEAREST
+    to 24 hours ago — not the oldest snapshot in the window, which
+    may be an account-start or thin-data moment and would explode
+    the percentage (the +25,548% home-screen figure came from a
+    ~$2.48 early-window baseline). Returns {"delta": ..., "pct": ...}
+    or None when there is no usable baseline: no snapshot within 3
+    hours of the 24-hour mark, a zero/negative baseline, or no
+    current total. Never invents a figure — a missing baseline means
+    the page shows "—".
     """
     if current_total is None:
         return None
@@ -185,8 +194,26 @@ def change_24h(db: sqlite3.Connection, user_id: int,
         points, _has = chart_points(db, user_id, "1d")
     if not points:
         return None
-    baseline = float(points[0]["total_value_usd"])
-    if baseline == 0:
+    target = (datetime.now(timezone.utc)
+              - timedelta(hours=24)).timestamp()
+    best = None
+    best_gap = None
+    for p in points:
+        ts = _parse_ts(p["created_at"])
+        if ts is None:
+            continue
+        gap = abs(ts - target)
+        if best_gap is None or gap < best_gap:
+            best_gap = gap
+            best = p
+    # The baseline must actually be ~24h old: a nearest point more
+    # than 3 hours from the mark means the account has no real
+    # 24-hour history yet, and any % would be measured over the
+    # wrong window.
+    if best is None or best_gap is None or best_gap > 3 * 3600:
+        return None
+    baseline = float(best["total_value_usd"])
+    if baseline <= 0:
         return None
     delta = float(current_total) - baseline
     return {"delta": delta, "pct": delta / baseline * 100.0}

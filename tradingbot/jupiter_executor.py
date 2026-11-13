@@ -702,9 +702,18 @@ def _execute_jupiter_buy(bot, user_id, symbol, mint, decimals,
         coin_amount = (ata_after - ata_before) / (10 ** decimals)
     except Exception:
         pass
-    return {"status": "executed", "signature": confirmed,
-            "coin_amount": coin_amount,
-            "signing_bot": signing_bot["support_id"]}
+    # Executed SOL spent, from the wallet's own balance delta —
+    # the trade amount plus the network fee. The loop needs the
+    # real spend for cost basis. A failed read leaves the key out.
+    result = {"status": "executed", "signature": confirmed,
+              "coin_amount": coin_amount,
+              "signing_bot": signing_bot["support_id"]}
+    try:
+        balance_after = rpc.get_balance_lamports(wallet_pubkey)
+        result["sol_spent"] = lamports_to_sol(balance - balance_after)
+    except Exception:
+        pass
+    return result
 
 
 def _execute_jupiter_sell(bot, user_id, symbol, mint, decimals,

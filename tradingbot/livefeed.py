@@ -15,6 +15,10 @@ Upstream sources (all free, no key):
   60s. If Kraken's SOL goes stale it becomes the SOL source; if both
   are fresh and disagree by >5% the disagreement is logged, never
   silently resolved.
+- Devnet watchlist bonding curves (devnet only) — Gate/AuditTest have
+  no DEX pool, so DexScreener can never price them; the poller prices
+  them from their curve reserves x the feed's own fresh SOL tick,
+  labelled source "curve". Inert on any other network.
 - CoinGecko REST stays as the fallback behind get_prices() (60s cache,
   rate-limited — that is why it cannot be the live feed).
 
@@ -485,6 +489,49 @@ class LiveFeed:
                             change_24h=entry.get("change_24h_pct"),
                             change_1h=entry.get("change_1h_pct"))
 
+    def _poll_curves(self) -> None:
+        """Price the devnet watchlist mints from their bonding curves.
+
+        DEVNET-TEST-ONLY (remove before mainnet): Gate/AuditTest have
+        no DEX pool, so DexScreener returns no pair for them and can
+        never price them — the bonding curve is the only live price
+        (curve reserves x the feed's own fresh SOL tick). Inert unless
+        NETWORK is devnet (active_mints returns [] otherwise). A
+        missing/stale SOL tick, an unreachable RPC, or an unpriceable
+        mint skips that mint this pass — never a guess. Curve ticks go
+        through the same ingest validation as every other tick (50%
+        jump guard, stale after 30s), labelled source "curve", so the
+        pages, /api/live, /tick, sparklines, mint candles and the
+        top-10 watch all price devnet mints from the one live feed.
+        """
+        if self._config is None:
+            return
+        try:
+            from .devnet_watchlist import active_mints, curve_price_usd
+            from .solana import SolanaRpcClient
+        except Exception:
+            return
+        mints = active_mints(self._config)
+        if not mints:
+            return
+        sol = self.snapshot(["SOL"]).get("SOL")
+        if sol is None or sol["stale"]:
+            return
+        try:
+            client = SolanaRpcClient(self._config.rpc_url)
+        except Exception as exc:
+            log.warning("[live-feed] curve poll: no RPC client: %s", exc)
+            return
+        for mint in mints:
+            try:
+                price, _curve = curve_price_usd(
+                    client, mint, sol["price"])
+            except Exception:
+                continue
+            if price is None:
+                continue
+            self.ingest(mint, price, "curve")
+
     def _dexscreener_loop(self) -> None:
         held_refresh_at = 0.0
         held: set = set()
@@ -497,6 +544,9 @@ class LiveFeed:
                 mints = sorted(self.watched_mints() | held)
                 if mints:
                     self._poll_dexscreener(mints)
+                # Devnet watchlist mints have no DEX pool — price
+                # them from their bonding curves on the same cadence.
+                self._poll_curves()
             except Exception as exc:  # never kill the feed thread
                 log.warning("[live-feed] dexscreener poll error: %s", exc)
             self._stop.wait(DEXSCREENER_POLL_SECONDS)

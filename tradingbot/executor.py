@@ -60,7 +60,7 @@ from .signing_bot import ensure_signing_bot
 from .solana import (RpcError, SolanaRpcClient,
                      base58_encode, build_message,
                      ed25519_publickey_from_seed, is_valid_address,
-                     sign_message, sol_to_lamports)
+                     lamports_to_sol, sign_message, sol_to_lamports)
 
 # Lamports the wallet must keep after a buy so the transaction fee
 # is always covered.
@@ -388,9 +388,22 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
             coin_amount = (ata_after - ata_before) / pumpfun.TOKEN_BASE
         except Exception:
             pass
-        return {"status": "executed", "signature": confirmed,
-                "coin_amount": coin_amount,
-                "signing_bot": signing_bot["support_id"]}
+        # Executed SOL spent, from the wallet's own balance delta:
+        # the trade amount plus the network fee for this transaction.
+        # The loop needs the real spend for cost basis — the amount
+        # asked for is not what the chain took. A balance read that
+        # fails leaves the key out; the caller falls back to the
+        # mark price instead of guessing.
+        result = {"status": "executed", "signature": confirmed,
+                  "coin_amount": coin_amount,
+                  "signing_bot": signing_bot["support_id"]}
+        try:
+            balance_after = rpc.get_balance_lamports(wallet_pubkey)
+            result["sol_spent"] = lamports_to_sol(
+                balance - balance_after)
+        except Exception:
+            pass
+        return result
     finally:
         # Wipe the seed IN PLACE the moment the trade is done —
         # success, refusal, or failure. Overwriting the buffer is
@@ -465,6 +478,10 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
                           // 10000)
         # No trading fee (removed 2026-11-12): the whole sale
         # proceeds go to the seller's wallet.
+        try:
+            sol_before = rpc.get_balance_lamports(wallet_pubkey)
+        except Exception:
+            sol_before = None
         instructions = [pumpfun.build_sell_instruction(
             accts, token_base, min_sol_output)]
         _check_instructions_only_allowed(instructions)
@@ -478,8 +495,21 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
             rpc, signed_b64, signature)
         if confirmed is None:
             return _skip(confirm_error or "transaction not confirmed")
-        return {"status": "executed", "signature": confirmed,
-                "signing_bot": signing_bot["support_id"]}
+        # Executed SOL received, from the wallet's own balance delta
+        # — the on-chain proceeds, not a quoted estimate. The loop
+        # needs the real proceeds for P&L. A balance read that fails
+        # leaves the key out; the caller records the trade without a
+        # USD P&L instead of guessing one.
+        result = {"status": "executed", "signature": confirmed,
+                  "signing_bot": signing_bot["support_id"]}
+        if sol_before is not None:
+            try:
+                sol_after = rpc.get_balance_lamports(wallet_pubkey)
+                result["sol_received"] = lamports_to_sol(
+                    sol_after - sol_before)
+            except Exception:
+                pass
+        return result
     finally:
         # Wipe the seed IN PLACE the moment the trade is done —
         # success, refusal, or failure. Overwriting the buffer is
@@ -501,8 +531,10 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
     "real swap not available in v1". `amount` is SOL for buys and
     whole tokens for sells. `price` (USD) is accepted for the loop's
     protocol and not used for execution. Returns {"status":
-    "executed", "signature", "coin_amount", "signing_bot"} or
-    {"status": "skipped", "reason": ...}.
+    "executed", "signature", "coin_amount", "signing_bot", plus
+    "sol_spent" on buys / "sol_received" on sells — the executed SOL
+    from the wallet's own balance delta, so the loop can record P&L
+    from on-chain amounts} or {"status": "skipped", "reason": ...}.
     There is NO trading fee (removed 2026-11-12): the whole trade
     amount is swapped / paid out, and a trade that is skipped or
     fails never pays anything. Never raises for a refused trade.

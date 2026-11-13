@@ -33,11 +33,25 @@ def paper_cash(db: sqlite3.Connection, user_id: int) -> float:
 
 def holdings_value(db: sqlite3.Connection, user_id: int,
                    prices: dict) -> float:
-    """Current USD value of paper holdings, given {coin: price}."""
+    """Current USD value of paper holdings, given {coin: price}. A
+    holding with no usable price is valued at its average cost,
+    never $0 — a missing price must not shrink the bankroll (and
+    with it every buy size taken from it)."""
     rows = db.execute(
-        "SELECT coin_id, amount FROM paper_holdings WHERE user_id = ?",
-        (user_id,)).fetchall()
-    return sum(r["amount"] * prices.get(r["coin_id"], 0.0) for r in rows)
+        "SELECT coin_id, amount, avg_price FROM paper_holdings "
+        "WHERE user_id = ?", (user_id,)).fetchall()
+    total = 0.0
+    for r in rows:
+        price = prices.get(r["coin_id"])
+        try:
+            price = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            price = None
+        if price is not None and price > 0:
+            total += r["amount"] * price
+        else:
+            total += r["amount"] * float(r["avg_price"])
+    return total
 
 
 def paper_bankroll(db: sqlite3.Connection, user_id: int,

@@ -84,6 +84,43 @@ def _log(db: sqlite3.Connection, user_id: int, kind: str,
     db.commit()
 
 
+def _live_sol_price_usd(feed, prices_data):
+    """The live SOL price in USD, or None.
+
+    The feed's own SOL tick first (fresh only — a stale tick is not
+    live); then prices_data, but only when its source is live — a
+    baked snapshot price is never a live price. None means the loop
+    must not price anything in USD this scan: curve pricing fails
+    closed and executed P&L is left unrecorded rather than computed
+    from a stale number. SOL is the unit of account for pump.fun
+    trades (curve prices, executed SOL in/out), not a traded major
+    here.
+    """
+    if feed is not None:
+        try:
+            tick = feed.snapshot(["SOL"]).get("SOL")
+        except Exception:
+            tick = None
+        if tick is not None and not tick.get("stale"):
+            try:
+                price = float(tick["price"])
+            except (TypeError, ValueError):
+                price = None
+            else:
+                if price and price > 0:
+                    return price
+    if isinstance(prices_data, dict) \
+            and prices_data.get("source") == "live":
+        entry = (prices_data.get("prices") or {}).get("SOL") or {}
+        try:
+            price = float(entry.get("price"))
+        except (TypeError, ValueError):
+            return None
+        if price and price > 0:
+            return price
+    return None
+
+
 def default_real_executor(bot, user_id: int, coin: str, side: str,
                          amount: float, price: float, db, cfg) -> dict:
     """Real executor: the account's dedicated signing bot executes
@@ -105,21 +142,27 @@ def _positions(db: sqlite3.Connection, bot_id: int) -> dict:
 
 
 def _open_position(db: sqlite3.Connection, bot, coin: str, amount: float,
-                   price: float) -> None:
+                   price: float, avg_price: float | None = None) -> None:
     """Record (or merge into) a bot position after a fill.
 
     peak_price tracks the highest price since the position opened (for
     the trailing stop) and orig_amount the size at open (sell-ladder
     rungs are % of it). Merging into an existing position keeps the
-    existing peak and grows the original amount.
+    existing peak and grows the original amount. `price` is the live
+    mark price (peak/last-price tracking always uses the mark);
+    `avg_price` overrides the recorded cost basis — the executed cost
+    when the caller knows it, else the mark price. Cost basis is what
+    sell P&L is measured against, so an executed cost must never be
+    overwritten by a mark.
     """
+    cost = price if avg_price is None else float(avg_price)
     row = db.execute(
         "SELECT amount, avg_price, peak_price, orig_amount, ladder_stage "
         "FROM bot_positions WHERE bot_id = ? AND coin_id = ?",
         (bot["id"], coin)).fetchone()
     if row:
         total = row["amount"] + amount
-        avg = ((row["amount"] * row["avg_price"]) + amount * price) / total
+        avg = ((row["amount"] * row["avg_price"]) + amount * cost) / total
         peak = max(row["peak_price"] if row["peak_price"] is not None
                    else price, price)
         orig = (row["orig_amount"] if row["orig_amount"] is not None
@@ -134,7 +177,7 @@ def _open_position(db: sqlite3.Connection, bot, coin: str, amount: float,
             "avg_price, mode, opened_at, peak_price, orig_amount, "
             "ladder_stage, last_price, last_price_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-            (bot["user_id"], bot["id"], coin, amount, price,
+            (bot["user_id"], bot["id"], coin, amount, cost,
              bot["mode"], _now(), price, amount, price, _now()))
     db.commit()
 
@@ -164,12 +207,15 @@ def _close_position(db: sqlite3.Connection, bot, coin: str,
 def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                    price: float, reason: str, rpc_factory,
                    real_executor, actions: list, amount: float | None = None,
-                   ladder_stage: int | None = None) -> None:
+                   ladder_stage: int | None = None,
+                   feed=None, prices_data: dict | None = None) -> None:
     """Sell a bot's position in `coin` (paper ledger, or the real
     executor). `amount` None means the whole position; otherwise a
     partial sell (sell-ladder rung). `ladder_stage` advances the
-    position's rung counter when given. Logs the outcome either way;
-    never fakes a fill."""
+    position's rung counter when given. `price` is the live mark
+    price: it drives the stop/ladder decision and is the fallback
+    display price — real-mode P&L is NEVER computed from it (see
+    below). Logs the outcome either way; never fakes a fill."""
     pos = _positions(db, bot["id"]).get(coin)
     if not pos:
         return
@@ -223,23 +269,49 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                            db, cfg)
     if result.get("status") == "executed":
         _close_position(db, bot, coin, amount)
-        # Trade ledger (builderBot): the sell's P&L vs the position's
-        # average cost decides win vs loss. USD figures use the price
-        # the loop saw; the on-chain SOL proceeds are in the signed
-        # transaction the activity log records.
+        # Trade ledger (builderBot): P&L from the EXECUTED on-chain
+        # amounts, never from the loop-seen mark price. The executor
+        # reports the SOL actually received (wallet balance delta);
+        # priced at the live SOL price it gives the real proceeds,
+        # and the win/loss is proceeds minus the position's executed
+        # average cost. When the executor did not report proceeds or
+        # no live SOL price exists, the trade is recorded with no USD
+        # P&L at all — an executed sell with unknown P&L is not a win
+        # and not a loss, and must never be counted as one. (This is
+        # the 2026-11-13 Gate/AuditTest lesson: mark-based P&L called
+        # two losing round-trips "5 wins, +$5.78".)
+        sol_received = result.get("sol_received")
+        try:
+            sol_received = (float(sol_received)
+                            if sol_received is not None else None)
+        except (TypeError, ValueError):
+            sol_received = None
+        exec_price = None
+        pnl_usd = None
+        if sol_received is not None and sol_received > 0 and amount > 0:
+            sol_price = _live_sol_price_usd(feed, prices_data)
+            if sol_price is not None:
+                proceeds_usd = sol_received * sol_price
+                exec_price = proceeds_usd / amount
+                pnl_usd = (proceeds_usd
+                           - amount * float(pos["avg_price"]))
         record_trade(db, bot["user_id"], bot["id"], coin, "sell", amount,
-                     price, amount * price,
-                     pnl_usd=amount * price
-                     - amount * float(pos["avg_price"]),
+                     exec_price if exec_price is not None else price,
+                     (exec_price * amount if exec_price is not None
+                      else amount * price),
+                     pnl_usd=pnl_usd,
                      exit_reason=reason, mode="real", now=_now())
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
                        "WHERE bot_id = ? AND coin_id = ?",
                        (ladder_stage, bot["id"], coin))
             db.commit()
+        sold_line = (f"Silent bot '{bot['name']}' sold {amount:.4f} "
+                     f"{coin} ({reason})")
+        if sol_received is not None:
+            sold_line += f" for {sol_received:.4f} SOL"
         _log(db, bot["user_id"], "silent_sell",
-             f"Silent bot '{bot['name']}' sold {amount:.4f} {coin} "
-             f"({reason}). Signature: "
+             sold_line + f". Signature: "
              f"{str(result.get('signature', ''))[:12]}... "
              f"Signing bot: {result.get('signing_bot', '')}.", bot["mode"])
         actions.append({"action": "sell", "coin": coin, "amount": amount,
@@ -255,13 +327,16 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
 def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
               price: float, prices_usd: dict, rpc_factory,
               real_executor, actions: list,
-              signals: dict | None = None) -> None:
+              signals: dict | None = None,
+              feed=None, prices_data: dict | None = None) -> None:
     """Buy `coin` for a bot within its limits, or skip with a reason.
 
     `signals` is the buy-time signal snapshot from the feed entry
     (m5 gain %, 5-minute volume, buys/sells, regime) — recorded on
     the paper trade so the losing-buy analysis can show how the coin
-    got bought. None for v1 bots and manual buys.
+    got bought. None for v1 bots and manual buys. `price` is the live
+    mark price; a real position's cost basis is the EXECUTED spend
+    when the executor reports it (see below), never the mark.
     """
     if bot["mode"] == "paper":
         bankroll = paper_bankroll(db, bot["user_id"], prices_usd)
@@ -332,11 +407,35 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     if result.get("status") == "executed":
         coin_amount = float(result.get("coin_amount") or 0)
         if coin_amount > 0:
-            _open_position(db, bot, coin, coin_amount, price)
+            # Cost basis from the EXECUTED spend: the SOL the chain
+            # actually took (wallet balance delta, including the
+            # network fee) priced at the live SOL price, over the
+            # tokens actually received. The loop-seen mark price is
+            # only the fallback when the executor did not report the
+            # spend or no live SOL price exists — and then the
+            # position's sell P&L is still measured against executed
+            # proceeds, so a mark cost can only understate a win, not
+            # invent one.
+            exec_avg = None
+            sol_spent = result.get("sol_spent")
+            try:
+                sol_spent = (float(sol_spent)
+                             if sol_spent is not None else None)
+            except (TypeError, ValueError):
+                sol_spent = None
+            if sol_spent is not None and sol_spent > 0:
+                sol_price = _live_sol_price_usd(feed, prices_data)
+                if sol_price is not None:
+                    exec_avg = sol_spent * sol_price / coin_amount
+            _open_position(db, bot, coin, coin_amount, price,
+                           avg_price=exec_avg)
             # Trade ledger (builderBot): every fill gets its own
-            # 8-digit trade ID.
+            # 8-digit trade ID. The recorded price is the executed
+            # cost when known, else the mark price.
+            buy_price = exec_avg if exec_avg is not None else price
             record_trade(db, bot["user_id"], bot["id"], coin, "buy",
-                         coin_amount, price, coin_amount * price,
+                         coin_amount, buy_price,
+                         coin_amount * buy_price,
                          mode="real", now=_now())
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {coin} for "
@@ -430,13 +529,16 @@ def _lte(a: float, b: float) -> bool:
 
 def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                         prices_data: dict, trenches_data: dict | None,
-                        rpc_factory, real_executor) -> list:
+                        rpc_factory, real_executor,
+                        feed=None) -> list:
     """One evaluation pass for a bot with a custom rule set.
 
     Fail-closed: a feed error, missing price data, or an unusable rule
     means no trades this scan. The bot's own limits (buy size %,
     stop loss %, max open trades, balance) always apply on top of
-    the rules — the rules never widen them.
+    the rules — the rules never widen them. `feed` is the live feed:
+    it prices executed P&L (see _sell_position/_buy_coin) and the
+    curve SOL price, so the loop and the pages read the same source.
     """
     actions: list = []
     now_ts = datetime.now(timezone.utc).timestamp()
@@ -484,6 +586,32 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             return None
         return entry.get("change_24h")
 
+    def _bankroll_prices() -> dict:
+        """Prices for the paper bankroll: the REST list plus the
+        scan's mint prices, so a paper mint holding is valued at its
+        live mark instead of $0. A price of 0 or less is dropped —
+        missing, never zero (holdings_value then falls back to cost).
+        """
+        out = {}
+        for coin, entry in (prices_data.get("prices") or {}).items():
+            price = (entry or {}).get("price")
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+            if price is not None and price > 0:
+                out[coin] = price
+        if price_map:
+            for mint, entry in price_map.items():
+                price = (entry or {}).get("price_usd")
+                try:
+                    price = float(price) if price is not None else None
+                except (TypeError, ValueError):
+                    price = None
+                if price is not None and price > 0:
+                    out[mint] = price
+        return out
+
     stop_loss_pct = float(bot["stop_loss_pct"])
     trailing_pct = float(rules["trailing_stop_pct"])
     ladder = rules["sell_ladder"]
@@ -515,7 +643,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                                  now_ts)
             if reason:
                 _sell_position(db, cfg, bot, coin, price, reason,
-                               rpc_factory, real_executor, actions)
+                               rpc_factory, real_executor, actions,
+                               feed=feed, prices_data=prices_data)
                 continue
             db.execute("UPDATE bot_positions SET last_price = ?, "
                        "last_price_at = ? WHERE bot_id = ? AND coin_id = ?",
@@ -561,7 +690,9 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                             sell_reason += " — proceeds in SOL"
                         _sell_position(db, cfg, bot, coin, price,
                                        sell_reason, rpc_factory,
-                                       real_executor, actions)
+                                       real_executor, actions,
+                                       feed=feed,
+                                       prices_data=prices_data)
                         continue
         avg_price = float(pos["avg_price"])
         peak = pos["peak_price"]
@@ -575,12 +706,14 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         stop_price = avg_price * (1 - stop_loss_pct / 100.0)
         if _lte(price, stop_price):
             _sell_position(db, cfg, bot, coin, price, "stop_loss",
-                           rpc_factory, real_executor, actions)
+                           rpc_factory, real_executor, actions,
+                           feed=feed, prices_data=prices_data)
             continue
         trail_price = peak * (1 - trailing_pct / 100.0)
         if _lte(price, trail_price):
             _sell_position(db, cfg, bot, coin, price, "trailing stop",
-                           rpc_factory, real_executor, actions)
+                           rpc_factory, real_executor, actions,
+                           feed=feed, prices_data=prices_data)
             continue
         stage = int(pos["ladder_stage"] or 0)
         if kind == "scanner" and rules.get("trending_ladder"):
@@ -610,7 +743,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     f"sell ladder ({regime}): {sell_frac * 100:.0f}% at "
                     f"+{target:.0f}% profit",
                     rpc_factory, real_executor, actions,
-                    amount=orig * sell_frac, ladder_stage=stage + 1)
+                    amount=orig * sell_frac, ladder_stage=stage + 1,
+                    feed=feed, prices_data=prices_data)
         elif stage < len(ladder):
             rung = ladder[stage]
             target = avg_price * (1 + float(rung["profit_pct"]) / 100.0)
@@ -624,7 +758,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     f"sell ladder: {rung['pct_of_position']:.0f}% at "
                     f"+{rung['profit_pct']:.0f}% profit",
                     rpc_factory, real_executor, actions, amount=amount,
-                    ladder_stage=stage + 1)
+                    ladder_stage=stage + 1,
+                    feed=feed, prices_data=prices_data)
 
     # 2. Buys: strongest qualifying gainer, at most max_new per scan.
     bought = 0
@@ -722,10 +857,10 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 "regime": detect_regime(entry, rules.get("regime")),
             }
             _buy_coin(db, cfg, bot, entry["mint"], entry["price_usd"],
-                      {c: e.get("price", 0.0)
-                       for c, e in prices_data["prices"].items()},
+                      _bankroll_prices(),
                       rpc_factory, real_executor, actions,
-                      signals=signals)
+                      signals=signals, feed=feed,
+                      prices_data=prices_data)
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
     else:
@@ -748,9 +883,9 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 break
             before = len(actions)
             _buy_coin(db, cfg, bot, coin, _price_for(coin),
-                      {c: e.get("price", 0.0)
-                       for c, e in prices_data["prices"].items()},
-                      rpc_factory, real_executor, actions)
+                      _bankroll_prices(),
+                      rpc_factory, real_executor, actions,
+                      feed=feed, prices_data=prices_data)
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
     return actions
@@ -758,12 +893,14 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
 
 def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
                   prices_data: dict, rpc_factory,
-                  real_executor, trenches_data=None) -> list:
+                  real_executor, trenches_data=None,
+                  feed=None) -> list:
     """One evaluation pass for one silent bot. Returns its actions.
 
     Bots with a stored rule set go through the rules engine; bots
     without one keep the standard v1 signals; a bot whose stored
-    rules are broken makes NO trades at all.
+    rules are broken makes NO trades at all. `feed` is the live feed,
+    passed to the rules engine so executed P&L is priced live.
     """
     rules, rules_error = load_rules(bot)
     if rules_error is not None:
@@ -773,7 +910,8 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
         return [{"action": "skip", "coin": "", "reason": "invalid rules"}]
     if rules is not None:
         return _evaluate_rules_bot(db, cfg, bot, rules, prices_data,
-                                   trenches_data, rpc_factory, real_executor)
+                                   trenches_data, rpc_factory, real_executor,
+                                   feed=feed)
     actions: list = []
     prices = prices_data["prices"]
     prices_usd = {c: e.get("price", 0.0) for c, e in prices.items()}
@@ -795,13 +933,15 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
         stop_price = float(pos["avg_price"]) * (1 - stop_loss_pct / 100.0)
         if _lte(price, stop_price):
             _sell_position(db, cfg, bot, coin, price, "stop_loss",
-                           rpc_factory, real_executor, actions)
+                           rpc_factory, real_executor, actions,
+                           prices_data=prices_data)
             continue
         side, _detail = signal_for_coin(
             coin, entry.get("change_24h"), bot["strategy"])
         if side == "sell":
             _sell_position(db, cfg, bot, coin, price, "sell signal",
-                           rpc_factory, real_executor, actions)
+                           rpc_factory, real_executor, actions,
+                           prices_data=prices_data)
 
     # 2. Buy signals on coins not already held.
     positions = _positions(db, bot["id"])
@@ -823,15 +963,48 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
                             "reason": "max open trades reached"})
             continue
         _buy_coin(db, cfg, bot, coin, entry["price"], prices_usd,
-                  rpc_factory, real_executor, actions)
+                  rpc_factory, real_executor, actions,
+                  prices_data=prices_data)
     return actions
 
 
-def _held_price(price_fetcher, coin: str):
-    """Current USD price for one held mint, from the trenches feed,
-    or None when the feed cannot serve it. The watcher only needs a
-    price when a top-10 trigger has already fired — a missing price
-    means the sell waits for the next check, never a guess."""
+def _held_price(price_fetcher, coin: str, feed=None, cfg=None,
+                rpc_factory=None):
+    """Current USD price for one held mint, or None when no source
+    can serve it. The live feed first (fresh ticks only — now
+    including devnet curve prices); a devnet watchlist mint with no
+    feed tick is priced straight from its bonding curve; the
+    trenches feed last. The watcher only needs a price when a top-10
+    trigger has already fired — a missing price means the sell waits
+    for the next check, never a guess."""
+    if feed is not None:
+        try:
+            tick = feed.snapshot([coin]).get(coin)
+        except Exception:
+            tick = None
+        if tick is not None and not tick.get("stale"):
+            try:
+                price = float(tick["price"])
+            except (TypeError, ValueError):
+                price = None
+            else:
+                if price and price > 0:
+                    return price
+    # Devnet watchlist mints have no DexScreener price — price from
+    # the bonding curve when the feed has no tick for them.
+    if cfg is not None and rpc_factory is not None:
+        try:
+            from .devnet_watchlist import active_mints, curve_price_usd
+            if coin in active_mints(cfg):
+                sol_price = _live_sol_price_usd(feed, None)
+                if sol_price is not None:
+                    client = rpc_factory(cfg.rpc_url)
+                    price, _curve = curve_price_usd(
+                        client, coin, sol_price)
+                    if price:
+                        return float(price)
+        except Exception:
+            pass
     try:
         prices = price_fetcher([coin])
     except Exception:
@@ -841,9 +1014,10 @@ def _held_price(price_fetcher, coin: str):
     entry = prices.get(coin) or {}
     price = entry.get("price_usd")
     try:
-        return float(price) if price is not None else None
+        price = float(price) if price is not None else None
     except (TypeError, ValueError):
         return None
+    return price if price and price > 0 else None
 
 
 def _default_price_fetcher(mints):
@@ -853,7 +1027,8 @@ def _default_price_fetcher(mints):
 
 
 def top10_watch_once(db: sqlite3.Connection, cfg: Config,
-                     rpc_factory, price_fetcher=None) -> list:
+                     rpc_factory, price_fetcher=None,
+                     feed=None) -> list:
     """One pass of the top-10 concentration watch, every 15 seconds
     per held coin (the per-coin cadence is gated on
     scanner_top10.last_checked_at, so a pass that runs early skips
@@ -922,7 +1097,8 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
                 db, bot["id"], coin, total, float(top10["drop_pct"]),
                 _now())
             if fired:
-                price = _held_price(price_fetcher, coin)
+                price = _held_price(price_fetcher, coin, feed=feed,
+                                    cfg=cfg, rpc_factory=rpc_factory)
                 if price is None:
                     _log(db, bot["user_id"], "silent_skip",
                          f"Silent bot '{bot['name']}': {reason} for "
@@ -933,7 +1109,8 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
                 if bot["mode"] == "real":
                     sell_reason += " — proceeds in SOL"
                 _sell_position(db, cfg, bot, coin, price, sell_reason,
-                               rpc_factory, default_real_executor, actions)
+                               rpc_factory, default_real_executor, actions,
+                               feed=feed)
                 continue
             # 2. The concentration triggers (21% / slow climb).
             action, reason = check_top10_concentration(
@@ -942,7 +1119,8 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
                 float(top10.get("slow_climb_sell_pct", 50.0)), _now())
             if action is None:
                 continue
-            price = _held_price(price_fetcher, coin)
+            price = _held_price(price_fetcher, coin, feed=feed,
+                                cfg=cfg, rpc_factory=rpc_factory)
             if price is None:
                 _log(db, bot["user_id"], "silent_skip",
                      f"Silent bot '{bot['name']}': {reason} for {coin} "
@@ -954,14 +1132,15 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
                 sell_reason += " — proceeds in SOL"
             if action == "sell_all":
                 _sell_position(db, cfg, bot, coin, price, sell_reason,
-                               rpc_factory, default_real_executor, actions)
+                               rpc_factory, default_real_executor, actions,
+                               feed=feed)
             else:
                 amount = (float(pos["amount"])
                           * float(top10.get("slow_climb_sell_pct", 50.0))
                           / 100.0)
                 _sell_position(db, cfg, bot, coin, price, sell_reason,
                                rpc_factory, default_real_executor, actions,
-                               amount=amount)
+                               amount=amount, feed=feed)
     return actions
 
 
@@ -970,16 +1149,19 @@ _WATCH_LOCK = threading.Lock()
 
 
 def top10_watch_loop(db_path: str, cfg: Config,
-                     rpc_factory=None, price_fetcher=None) -> None:
+                     rpc_factory=None, price_fetcher=None,
+                     feed=None) -> None:
     """The 15-second watch, forever: one pass, then sleep 15 seconds.
     Opens a fresh DB connection per pass. A failed pass is logged and
-    the next one still runs."""
+    the next one still runs. `feed` is the live feed, so a fired
+    trigger prices from fresh ticks (including devnet curve prices)
+    instead of DexScreener alone."""
     rpc_factory = rpc_factory or SolanaRpcClient
     while True:
         db = init_db(db_path)
         try:
             top10_watch_once(db, cfg, rpc_factory,
-                             price_fetcher=price_fetcher)
+                             price_fetcher=price_fetcher, feed=feed)
         except Exception as exc:
             print(f"[top10-watch] pass failed: {exc}", flush=True)
         finally:
@@ -1027,8 +1209,9 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
         # devnet — see tradingbot/devnet_watchlist.py. Enriched
         # BEFORE the feed sanitizer so a curve price that jumps
         # absurdly in one scan is dropped like any other bad tick.
-        sol_price_usd = ((prices_data.get("prices") or {})
-                         .get("SOL", {}) or {}).get("price")
+        # The SOL price comes from the live feed first — a snapshot
+        # SOL price must never price a curve trade.
+        sol_price_usd = _live_sol_price_usd(feed, prices_data)
         trenches_data = enrich_scan(trenches_data, cfg, rpc_factory,
                                     sol_price_usd)
     if feed is not None:
@@ -1066,7 +1249,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
         try:
             actions = _evaluate_bot(db, cfg, bot, prices_data, rpc_factory,
                                     real_executor,
-                                    trenches_data=trenches_data)
+                                    trenches_data=trenches_data, feed=feed)
             outcomes.append({"bot_id": bot["id"], "bot_name": bot["name"],
                              "user_id": bot["user_id"], "mode": bot["mode"],
                              "actions": actions, "error": None})
@@ -1100,17 +1283,31 @@ def _record_snapshots(db: sqlite3.Connection, cfg: Config,
     """One P&L snapshot per user evaluated this iteration.
 
     Prices merge the CoinGecko list with the trenches feed so held
-    memecoin mints are valued at the price the loop just saw. The
-    on-chain SOL balance is recorded when the RPC answers, else NULL
-    (shown as "unavailable"). A snapshot failure is logged to stdout
-    and never breaks the loop.
+    memecoin mints are valued at the price the loop just saw. A price
+    of 0 or less is dropped from the map — missing, never zero — so a
+    snapshot can never value a holding at $0 and poison the 24h
+    baseline. The on-chain SOL balance is recorded when the RPC
+    answers, else NULL (shown as "unavailable"). A snapshot failure
+    is logged to stdout and never breaks the loop.
     """
-    merged = {c: e.get("price", 0.0)
-              for c, e in prices_data.get("prices", {}).items()}
+    merged = {}
+    for c, e in prices_data.get("prices", {}).items():
+        price = (e or {}).get("price")
+        try:
+            price = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            price = None
+        if price is not None and price > 0:
+            merged[c] = price
     if trenches_data:
         for mint, entry in (trenches_data.get("prices") or {}).items():
-            if entry.get("price_usd") is not None:
-                merged[mint] = entry["price_usd"]
+            price = (entry or {}).get("price_usd")
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+            if price is not None and price > 0:
+                merged[mint] = price
     for user_id in sorted(user_ids):
         try:
             totals = portfolio_totals(db, user_id, merged)
@@ -1162,7 +1359,8 @@ def loop_forever(db_path: str, cfg: Config, interval: int | None = None,
                     target=top10_watch_loop,
                     args=(db_path, cfg),
                     kwargs={"rpc_factory": rpc_factory,
-                            "price_fetcher": watch_price_fetcher},
+                            "price_fetcher": watch_price_fetcher,
+                            "feed": feed},
                     daemon=True, name="top10-watch").start()
                 print("[top10-watch] background watch started "
                       "(every 15s)", flush=True)
