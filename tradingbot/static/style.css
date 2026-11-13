@@ -379,39 +379,6 @@ body.app-shell.fit-screen .wrap { padding: 8px 12px 84px; }
 .send-receive-row { margin: 0 0 8px; }
 .send-receive-btn { flex: 1; text-align: center; padding: 10px; font-size: 15px; }
 .home-screen .section-title { margin: 8px 0 6px; }
-
-/* Trading fees (home page): a closed <details> is one line, so the
-   home page still fits on one screen; open, it lists the user's
-   fee payments to the app. */
-.fees-card { margin: 8px 0; padding: 10px 12px; text-align: left; }
-.fees-card summary { cursor: pointer; }
-.fees-card .addr { display: inline; padding: 2px 4px; font-size: 11px; border-width: 1px; }
-.fees-list { list-style: none; margin: 8px 0 0; padding: 0; }
-.fees-list li { border-top: 1px solid rgba(255, 179, 0, .35); padding: 6px 0; font-size: 14px; }
-.fees-list .fees-amount { float: right; font-weight: bold; }
-/* Fee-balance switcher (James, 2026-11-11): a dropdown inside the
-   fees card. The closed control shows the current balance + a
-   chevron; pressing it drops down the 2 options (SolEntry fee
-   balance, Pump.fun fee balance). Selecting one switches the
-   whole fees view — the headline and every row — to that
-   balance. Red/gold, matching the theme. The menu opens in-flow
-   (it pushes the burned line down) so it can never be clipped
-   by the card, and slides down instead of snapping open. */
-.fees-switcher { margin: 8px 0 0; }
-.fees-switcher-btn { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 9px 12px; background: #2a0f08; color: #ffd700; border: 2px solid #ffb300; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; }
-.fees-switcher-btn:hover, .fees-switcher-btn:focus { background: #3a1409; }
-.fees-switcher-chevron { display: inline-block; font-size: 16px; line-height: 1; transition: transform .25s ease; }
-.fees-switcher-btn[aria-expanded="true"] .fees-switcher-chevron { transform: rotate(180deg); }
-.fees-switcher-menu { list-style: none; margin: 6px 0 0; padding: 4px; background: #160b08; border: 2px solid #ffb300; border-radius: 10px; max-height: 0; opacity: 0; overflow: hidden; transition: max-height .25s ease, opacity .25s ease; }
-.fees-switcher-menu.open { max-height: 120px; opacity: 1; }
-.fees-switcher-option { display: block; width: 100%; text-align: left; padding: 9px 10px; background: none; color: #e8ecf1; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; }
-.fees-switcher-option:hover, .fees-switcher-option:focus { background: #2a0f08; color: #ffd700; }
-.fees-switcher-option[aria-selected="true"] { color: #ffd700; font-weight: 700; }
-.fees-switcher-option[aria-selected="true"]::after { content: " ✓"; }
-/* Fee view: the card's data-fee-view decides which balance the
-   headline and each row show — the other balance's spans hide. */
-#fees[data-fee-view="solentry"] [data-fee-view-pumpfun] { display: none; }
-#fees[data-fee-view="pumpfun"] [data-fee-view-solentry] { display: none; }
 .holdings-row { font-size: 16px; padding: 7px 10px; }
 .holdings-row .coin-ico { flex: 0 0 32px; width: 32px; height: 32px; font-size: 14px; }
 .holdings-row .coin-img { flex: 0 0 32px; width: 32px; height: 32px; }
@@ -705,10 +672,9 @@ body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-directio
 .holdings-amount { display: block; font-size: 12px; margin-top: 1px; }
 .holdings-value-live { display: none; }
 .holdings-1h { flex: 0 0 auto; text-align: right; font-weight: 800; font-size: 14px; }
-/* Below the photo content: Logs link, support ID line, fees + Trenches cards. */
+/* Below the photo content: Logs link, support ID line, Trenches card. */
 .home-logs-link { align-self: flex-start; margin: 6px 0 2px; }
 .home-screen > p.muted.small { margin: 2px 0; }
-.fees-card { margin: 6px 0; padding: 8px 12px; }
 .trenches-card { margin: 6px 0 0; padding: 10px 14px; }
 /* Very short screens: shrink the decorative logo so the page still fits one screen. */
 @media (max-height: 740px) {
