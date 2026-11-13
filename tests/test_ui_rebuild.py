@@ -6,8 +6,8 @@ Rules under test:
 - The home page (wallet) is the fox layout: fox logo, TOTAL
   PORTFOLIO VALUE, 24h change, chart range selector, BUY / SELL
   buttons that open the buy/sell flow, HOLDINGS list (coins held
-  only, in a fixed-height panel that scrolls internally), a Trenches
-  card, a Logs button, and a four-button bottom nav (Home / Bots /
+  only; the page scrolls, owner 2026-11-12), a Trenches card, a
+  Logs button, and a four-button bottom nav (Home / Bots /
   Wallet / Settings) with the mode switch in the topbar.
 - The bots page is the fox layout: SOL balance + USD with an eye
   (hide/show), fox logo, + create, - delete (server-rendered
@@ -18,8 +18,9 @@ Rules under test:
 - The trenches page is a NEW page with its own black/gold theme and
   the fox-gold logo; it lists the top 10 by 1h gain, each row opening
   the same Buy / Sell / Sell all popup.
-- Every page fits one screen: the page itself never scrolls; lists
-  scroll only inside fixed-height panels.
+- Every page but home fits one screen: home scrolls (owner,
+  2026-11-12); the other pages never scroll, lists scroll only
+  inside fixed-height panels.
 No SOL moves in these tests; real execution is a recording mock.
 """
 
@@ -235,11 +236,12 @@ class TestHomePage(UiBase):
         self.assertIn("fox-red-480.jpg", html)
         self.assertNotIn("data:image/jpeg;base64,", html)
         self.assertIn("SolEntry fox logo", html)
-        # No HOLDINGS heading and no "Paper balance" summary line
-        # any more (2026-11-11 compact): the list follows the
-        # balance box immediately, and the paper cash is the
-        # portfolio total in the balance box.
-        self.assertNotIn("HOLDINGS", html)
+        # The HOLDINGS heading is back (rebuild from scratch,
+        # 2026-11-11 — the photo has one) and no "Paper balance"
+        # summary line any more: the list follows the balance box
+        # with only the heading between them, and the paper cash is
+        # the portfolio total in the balance box.
+        self.assertIn("HOLDINGS", html)
         self.assertIn("holdings-panel", html)
         self.assertIn("Support ID", html)
         self.assertIn("$100.00 CAD", html)
@@ -305,14 +307,23 @@ class TestHomePage(UiBase):
             resp = self.client.get(path)
             self.assertEqual(resp.status_code, 200, path)
 
-    def test_home_is_one_screen(self):
+    def test_home_is_scrollable(self):
+        # Page 3 scrolls (owner, 2026-11-12): the one-screen fit
+        # is gone — no fit-screen shell on home, the wrap scrolls,
+        # and the holdings panel never scrolls internally. The
+        # fit-screen shell still exists for the other pages
+        # (Bots, Wallet details, Trenches).
         self._choose_mode("paper")
         html = self._html("/wallet")
-        self.assertIn("fit-screen", html)
+        self.assertNotIn("fit-screen", html)
         css = open("tradingbot/static/style.css").read()
         self.assertIn("body.app-shell.fit-screen .wrap", css)
-        self.assertIn("overflow: hidden", css)
-        self.assertIn(".holdings-panel", css)
+        self.assertIn(
+            "body.app-shell .wrap { flex: 1 1 auto; "
+            "overflow-y: auto;", css)
+        self.assertIn(
+            ".holdings-panel { max-height: none; border: none; "
+            "background: transparent; padding: 0; }", css)
 
     def test_home_chart_is_back_with_duration_options(self):
         # Candlestick build (2026-11-10, supersedes the home lift's
@@ -365,9 +376,9 @@ class TestHomePage(UiBase):
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
-        # No HOLDINGS heading any more (2026-11-11 compact): the
-        # list follows the balance box immediately.
-        self.assertNotIn("HOLDINGS", html)
+        # The HOLDINGS heading is back (rebuild from scratch,
+        # 2026-11-11 — the photo has one).
+        self.assertIn("HOLDINGS", html)
         self.assertIn("Solana", html)
         self.assertIn("SOL", html)
         self.assertIn("holdings-row", html)

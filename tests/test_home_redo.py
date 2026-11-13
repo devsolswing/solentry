@@ -7,7 +7,8 @@ Rules under test:
   amount held, value, and the 1-hour % from the feed ("—" when the
   feed has no 1h figure, never guessed). The action buttons sit in
   one row right under the fox logo, above the holdings list, and the
-  page still fits one phone screen (only the holdings list scrolls).
+  page scrolls now (owner, 2026-11-12 — the one-screen fit is
+  gone; the holdings list grows with the page).
   Home has Send and Receive buttons; Receive opens a window with
   the app wallet address + copy. The portfolio chart moved off the
   home page to make room for the half-screen list; the total and
@@ -155,14 +156,13 @@ class TestHomeHasNoX(HomeRedoBase):
 
 class TestHoldingsHalfPanel(HomeRedoBase):
     def test_holdings_panel_fills_remaining_space(self):
-        # Compact build (2026-11-11, supersedes the 50dvh
-        # half-screen panel): the holdings panel takes the
-        # remaining space, borderless, and scrolls internally
-        # only if the list genuinely overflows a small screen.
+        # Scrollable home (owner, 2026-11-12, supersedes the
+        # compact build's internal scroll): the page scrolls, so
+        # the holdings panel grows with the list, borderless, and
+        # never scrolls internally.
         css = open("tradingbot/static/style.css").read()
         self.assertIn(
-            ".holdings-panel { flex: 1 1 auto; min-height: 0; "
-            "max-height: none; overflow-y: auto; border: none; "
+            ".holdings-panel { max-height: none; border: none; "
             "background: transparent; padding: 0; }", css)
         self.assertNotIn("flex: 0 1 50dvh", css)
         self.assertNotIn("max-height: 50dvh", css)
@@ -172,10 +172,10 @@ class TestHoldingsHalfPanel(HomeRedoBase):
         self._buy_sol()
         html = self._html("/wallet")
         self.assertIn("holdings-row", html)
-        # Compact build (2026-11-11): no HOLDINGS heading, no
-        # "All coins" link, no holdings-summary line — the list
-        # follows the balance box immediately.
-        self.assertNotIn("HOLDINGS", html)
+        # Rebuild from scratch (2026-11-11): the HOLDINGS heading
+        # is back — the photo has one — but no "All coins" link,
+        # no holdings-summary line.
+        self.assertIn("HOLDINGS", html)
         self.assertNotIn("All coins", html)
         self.assertNotIn("holdings-summary", html)
         self.assertIn("Solana", html)
@@ -216,8 +216,8 @@ class TestHoldingsHalfPanel(HomeRedoBase):
     def test_home_ui_enlarged_css(self):
         css = open("tradingbot/static/style.css").read()
         # Bigger portfolio total and logo than the pre-redo sizes
-        # (34px total, 118px logo), sized in dvh so a short phone
-        # still fits one screen.
+        # (34px total, 118px logo), sized in dvh so they scale
+        # with a short phone.
         self.assertIn("clamp(32px, 5dvh, 44px)", css)
         self.assertIn("clamp(56px, 10dvh, 96px)", css)
 

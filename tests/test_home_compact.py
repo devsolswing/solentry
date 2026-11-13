@@ -1,6 +1,8 @@
-"""Home compact (2026-11-11, owner order from his Page 3 screenshot).
+"""Home compact (2026-11-11, owner order from his Page 3 screenshot;
+scrolls, 2026-11-12 — the one-screen fit is gone, the layout is
+unchanged).
 
-The whole of Page 3 fits one screen:
+Page 3 scrolls now:
 - Everything lifted up (tighter top spacing).
 - The balance box is about a third smaller, but the chart keeps
   its 100px height.
@@ -40,18 +42,19 @@ def _rule(css, selector):
 
 
 class TestHomeCompactLayout(HomeMockupBase):
-    def test_nothing_under_the_chart(self):
+    def test_holdings_heading_follows_the_chart(self):
         self._choose_mode("paper")
         html = self._html("/wallet")
-        self.assertNotIn("HOLDINGS", html)
+        self.assertIn("HOLDINGS", html)
         self.assertNotIn("All coins", html)
         self.assertNotIn("holdings-summary", html)
-        # The list follows the balance box immediately: between
-        # the chart and the holdings panel there is no heading
-        # and no writing of any kind.
+        # Rebuild from scratch (2026-11-11): the photo HAS a gold
+        # HOLDINGS heading, so it is back — the ONLY thing between
+        # the chart and the holdings panel is that heading.
         between = html.split('id="home-chart"')[1].split(
             "holdings-panel")[0]
-        self.assertNotIn("section-title", between)
+        self.assertIn("section-title", between)
+        self.assertIn("HOLDINGS", between)
         self.assertNotIn("holdings-summary", between)
         self.assertLess(html.index('id="home-chart"'),
                         html.index("holdings-panel"))

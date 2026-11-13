@@ -5,10 +5,13 @@ holdings:
 - Everything lifted up: tighter top spacing, fox logo + wordmark in
   one horizontal row, action buttons in a single row right under
   the logo, near the top of the page and above the holdings list.
-- Holdings take HALF the screen (50dvh, scrolling internally) and
-  each held coin is a NORMAL-SIZE coin button: real name + ticker,
-  amount held, value, and the 1-hour % from the feed. A coin with
-  no 1h figure shows "—" — never guessed.
+- Holdings follow the balance box immediately — no headings, no
+  summary lines, no borders — and each held coin is a NORMAL-SIZE
+  coin button: real name + ticker, amount held, value, and the
+  1-hour % from the feed. A coin with no 1h figure shows "—" —
+  never guessed. The page scrolls now (owner, 2026-11-12), so the
+  holdings panel grows with the list and never scrolls internally
+  (supersedes the compact build's internal scroll).
 - 1h data: CoinGecko simple/price with include_1hr_change for the
   known coins; DexScreener best-pair priceChange.h1 for pump.fun
   mints (new fetch_mint_1h_changes, mirroring
@@ -18,9 +21,10 @@ holdings:
   total and the 24h change stay. The candlestick build (2026-11-10)
   brings a COMPACT chart back into the balance card — candlestick
   view with duration options and the candle/line toggle, candles
-  from recorded snapshots only, never faked — while the holdings
-  list stays half-screen. The old "Full chart ›" link to the P&L
-  page is gone with that page (Logs build, 2026-11-10). The main
+  from recorded snapshots only, never faked — while the balance box
+  is about a third smaller (compact build, 2026-11-11) and the
+  chart keeps its 100px height. The old "Full chart ›" link to the
+  P&L page is gone with that page (Logs build, 2026-11-10). The main
   screen still has NO back-button X.
 No SOL moves in these tests; sends are never confirmed.
 """
@@ -129,7 +133,7 @@ class TestHomeLiftLayout(HomeLiftBase):
         self.assertLess(html.index("home-actions-row"),
                         html.index("home-total"))
         self.assertLess(html.index("home-actions-row"),
-                        html.index("HOLDINGS"))
+                        html.index("holdings-panel"))
 
     def test_fox_logo_on_home_and_everything_lifted_up(self):
         self._choose_mode("paper")
@@ -144,12 +148,18 @@ class TestHomeLiftLayout(HomeLiftBase):
             "body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }",
             css)
 
-    def test_holdings_panel_is_half_screen(self):
+    def test_holdings_panel_fills_remaining_space(self):
+        # Scrollable home (owner, 2026-11-12, supersedes the
+        # compact build's internal scroll): the page scrolls, so
+        # the holdings panel grows with the list, borderless, and
+        # never scrolls internally.
         css = open("tradingbot/static/style.css").read()
-        self.assertIn(".holdings-panel { flex: 0 1 50dvh;", css)
-        self.assertIn("max-height: 50dvh;", css)
-        self.assertIn("overflow-y: auto;", css)
-        # The old quarter-screen rule is gone.
+        self.assertIn(
+            ".holdings-panel { max-height: none; border: none; "
+            "background: transparent; padding: 0; }", css)
+        # The old half-screen rule is gone.
+        self.assertNotIn("flex: 0 1 50dvh", css)
+        self.assertNotIn("max-height: 50dvh", css)
         self.assertNotIn("25dvh", css)
 
     def test_holdings_rows_are_normal_size_not_fine_print(self):

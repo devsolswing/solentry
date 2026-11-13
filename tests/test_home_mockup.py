@@ -440,7 +440,7 @@ class TestHomeMockupLayout(HomeMockupBase):
         self.assertLess(html.index("home-actions-row"),
                         html.index("home-total"))
         self.assertLess(html.index("home-actions-row"),
-                        html.index("HOLDINGS"))
+                        html.index("holdings-panel"))
 
     def test_balance_window_has_label_durations_and_cad(self):
         self._choose_mode("paper")

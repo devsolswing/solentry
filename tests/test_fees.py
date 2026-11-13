@@ -719,7 +719,7 @@ class TestFeeSplitDisplay(unittest.TestCase):
         self.assertAlmostEqual(totals["pump_fee_sol"], 0.0)
 
 
-class TestFeeHomePage(unittest.TestCase):
+class TestFeeWalletPage(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
@@ -733,26 +733,28 @@ class TestFeeHomePage(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_home_shows_fees_dropdown_at_zero(self):
-        resp = self.client.get("/wallet")
+    def test_wallet_details_shows_fees_dropdown_at_zero(self):
+        # The fees card moved off home to the wallet page
+        # (owner, 2026-11-12) — the whole card, dropdown and all.
+        resp = self.client.get("/wallet/details")
         html = resp.get_data(as_text=True)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Fees paid to SolEntry", html)
         self.assertIn("0.0000 SOL", html)
         self.assertIn("No fees paid yet", html)
         self.assertIn('data-live-price="SOL"', html)
-        # The fee recipient address is never shown on the home page
-        # (James, 2026-11-10).
+        # The fee recipient address is never shown on the wallet
+        # page (James, 2026-11-10).
         self.assertNotIn(TEST_FEE_RECIPIENT, html)
 
-    def test_home_lists_fee_payments(self):
+    def test_wallet_details_lists_fee_payments(self):
         fees_mod.record_fee(self.db, self.user_id, None, "SOL", "buy",
                             "paper", 0.01, fee_usd=1.0)
         sig = "sig" + "x" * 40
         fees_mod.record_fee(self.db, self.user_id, None, "SOL", "sell",
                             "real", 0.02, fee_lamports=20_000_000,
                             signature=sig)
-        resp = self.client.get("/wallet")
+        resp = self.client.get("/wallet/details")
         html = resp.get_data(as_text=True)
         # Only the real fee counts, shown at the treasury's share:
         # 0.02 x 170/365 = 0.009315... SOL. The paper fee is
@@ -762,7 +764,7 @@ class TestFeeHomePage(unittest.TestCase):
         self.assertNotIn("0.010000 SOL", html)
         self.assertIn(sig[:12], html)
 
-    def test_home_fee_switcher_dropdown(self):
+    def test_wallet_details_fee_switcher_dropdown(self):
         # James, 2026-11-11: the fees display has a DROPDOWN
         # switcher — the closed control shows the current balance
         # + a chevron, and pressing it drops down the 2 options.
@@ -772,7 +774,7 @@ class TestFeeHomePage(unittest.TestCase):
             burn_sol=0.0195, pump_fee_sol=0.00915325,
             treasury_lamports=17_000_000, burn_lamports=19_500_000,
             pump_fee_lamports=9_153_250, signature="sig-sw-1")
-        html = self.client.get("/wallet").get_data(as_text=True)
+        html = self.client.get("/wallet/details").get_data(as_text=True)
         # The dropdown: closed control + chevron + both options.
         self.assertIn("data-fee-switcher-toggle", html)
         self.assertIn("▾", html)
@@ -933,16 +935,17 @@ class TestAppWideTotal(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/login", resp.headers["Location"])
 
-    def test_home_shows_only_own_fees(self):
+    def test_wallet_details_shows_only_own_fees(self):
         # Correction (James, 2026-11-10): NO app-wide total on the
-        # home page and NO Treasury wallet address there — the home
-        # page shows each user only their OWN fees, in the dropdown.
+        # wallet page and NO Treasury wallet address there — the
+        # wallet page shows each user only their OWN fees, in the
+        # dropdown.
         fees_mod.record_fee(self.db, self.user_id, None, "SOL", "buy",
                             "paper", 0.01, fee_usd=1.0)
         fees_mod.record_fee(self.db, self.bob_id, None, "SOL", "sell",
                             "real", 0.02, fee_lamports=20_000_000,
                             signature="sig2")
-        html = self.client.get("/wallet").get_data(as_text=True)
+        html = self.client.get("/wallet/details").get_data(as_text=True)
         # The flag stays; the app-wide total and its live span are
         # gone, and no other user's fees leak in.
         self.assertIn("🇨🇦", html)
@@ -956,7 +959,7 @@ class TestAppWideTotal(unittest.TestCase):
         self.assertIn("0.0000 SOL", html)
         self.assertNotIn("0.0100 SOL", html)
         self.assertIn("No fees paid yet", html)
-        # The recipient address is never shown on the home page,
+        # The recipient address is never shown on the wallet page,
         # and no wallet is named as the fee destination.
         self.assertNotIn(TEST_FEE_RECIPIENT, html)
         self.assertNotIn("Treasury", html)

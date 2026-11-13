@@ -233,16 +233,15 @@ class TestHoldingsWindowSizesExact(HomeMockupBase):
         self.assertIn('height="16"', made)
         self.assertIn('viewBox="0 0 64 16"', made)
 
-    def test_row_gap_matches_the_photo_and_no_holdings_heading(self):
-        # Compact build (2026-11-11): the HOLDINGS heading is gone
-        # — the coin list follows the balance box immediately — but
-        # the 6px row gap stays.
+    def test_row_gap_matches_the_photo_and_holdings_heading_is_back(self):
+        # Rebuild from scratch (2026-11-11): the HOLDINGS heading
+        # is back — the photo has one — and the 6px row gap stays.
         css = _css()
         self.assertIn("gap: 6px",
                       _rule(css, ".holdings-panel .coin-list"))
         self._choose_mode("paper")
         html = self._html("/wallet")
-        self.assertNotIn("HOLDINGS", html)
+        self.assertIn("HOLDINGS", html)
         self.assertNotIn("All coins", html)
 
 

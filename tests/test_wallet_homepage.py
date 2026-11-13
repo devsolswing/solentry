@@ -17,8 +17,9 @@ Rules under test:
   tapping a trenches token opens the same Buy / Sell / Sell all
   popup as any other coin.
 - The redundant dashboard trade form is gone (see test_buy_mode);
-  every page fits one screen — the page itself never scrolls, lists
-  scroll only inside a fixed-height panel.
+  every page but home fits one screen — home scrolls (owner,
+  2026-11-12); the other pages never scroll, lists scroll only
+  inside a fixed-height panel.
 No SOL moves in these tests; real execution is a recording mock.
 """
 
@@ -173,13 +174,14 @@ class TestWalletIsHomepage(HomeBase):
         # and the 1-hour % from the feed. The old 24h % and P&L
         # columns still live on the coins page and the coin detail
         # page; the home rows do not carry them. Compact build
-        # (2026-11-11): no HOLDINGS heading, no "All coins" link,
+        # Rebuild from scratch (2026-11-11): the HOLDINGS heading
+        # is back (the photo has one), still no "All coins" link,
         # no holdings-summary line — the list follows the balance
-        # box immediately.
+        # box with only the heading between them.
         self._choose_mode("paper")
         self._buy_sol()
         html = self._html("/wallet")
-        self.assertNotIn("HOLDINGS", html)
+        self.assertIn("HOLDINGS", html)
         self.assertNotIn("All coins", html)
         self.assertNotIn("holdings-summary", html)
         self.assertIn("Solana", html)
