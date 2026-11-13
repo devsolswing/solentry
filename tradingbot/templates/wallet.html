@@ -85,6 +85,9 @@
     {% if mode != 'paper' and portfolio_usd is not none %}
     <p class="home-total-cad muted">≈ ${{ "{:,.2f}".format(portfolio_usd) }} CAD</p>
     {% endif %}
+    {# Prices source: same wording as the coins page — a snapshot
+       (CoinGecko down) must never look live on the home page. #}
+    {% if prices is defined and prices %}<p class="muted small">Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>{% endif %}
     <div class="home-chart" id="home-chart" data-chart-block data-chart-range="{{ chart_range }}">
       <div class="home-chart-wrap">
         {% if portfolio_candles_svg %}
