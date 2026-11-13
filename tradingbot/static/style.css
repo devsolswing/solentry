@@ -596,8 +596,8 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 /* - Black crown-tipped banner under the logo. (2026-11-11: the thin  */
 /*   gold bar that used to cross the logo was DELETED — it cut        */
 /*   through the fox, so the logo now sits clean with no bar.)       */
-/* The page stays one screen (fit-screen): the assistant card takes   */
-/* the remaining space and only its chat log scrolls internally.      */
+/* The page stays one screen (fit-screen): the signer card sits
+   at the bottom with its tasks panel hidden until tapped.       */
 /* ------------------------------------------------------------------ */
 .bots-screen .home-logo .fox-logo { width: clamp(96px, 16dvh, 140px); height: clamp(96px, 16dvh, 140px); }
 .bots-screen .home-wordmark { font-size: clamp(48px, 9dvh, 68px); }
@@ -608,30 +608,15 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 /* Motto on the Bots page: same large red italic style as Pages 1-2,
    centred under the crown banner. */
 .bots-screen .bots-motto { flex: 0 0 auto; text-align: center; margin: 2px 0 4px; }
-/* Assistant: black card, gold border, red letters, robo logo —
-   compact, so the page reads black/gold/red, not a yellow sheet. */
-.bots-assistant { background: #000; color: #b91c1c; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.bots-assistant h2 { color: #b91c1c; margin: 0 0 4px; }
-.bots-assistant .robo-logo { font-size: 26px; }
-.bots-assistant .muted { color: #7f1d1d; }
-.bots-assistant .chat-log { background: #1a0805; border: 2px solid #ffd700; color: #b91c1c; flex: 1 1 auto; min-height: 44px; max-height: 96px; overflow-y: auto; }
-.bots-assistant .chat-log p { color: #b91c1c; }
-.bots-assistant .chat-log a { color: #ffd700; }
-.bots-assistant input { background: #1a0805; color: #ffd700; border: 2px solid #ffd700; }
-.bots-assistant .btn { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
-/* Platform wallets: rotating selector, black card, gold border, red writing. */
-.bots-wallets { background: #000; color: #b91c1c; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 0 0 auto; }
-.bots-wallets h2 { color: #b91c1c; margin: 0 0 4px; }
-.bots-wallets .muted { color: #7f1d1d; }
-.bots-wallets .addr { background: #1a0805; color: #ffd700; border: 2px solid #ffd700; }
-.bots-wallets .btn.small { background: #b91c1c; color: #fff; border-color: #7f1d1d; }
-/* Signing bot dashboard: compact black card, gold border. */
-.bots-signer { background: #000; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 0 0 auto; }
-.bots-signer h2 { color: #ffd700; margin: 0 0 4px; }
-.bots-signer h3 { color: #ffd700; margin: 8px 0 4px; font-size: 15px; }
-.signer-row { display: flex; justify-content: space-between; gap: 10px; margin: 2px 0; }
-.signer-row span { color: #b9a99a; }
-.signer-row strong { color: #ffd700; }
+/* Signer bot card (owner, 2026-11-11): a bot card like the ones
+   above it, full-width in the bottom half — .bot-card's 92%
+   carousel slot would stretch it down the page, so the flex
+   basis is reset here. The tasks panel below it is a compact
+   black card with a gold border; it stays hidden until the card
+   is tapped. */
+.signer-card { flex: 0 0 auto; width: 100%; margin: 6px 0; }
+.signer-tasks-panel { background: #000; border: 2px solid #ffd700; margin: 6px 0; padding: 10px; flex: 0 0 auto; }
+.signer-tasks-panel h3 { color: #ffd700; margin: 0 0 4px; font-size: 15px; }
 .signer-tasks { list-style: none; margin: 4px 0 0; padding: 0; }
 .signer-tasks li { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-top: 1px solid #3a1c10; }
 .signer-tasks a { color: #ffd700; }
@@ -650,13 +635,6 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
    background come through from the shared classes. */
 button.bot-card { font: inherit; text-align: left; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .badge.preset { background: #3a2a00; color: #ffd700; border: 1px solid #ffb300; }
-.wallet-rotator { display: flex; align-items: center; gap: 8px; }
-.wallet-arrow { flex: 0 0 auto; background: #b91c1c; color: #ffd700; border-color: #7f1d1d; }
-.wallet-panels { flex: 1 1 auto; min-width: 0; }
-.wallet-panel { display: block; }
-.wallet-rotator[data-rotating] .wallet-panel { display: none; }
-.wallet-rotator[data-rotating] .wallet-panel.active { display: block; }
-.wallet-counter { text-align: center; margin: 4px 0 0; }
 @media (max-height: 640px) {
   .bots-screen .home-logo .fox-logo { width: 72px; height: 72px; }
   .bots-screen .home-wordmark { font-size: 36px; }

@@ -96,33 +96,4 @@
       if (el) el.classList.add('hidden');
     });
   });
-
-  /* Platform-wallet rotator (Bots page): < and > cycle through the
-     platform panels one at a time, wrapping around. The panels are
-     all visible without JS; once this runs, only the active one
-     shows. The counter reads "1 of 3 · pump.fun". */
-  document.querySelectorAll('[data-wallet-rotator]').forEach(function (rot) {
-    var panels = rot.querySelectorAll('[data-wallet-panel]');
-    if (!panels.length) return;
-    var counter = rot.parentElement.querySelector('[data-wallet-counter]');
-    var idx = 0;
-    var show = function (i) {
-      idx = (i + panels.length) % panels.length;
-      panels.forEach(function (p, j) {
-        p.classList.toggle('active', j === idx);
-      });
-      if (counter) {
-        counter.textContent = (idx + 1) + ' of ' + panels.length + ' · ' +
-          (panels[idx].dataset.platform || '');
-      }
-    };
-    rot.setAttribute('data-rotating', '');
-    rot.querySelectorAll('[data-wallet-prev]').forEach(function (b) {
-      b.addEventListener('click', function () { show(idx - 1); });
-    });
-    rot.querySelectorAll('[data-wallet-next]').forEach(function (b) {
-      b.addEventListener('click', function () { show(idx + 1); });
-    });
-    show(0);
-  });
 })();
