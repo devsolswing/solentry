@@ -61,7 +61,7 @@
         <span class="bot-arrow" aria-hidden="true">›</span>
       </a>
       {% endfor %}
-      {% if not bots %}<p class="muted" data-active-item>No bots yet — create your first one, or ask the assistant: “create bot”.</p>{% endif %}
+      {% if not bots %}<p class="muted" data-active-item>No bots yet — create your first one.</p>{% endif %}
       {# Clyde preset button (owner, 2026-11-11): ONE list, contents
          swap — the Clyde card is a carousel item alongside the
          active bot cards, hidden until Presets is tapped. Button
@@ -83,47 +83,24 @@
     </div>
   </div>
 
-  <div class="card bots-assistant">
-    <h2><span class="robo-logo" aria-hidden="true">🤖</span> Assistant</h2>
-    <p class="muted small">The app assistant answers right here. Try “show my balance”, “create bot”, “create the trenches bot”, “create the scanner bot”, “edit bot”, “delete bot”, “turn on silent trading for …”.</p>
-    <div id="bots-chat-log" class="chat-log"></div>
-    <form id="bots-chat-form" class="inline">
-      <input id="bots-chat-input" type="text" placeholder="Ask the assistant…" autocomplete="off" required>
-      <button class="btn" type="submit">Send</button>
-    </form>
-  </div>
-
-  <div class="card bots-wallets">
-    <h2>Platform wallets</h2>
-    <p class="muted small">Each platform gets its own wallet, created automatically when you tap the button. One wallet per platform — if one already exists, its address is shown instead.</p>
-    <div class="wallet-rotator" data-wallet-rotator>
-      <button class="icon-btn wallet-arrow" type="button" data-wallet-prev aria-label="Previous platform wallet">‹</button>
-      <div class="wallet-panels">
-        {% for p in platforms %}
-        <div class="wallet-panel" data-wallet-panel data-platform="{{ p }}">
-          <p><strong>{{ platform_labels[p] }}</strong><br><span class="muted small">{{ platform_notes[p] }}</span></p>
-          {% if platform_wallets.get(p) %}
-          <p class="addr">{{ platform_wallets[p] }}</p>
-          <p class="muted small">Wallet ready.</p>
-          {% else %}
-          <form method="post" action="{{ url_for('platform_wallet_create', platform=p) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="return_to" value="/bots">
-            <button class="btn small" type="submit">Create {{ platform_labels[p] }} wallet</button>
-          </form>
-          {% endif %}
-        </div>
-        {% endfor %}
-      </div>
-      <button class="icon-btn wallet-arrow" type="button" data-wallet-next aria-label="Next platform wallet">›</button>
-    </div>
-    <p class="muted small wallet-counter" data-wallet-counter></p>
-  </div>
-
-  <div class="card bots-signer">
-    <h2>Signing bot</h2>
-    <p class="signer-row"><span>Support ID</span> <strong>{{ support_id or "—" }}</strong></p>
-    <p class="signer-row"><span>Transactions signed</span> <strong data-signer-tx-count="{{ signing_tx_count if signing_tx_count is not none else '' }}">{{ signing_tx_count if signing_tx_count is not none else "—" }}</strong></p>
+  {# Signer bot card (owner, 2026-11-11): the signing bot as a card
+     like the other bot cards above it — same .card bot-card
+     classes, icon, bold name, stats lines, chevron. Inside it:
+     the Signer ID, the number of real transactions signed (a
+     running count starting at 1), and the SolEntry fees paid (the
+     user's own 1.7% treasury fee, in SOL, as a gas fee). Tapping
+     the card reveals the signing bot's current tasks below it. #}
+  <button class="card bot-card signer-card" type="button" id="signer-card" data-signer-toggle aria-expanded="false" aria-controls="signer-tasks-panel">
+    <span class="bot-ico" aria-hidden="true">✍️</span>
+    <span class="bot-info">
+      <span class="bot-name"><strong>Signer Bot</strong></span>
+      <span class="bot-id">Signer ID: {{ support_id or "—" }}</span>
+      <span class="muted small" data-signer-tx-count="{{ signing_tx_count if signing_tx_count is not none else '' }}">Transactions signed: {% if signing_tx_count is none %}—{% elif signing_tx_count == 0 %}No signed transactions yet{% else %}{{ signing_tx_count }}{% endif %}</span>
+      <span class="muted small">Gas fees paid: {{ "%.4f"|format(fees_total_sol) }} SOL</span>
+    </span>
+    <span class="bot-arrow" aria-hidden="true">›</span>
+  </button>
+  <div class="signer-tasks-panel" id="signer-tasks-panel" hidden>
     <h3>Current tasks</h3>
     {% if signing_tasks %}
     <ul class="signer-tasks">
@@ -206,24 +183,23 @@ if (presetsToggle && activeList) {
   document.addEventListener('scroll', armPresetsIdleTimer, { passive: true, capture: true });
   window.addEventListener('scroll', armPresetsIdleTimer, { passive: true });
 }
-const botsLog = document.getElementById('bots-chat-log');
-document.getElementById('bots-chat-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const input = document.getElementById('bots-chat-input');
-  const text = input.value.trim();
-  if (!text) return;
-  botsLog.innerHTML += '<p><strong>You:</strong> ' + text.replace(/</g,'&lt;') + '</p>';
-  input.value = '';
-  const res = await fetch('{{ url_for('api_assistant') }}', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: text, csrf_token: '{{ csrf_token }}'})
+/* Signer card tap (owner, 2026-11-11): the card is a button like
+   the other bot cards; tapping it reveals the signing bot's
+   current tasks below it, tapping again hides them. The numbers
+   inside the card are server-rendered on page load. */
+var signerToggle = document.querySelector('[data-signer-toggle]');
+var signerPanel = document.getElementById('signer-tasks-panel');
+if (signerToggle && signerPanel) {
+  signerToggle.addEventListener('click', function () {
+    var open = signerPanel.hasAttribute('hidden');
+    if (open) {
+      signerPanel.removeAttribute('hidden');
+      signerToggle.setAttribute('aria-expanded', 'true');
+    } else {
+      signerPanel.setAttribute('hidden', '');
+      signerToggle.setAttribute('aria-expanded', 'false');
+    }
   });
-  const data = await res.json();
-  let reply = (data.reply || data.error || 'No reply.').replace(/</g,'&lt;').replace(/\n/g,'<br>');
-  if (data.confirm_url) reply += '<br><a href="' + data.confirm_url + '">Review and confirm this send →</a>';
-  botsLog.innerHTML += '<p><strong>Assistant:</strong> ' + reply + '</p>';
-  botsLog.scrollTop = botsLog.scrollHeight;
-});
+}
 </script>
 {% endblock %}
