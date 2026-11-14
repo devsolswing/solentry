@@ -15,7 +15,7 @@
     <h2>📄 Paper balance</h2>
     <p class="big-num">${{ "%.2f"|format(paper_cash + holdings_value) }} CAD</p>
     <p class="muted">Cash: ${{ "%.2f"|format(paper_cash) }} CAD · Holdings: ${{ "%.2f"|format(holdings_value) }} CAD</p>
-    <p class="muted small">Paper trading is fake money. Your real wallet, send history and platform wallets live in Real trading — switch mode in the topbar above to see them.</p>
+    <p class="muted small">Paper trading is fake money. Your real wallet and send history live in Real trading — switch mode in the topbar above to see them.</p>
   </div>
   {% else %}
   <div class="card" id="deposit">
@@ -32,29 +32,6 @@
     <p>Pump.fun has no separate accounts — trading on pump.fun uses this linked Solana wallet. This is your app wallet above, linked as your pump.fun trading wallet, so the bot can trade on pump.fun on your behalf.</p>
     <p class="addr">{{ pumpfun_wallet or wallet.pubkey }}</p>
     <button class="btn" data-copy="{{ pumpfun_wallet or wallet.pubkey }}">Copy address</button>
-  </div>
-
-  <div class="card">
-    <h2>Platform wallets</h2>
-    <p class="muted small">One wallet per platform, made for you automatically. pump.fun and pumpSwap wallets live in the app; the Phantom wallet is made to import into Phantom.</p>
-    {% for p, label in [('pump.fun', 'pump.fun'), ('phantom', 'Phantom'), ('pumpswap', 'pumpSwap')] %}
-    <div class="platform-row">
-      <p><strong>{{ label }}</strong></p>
-      {% if platform_wallets.get(p) %}
-      <p class="addr">{{ platform_wallets[p] }}</p>
-      {% if p == 'phantom' %}
-      <p class="muted small">To use it in Phantom: Phantom → wallet name → Add / Connect Wallet → Import Private Key. The key was shown once when this wallet was created and is never shown again.</p>
-      {% endif %}
-      {% else %}
-      <p class="muted">No {{ label }} wallet yet.</p>
-      <form method="post" action="{{ url_for('platform_wallet_create', platform=p) }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="return_to" value="{{ request.path }}">
-        <button class="btn small" type="submit">Create {{ label }} wallet</button>
-      </form>
-      {% endif %}
-    </div>
-    {% endfor %}
   </div>
 
   <div class="cards">

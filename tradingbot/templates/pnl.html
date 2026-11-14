@@ -11,7 +11,7 @@
   <p class="muted">Cash: ${{ "%.2f"|format(totals.cash_usd) }} CAD · Holdings: <span data-live-total-value>${{ "%.2f"|format(totals.holdings_value_usd) }}</span> CAD</p>
   <p>P&amp;L vs ${{ "%.2f"|format(start_cash) }} CAD starting paper cash:
     <strong data-live-total-pnl>{% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}</strong> CAD</p>
-  <p class="muted small">Paper trading is fake money. Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
+  <p class="muted small">Paper trading is fake money. Prices: {% if prices_source == 'live' %}live ({{ prices_as_of }}){% else %}unavailable right now{% endif %}</p>
 </div>
 {% else %}
 <div class="card">
@@ -22,7 +22,7 @@
   <p class="big-num">Balance unavailable</p>
   <p class="muted small">The RPC did not answer just now — this is shown as unavailable, never guessed.</p>
   {% endif %}
-  <p class="muted small">Network: {{ network }} · Real holdings below are worth ${{ "%.2f"|format(totals.holdings_value_usd) }} at current prices. Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
+  <p class="muted small">Network: {{ network }} · Real holdings below are worth ${{ "%.2f"|format(totals.holdings_value_usd) }} at current prices. Prices: {% if prices_source == 'live' %}live ({{ prices_as_of }}){% else %}unavailable right now{% endif %}</p>
 </div>
 {% endif %}
 

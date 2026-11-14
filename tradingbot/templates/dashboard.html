@@ -4,7 +4,7 @@
 <form method="post" action="{{ url_for('dashboard_refresh') }}" class="refresh-row">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button class="btn small" type="submit">↻ Refresh live data</button>
-  <span class="muted small">Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</span>
+  <span class="muted small">Prices: {% if prices.source == 'live' %}live ({{ prices.as_of }}){% else %}unavailable right now{% endif %}</span>
 </form>
 <div class="card portfolio-head">
   <p class="portfolio-mode"><strong>{{ mode_label }}</strong></p>
@@ -30,7 +30,7 @@
   <p class="muted">You hold no coins in {{ mode_label }} yet — buy one below.</p>
   {% endif %}
 </div>
-<p class="muted small">Tap a coin for its chart, 24h high/low, buyers &amp; sellers, and Buy / Sell / Sell all in SOL. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {{ prices.source }}{% if prices.source == 'snapshot' %} (snapshot from {{ prices.as_of }}, not live){% else %} (live, {{ prices.as_of }}){% endif %}</p>
+<p class="muted small">Tap a coin for its chart, 24h high/low, buyers &amp; sellers, and Buy / Sell / Sell all in SOL. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {% if prices.source == 'live' %}live ({{ prices.as_of }}){% else %}unavailable right now{% endif %}</p>
 
 <p><button class="btn small" type="button" id="quick-trade-open">Buy or Sell Coin</button></p>
 

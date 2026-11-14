@@ -10,7 +10,7 @@
     <p class="muted small live-status">Live price · Last updated <span id="live-updated">—</span></p>
     <p class="muted small" id="live-chart-note">Waiting for the first live tick…</p>
   </div>
-  <p class="muted small">24h <span data-live-change-24h="{{ coin.coin_id }}">{% if coin.change_24h is not none %}<span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span> · Prices: {{ prices_source }}{% if prices_source == 'snapshot' %} (snapshot from {{ prices_as_of }}, not live){% else %} (live, {{ prices_as_of }}){% endif %}</p>
+  <p class="muted small">24h <span data-live-change-24h="{{ coin.coin_id }}">{% if coin.change_24h is not none %}<span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span> · Prices: {% if prices_source == 'live' %}live ({{ prices_as_of }}){% else %}unavailable right now{% endif %}</p>
 
   <div class="chart-ranges" role="group" aria-label="Chart range">
     {% for key, (label, days) in ranges.items() %}
@@ -36,24 +36,6 @@
   </div>
 
   <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ "%.4f"|format(coin.avg_price) }}{% endif %} · P&amp;L <strong data-live-pnl="{{ coin.coin_id }}" data-live-amount="{{ coin.held }}" data-live-avg="{{ coin.avg_price }}">{% if coin.pnl is not none %}{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}{% else %}—{% endif %}</strong>{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
-
-  {# Wrapped majors picker: a text box that drops down every
-     wrapped major with a live liquid Jupiter pool right now.
-     Identical in look to the quick-trade token selector — the
-     same text input, the same .search-results rows — the only
-     difference is the list: wrapped majors, live-checked, never
-     a static list. Picking one switches this page to that coin. #}
-  <div id="wrapped-majors" data-wrapped-majors-url="{{ url_for('wrapped_majors') }}">
-    <label>Wrapped majors<input id="wrapped-majors-search" type="text" placeholder="Wrapped majors with liquid pools…" autocomplete="off"></label>
-    <div id="wrapped-majors-results" class="search-results"></div>
-  </div>
-
-  {% if jupiter_wrapped %}
-  <p class="muted small">Trades as {{ jupiter_wrapped.name }} on Solana — the wrapped token, not native {{ coin.name }}.</p>
-  {% endif %}
-  <div id="jupiter-route" data-jupiter-route data-route-url="{{ url_for('jupiter_route', coin_id=coin.coin_id) }}">
-    <p class="muted small" id="jupiter-route-status">Finding route…</p>
-  </div>
 
   <div class="coin-actions-row">
     <button class="btn coin-action-btn" type="button" data-overlay-open="coin-send-overlay">↑ Send</button>

@@ -38,7 +38,7 @@
         <label>Real bot to manage this buy (required — its buy-size limit is the cap)
           <select name="bot_id" required>
             <option value="">Choose a real bot…</option>
-            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
           </select>
         </label>
         {% endif %}
@@ -52,7 +52,7 @@
         <label>Real bot to manage this sell (required)
           <select name="bot_id" required>
             <option value="">Choose a real bot…</option>
-            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
           </select>
         </label>
         {% endif %}
@@ -65,7 +65,7 @@
         <label>Real bot to manage this sell (required)
           <select name="bot_id" required>
             <option value="">Choose a real bot…</option>
-            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.platform or 'pump.fun' }})</option>{% endfor %}
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
           </select>
         </label>
         {% endif %}

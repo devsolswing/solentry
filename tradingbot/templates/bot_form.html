@@ -7,13 +7,6 @@
   <form method="post" action="{{ url_for('bot_edit', bot_id=bot.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Name<input name="name" value="{{ bot.name }}" placeholder="My Bot"></label>
-    <label>Platform
-      <select name="platform" id="platform-select">
-        {% for p in platforms %}
-        <option value="{{ p }}" {{ 'selected' if bot.platform == p else '' }}>{{ platform_labels[p] }}</option>
-        {% endfor %}
-      </select>
-    </label>
     <label>Buy size (% of bankroll per trade)<input type="number" name="buy_size_pct" step="any" min="1" max="100" value="{{ bot.buy_size_pct }}"></label>
     <label>Stop loss (%)<input type="number" name="stop_loss_pct" step="any" min="1" max="50" value="{{ bot.stop_loss_pct }}"></label>
     <label>Max open trades (1–5)<input type="number" name="max_open_trades" step="1" min="1" max="5" value="{{ bot.max_open_trades }}"></label>
@@ -30,25 +23,6 @@
     </div>
     <button class="btn big" type="submit">Save changes</button>
   </form>
-  <div class="card">
-    <h2>Platform wallets</h2>
-    <p class="muted small">Each platform gets its own wallet, created automatically when you tap the button. One wallet per platform — if one already exists, its address is shown instead.</p>
-    {% for p in platforms %}
-    <div class="platform-row" data-platform="{{ p }}">
-      <p><strong>{{ platform_labels[p] }}</strong><br><span class="muted small">{{ platform_notes[p] }}</span></p>
-      {% if platform_wallets.get(p) %}
-      <p class="addr">{{ platform_wallets[p] }}</p>
-      <p class="muted small">Wallet ready.</p>
-      {% else %}
-      <form method="post" action="{{ url_for('platform_wallet_create', platform=p) }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="return_to" value="{{ request.path }}">
-        <button class="btn small" type="submit">Create {{ platform_labels[p] }} wallet</button>
-      </form>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
   <p><a class="btn danger" href="{{ url_for('bot_delete_confirm', bot_id=bot.id) }}">Delete bot</a></p>
   <p><a href="{{ url_for('bots') }}">← Back to bots</a></p>
 </div>
