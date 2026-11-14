@@ -1,4 +1,4 @@
-"""Wallet-homepage redesign + home lift.
+"""Wallet-homepage redesign + home lift — pump.fun-only rebuild.
 
 Rules under test:
 - The wallet is the homepage: sign-up, login (password and passkey)
@@ -7,12 +7,14 @@ Rules under test:
   held, value and 1h % (home lift), the Dogewifhat door art
   (embedded base64), and a Canadian flag. Position P&L and 24h %
   live on the coins page and the coin detail page.
-- Coin detail page: tap a coin and get a market chart with 24hr /
-  1day / 1w / 1m / 1y / all-time ranges, 24h high and low, buyers and
-  sellers %, and Buy / Sell / Sell all — all in SOL. Chart data is
-  real (CoinGecko market_chart) or the page says "No data yet";
-  buyers/sellers % comes from DexScreener 24h txn counts, "—" when
-  the feed has none.
+- Coin detail page: tap a pump.fun mint and get a market chart with
+  24hr / 1day / 1w / 1m / 1y / all-time ranges, 24h high and low,
+  buyers and sellers %, and Buy / Sell / Sell all — all in SOL.
+  Chart data is real (the live feed's recorded ticks for the mint)
+  or the page says the candles are still building; buyers/sellers %
+  comes from DexScreener 24h txn counts, "—" when the feed has none.
+  Symbols are not coins any more: SOL is the unit of account, never
+  a listed coin, and a symbol detail page 404s.
 - Trenches list under the coins list: price + 1h gain per row, and
   tapping a trenches token opens the same Buy / Sell / Sell all
   popup as any other coin.
@@ -33,6 +35,15 @@ from helpers import csrf, login, make_client, signup
 from tradingbot.solana import generate_keypair
 
 DEST = "11111111111111111111111111111111"
+
+MINT = "11111111111111111111111111111111"
+MINT2 = "Grad1111111111111111111111111111111111111111"
+MINT_PRICES = {MINT: 0.5, MINT2: 0.25}
+MINT_IDENTITIES = {
+    MINT: {"name": "Test Coin", "symbol": "TEST"},
+    MINT2: {"name": "Second Coin", "symbol": "SCND"},
+}
+MINT_1H = {MINT: 2.5, MINT2: -1.0}
 
 
 class FakeRpc:
@@ -83,13 +94,10 @@ class HomeBase(unittest.TestCase):
         self.rpc_patch.start()
         FakeRpc.instances.clear()
         FakeRpc.balance_lamports = 0
+        # get_prices() is SOL-only now: SOL is the unit of account.
         self.prices_patch = mock.patch.object(
             routes, "get_prices",
-            return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25, 2.5), "USDC": (1.0, 0.0),
-                "DOGE": (0.07, 3.0), "PEPE": (0.000005, -1.0),
-                "BONK": (0.000003, 8.0), "JUP": (0.23, -0.5)}))
+            return_value=make_prices({"SOL": (10.0, 5.25, 2.5)}))
         self.prices_patch.start()
         # _paper_price (single-coin price) must agree with the mocked
         # list prices, or SOL conversions drift between the two.
@@ -105,6 +113,28 @@ class HomeBase(unittest.TestCase):
         self.trenches_patch.start()
         routes._TRENCHES_CACHE.update(
             {"at": 0.0, "rows": None, "error": None})
+        # Mint feeds: keep every render local — no live DexScreener
+        # or RPC calls from the routes under test.
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            side_effect=lambda mints: {
+                m: MINT_PRICES[m] for m in (mints or [])
+                if m in MINT_PRICES})
+        self.mint_prices_patch.start()
+        self.mint_1h_patch = mock.patch.object(
+            routes, "fetch_mint_1h_changes",
+            side_effect=lambda mints: {
+                m: MINT_1H[m] for m in (mints or []) if m in MINT_1H})
+        self.mint_1h_patch.start()
+        self.mint_ident_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            side_effect=lambda mints: {
+                m: MINT_IDENTITIES[m] for m in (mints or [])
+                if m in MINT_IDENTITIES})
+        self.mint_ident_patch.start()
+        self.meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.meta_patch.start()
         signup(self.client, "alice")
         self.db = self.app.config["DB"]
         self.user_id = self.db.execute(
@@ -112,6 +142,10 @@ class HomeBase(unittest.TestCase):
         ).fetchone()["id"]
 
     def tearDown(self):
+        self.meta_patch.stop()
+        self.mint_ident_patch.stop()
+        self.mint_1h_patch.stop()
+        self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()
@@ -133,10 +167,27 @@ class HomeBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="10"):
-        return self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+    def _buy_mint(self, mint=MINT, usd="10"):
+        # Paper buy in $ at the mocked mint price (0.5): $10 buys
+        # 20 tokens. SOL is never a buyable coin any more.
+        return self.client.post(f"/coins/{mint}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{mint}/detail"),
             "usd": usd, "bot_id": ""})
+
+    def _hold_mint(self, mint=MINT, amount=100.0, avg_price=0.01):
+        self.db.execute(
+            "INSERT INTO paper_holdings (user_id, coin_id, amount, "
+            "avg_price) VALUES (?, ?, ?, ?)",
+            (self.user_id, mint, amount, avg_price))
+        self.db.commit()
+
+    def _ingest_ticks(self, mint=MINT, count=30,
+                     start=1790000000000 // 900_000 * 900_000 / 1000.0,
+                     step=5.0, base_price=0.5):
+        feed = self.app.config["LIVE_FEED"]
+        for i in range(count):
+            feed.ingest(mint, base_price + (i % 5) * 0.01, "test",
+                        now=start + i * step)
 
 
 class TestWalletIsHomepage(HomeBase):
@@ -179,18 +230,18 @@ class TestWalletIsHomepage(HomeBase):
         # no holdings-summary line — the list follows the balance
         # box with only the heading between them.
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_mint()
         html = self._html("/wallet")
         self.assertIn("HOLDINGS", html)
         self.assertNotIn("All coins", html)
         self.assertNotIn("holdings-summary", html)
-        self.assertIn("Solana", html)
-        self.assertIn("SOL", html)
+        self.assertIn("Test Coin", html)
+        self.assertIn("TEST", html)
         self.assertIn("holdings-row", html)
         self.assertIn("holdings-panel", html)
-        # 1 SOL bought at the mocked $10 price: no fee (removed
-        # 2026-11-12), so 1.0000 SOL worth $10.00.
-        self.assertIn("1.0000 SOL", html)
+        # $10 at the mocked $0.50 mint price buys 20 tokens: no fee
+        # (removed 2026-11-12), so 20.0000 TEST worth $10.00.
+        self.assertIn("20.0000 TEST", html)
         self.assertIn("$10.00", html)
         # 1-hour % (mocked +2.5%) on the row.
         self.assertIn("holdings-1h", html)
@@ -198,7 +249,7 @@ class TestWalletIsHomepage(HomeBase):
         self.assertNotIn("coin-pnl", html)
         self.assertNotIn("coin-change", html)
         # Tapping a coin goes to its detail page.
-        self.assertIn("/coins/SOL/detail", html)
+        self.assertIn(f"/coins/{MINT}/detail", html)
         # Portfolio header + support ID are on the homepage.
         self.assertIn("portfolio-head", html)
         self.assertIn("Support ID", html)
@@ -233,8 +284,10 @@ class TestWalletIsHomepage(HomeBase):
         self.assertNotIn("Send history", wallet)
         details = self._html("/wallet/details")
         self.assertIn("Deposit", details)
-        self.assertIn("Platform wallets", details)
         self.assertIn("Send history", details)
+        # Platform wallets are gone with the platforms module: the
+        # wallet page shows the one pump.fun wallet only.
+        self.assertNotIn("Platform wallets", details)
 
     def test_brand_link_goes_to_wallet(self):
         html = self._html("/wallet")
@@ -250,7 +303,7 @@ class TestCoinDetail(HomeBase):
         self._choose_mode("paper")
         self.chart_patch = mock.patch.object(
             routes, "fetch_market_chart",
-            side_effect=lambda coin, days: fake_chart(
+            side_effect=lambda coin, days, feed=None, **kw: fake_chart(
                 [80.0, 84.0, 86.0, 90.0, 88.0]))
         self.chart_patch.start()
         self.flow_patch = mock.patch.object(
@@ -258,21 +311,15 @@ class TestCoinDetail(HomeBase):
             return_value={"buys": 120, "sells": 80,
                           "buys_pct": 60.0, "sells_pct": 40.0})
         self.flow_patch.start()
-        self.ohlc_patch = mock.patch.object(
-            routes, "fetch_ohlc",
-            return_value={"candles": [
-                {"ts": 1790000000000, "open": 80.0, "high": 82.0,
-                 "low": 79.0, "close": 81.0},
-                {"ts": 1790001800000, "open": 81.0, "high": 83.0,
-                 "low": 80.5, "close": 82.0}],
-                "interval": 1800, "error": None})
-        self.ohlc_patch.start()
         self.addCleanup(self.chart_patch.stop)
         self.addCleanup(self.flow_patch.stop)
-        self.addCleanup(self.ohlc_patch.stop)
 
     def test_detail_renders_ranges_high_low_and_flow(self):
-        html = self._html("/coins/SOL/detail")
+        # Held, so the row carries the feed's real name.
+        self._hold_mint()
+        # Feed ticks so the candlestick chart actually draws.
+        self._ingest_ticks()
+        html = self._html(f"/coins/{MINT}/detail")
         for label in ("24hr", "1day", "1w", "1m", "1y", "all-time"):
             self.assertIn(label, html)
         self.assertIn("24h high", html)
@@ -283,43 +330,50 @@ class TestCoinDetail(HomeBase):
         self.assertIn("Buyers 60%", html)
         self.assertIn("Sellers 40%", html)
         self.assertIn("<svg", html)
-        self.assertIn("Solana", html)
+        self.assertIn("Test Coin", html)
 
     def test_detail_range_buttons_switch_range(self):
-        html = self._html("/coins/SOL/detail?range=1w")
+        html = self._html(f"/coins/{MINT}/detail?range=1w")
         self.assertIn('class="range-btn active"', html)
         self.assertIn("1w", html)
-        html = self._html("/coins/SOL/detail?range=bogus")
+        html = self._html(f"/coins/{MINT}/detail?range=bogus")
         self.assertEqual(self.client.get(
-            "/coins/SOL/detail?range=bogus").status_code, 200)
+            f"/coins/{MINT}/detail?range=bogus").status_code, 200)
         # Unknown range falls back to 24h.
-        self.assertIn('href="/coins/SOL/detail?range=24h"', html)
+        self.assertIn(f'href="/coins/{MINT}/detail?range=24h"', html)
 
     def test_detail_unknown_coin_404(self):
         self.assertEqual(
             self.client.get("/coins/NOPE/detail").status_code, 404)
 
+    def test_detail_symbol_is_not_a_coin(self):
+        # SOL is the unit of account, never a listed coin: its
+        # detail page 404s, like every other symbol.
+        self.assertEqual(
+            self.client.get("/coins/SOL/detail").status_code, 404)
+        self.assertEqual(
+            self.client.get("/coins/BTC/detail").status_code, 404)
+
     def test_detail_has_buy_sell_sellall_in_sol(self):
-        self._buy_sol()  # hold some SOL so Sell all has a form
-        html = self._html("/coins/SOL/detail")
+        self._buy_mint()  # hold some so Sell all has a form
+        html = self._html(f"/coins/{MINT}/detail")
         for word in ("Buy", "Sell", "Sell all"):
             self.assertIn(word, html)
-        self.assertIn('action="/coins/SOL/buy"', html)
-        self.assertIn('action="/coins/SOL/sell"', html)
+        self.assertIn(f'action="/coins/{MINT}/buy"', html)
+        self.assertIn(f'action="/coins/{MINT}/sell"', html)
         self.assertIn('name="amount_sol"', html)
         self.assertIn('name="sell_all"', html)
         self.assertIn("All amounts are in SOL", html)
 
-    def test_detail_no_chart_data_says_no_data_yet(self):
+    def test_detail_no_chart_data_says_still_building(self):
         with mock.patch.object(routes, "fetch_market_chart",
                                return_value={"points": [], "error":
-                                             "no chart history"}), \
-                mock.patch.object(
-                    routes, "fetch_ohlc",
-                    return_value={"candles": [], "interval": None,
-                                  "error": "no chart history"}):
-            html = self._html("/coins/SOL/detail")
-        self.assertIn("No data yet", html)
+                                             "no chart history"}):
+            html = self._html(f"/coins/{MINT}/detail")
+        # A mint with no feed history says the candles are still
+        # building — never a made-up chart.
+        self.assertIn("Candles are still building", html)
+        self.assertIn("Chart: no chart history", html)
         # Neither chart view draws anything when it has no candles
         # (the candlestick SVG carries the Candlestick-chart label;
         # the line SVG carries the Price-chart label). The live
@@ -335,63 +389,64 @@ class TestCoinDetail(HomeBase):
     def test_detail_no_trade_flow_shows_dash_not_a_guess(self):
         with mock.patch.object(routes, "fetch_trade_flow",
                                return_value=None):
-            html = self._html("/coins/SOL/detail")
+            html = self._html(f"/coins/{MINT}/detail")
         self.assertIn("Buyers / sellers", html)
         self.assertIn("—", html)
         self.assertNotIn("Buyers 0%", html)
 
 
-class TestDetailTradingSol(HomeBase):
+class TestDetailTradingMint(HomeBase):
     def test_paper_buy_in_sol_converts_at_sol_price(self):
-        # 1 SOL at the mocked $10 SOL price buys $10 of SOL — no
-        # fee (removed 2026-11-12), so 1.0 SOL held.
-        resp = self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        # 1 SOL at the mocked $10 SOL price buys $10 of the mint
+        # at $0.50 — 20 tokens, no fee (removed 2026-11-12).
+        resp = self.client.post(f"/coins/{MINT}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{MINT}/detail"),
             "amount_sol": "1", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Bought", html)
         self.assertIn("Back to coins", html)
         holding = self.db.execute(
-            "SELECT amount FROM paper_holdings WHERE coin_id = 'SOL'"
-        ).fetchone()
+            "SELECT amount FROM paper_holdings WHERE coin_id = ?",
+            (MINT,)).fetchone()
         self.assertIsNotNone(holding)
-        self.assertAlmostEqual(holding["amount"], 1.0, places=9)
+        self.assertAlmostEqual(holding["amount"], 20.0, places=9)
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
         self.assertAlmostEqual(cash, 100.0 - 10.0)
 
     def test_paper_sell_in_sol_converts_at_prices(self):
-        self._buy_sol()  # 1 SOL at $10 -> 1.0 SOL held
-        resp = self.client.post("/coins/SOL/sell", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        self._buy_mint()  # $10 -> 20 tokens at $0.50
+        resp = self.client.post(f"/coins/{MINT}/sell", data={
+            "csrf_token": csrf(self.client, f"/coins/{MINT}/detail"),
             "amount_sol": "0.5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
         holding = self.db.execute(
-            "SELECT amount FROM paper_holdings WHERE coin_id = 'SOL'"
-        ).fetchone()
-        self.assertAlmostEqual(holding["amount"], 0.5, places=9)
+            "SELECT amount FROM paper_holdings WHERE coin_id = ?",
+            (MINT,)).fetchone()
+        # 0.5 SOL = $5 = 10 tokens sold, 10 left.
+        self.assertAlmostEqual(holding["amount"], 10.0, places=9)
 
     def test_paper_sell_all_sells_whole_holding(self):
-        self._buy_sol()
-        resp = self.client.post("/coins/SOL/sell", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        self._buy_mint()
+        resp = self.client.post(f"/coins/{MINT}/sell", data={
+            "csrf_token": csrf(self.client, f"/coins/{MINT}/detail"),
             "sell_all": "1"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
         self.assertIsNone(self.db.execute(
-            "SELECT * FROM paper_holdings WHERE coin_id = 'SOL'"
-        ).fetchone())
+            "SELECT * FROM paper_holdings WHERE coin_id = ?",
+            (MINT,)).fetchone())
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        # Sell all 1.0 SOL at $10: $10.00, no fee (removed
+        # Sell all 20 tokens at $0.50: $10.00, no fee (removed
         # 2026-11-12), on top of the $90 cash left after the buy.
         self.assertAlmostEqual(cash, 100.0, places=6)
 
     def test_sell_all_with_nothing_held_refuses_plainly(self):
-        resp = self.client.post("/coins/SOL/sell", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        resp = self.client.post(f"/coins/{MINT}/sell", data={
+            "csrf_token": csrf(self.client, f"/coins/{MINT}/detail"),
             "sell_all": "1"})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
@@ -400,14 +455,14 @@ class TestDetailTradingSol(HomeBase):
 
     def test_real_sell_all_with_mocked_executor(self):
         self._choose_mode("devnet")
+        mint = generate_keypair()[1]
         self.client.post("/bots/create", data={
             "csrf_token": csrf(self.client, "/bots/create"),
             "name": "Nova", "strategy": "balanced", "platform": "pump.fun",
-            "coins": "SOL", "buy_size_pct": "20", "stop_loss_pct": "7",
+            "coins": mint, "buy_size_pct": "20", "stop_loss_pct": "7",
             "mode": "real"})
         bot_id = self.db.execute(
             "SELECT id FROM bots WHERE name = 'Nova'").fetchone()["id"]
-        mint = generate_keypair()[1]
         self.db.execute(
             "INSERT INTO real_holdings (user_id, coin_id, amount, "
             "avg_price) VALUES (?, ?, ?, ?)",
@@ -418,9 +473,17 @@ class TestDetailTradingSol(HomeBase):
             return {"status": "executed", "signature": "fakesigALL",
                     "coin_amount": 10.0}
 
-        with mock.patch.object(routes, "execute_real_trade", fake_execute):
+        with mock.patch.object(routes, "execute_real_trade",
+                               fake_execute), \
+                mock.patch.object(routes, "is_curve_complete",
+                                  return_value=False), \
+                mock.patch.object(
+                    routes, "fetch_prices_for_mints",
+                    side_effect=lambda mints: {
+                        m: 0.5 for m in (mints or [])}):
             resp = self.client.post(f"/coins/{mint}/sell", data={
-                "csrf_token": csrf(self.client, f"/coins/{mint}"),
+                "csrf_token": csrf(self.client,
+                                   f"/coins/{mint}/detail"),
                 "sell_all": "1", "bot_id": str(bot_id)})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
@@ -518,13 +581,11 @@ class TestOneScreen(HomeBase):
 
     def test_coin_rows_link_to_detail_not_popup(self):
         # The coins list shows held coins only — hold both first.
-        self._buy_sol()
-        self.client.post("/coins/BTC/buy", data={
-            "csrf_token": csrf(self.client, "/coins/BTC"),
-            "usd": "10", "bot_id": ""})
+        self._buy_mint(MINT)
+        self._buy_mint(MINT2)
         html = self._html("/dashboard")
-        self.assertIn("/coins/SOL/detail", html)
-        self.assertIn("/coins/BTC/detail", html)
+        self.assertIn(f"/coins/{MINT}/detail", html)
+        self.assertIn(f"/coins/{MINT2}/detail", html)
 
 
 class TestChartsModule(unittest.TestCase):
@@ -536,39 +597,42 @@ class TestChartsModule(unittest.TestCase):
         self.assertEqual(CHART_RANGES["1d"][0], "1day")
         self.assertEqual(CHART_RANGES["24h"][1], CHART_RANGES["1d"][1])
 
-    def test_market_chart_uses_coingecko_for_known_coins(self):
+    def test_market_chart_uses_feed_ticks_for_mint(self):
+        # Charts are feed-only now: points come from the live
+        # feed's recorded ticks for the mint — no CoinGecko.
         from tradingbot.charts import fetch_market_chart
-        calls = []
+        from tradingbot.livefeed import LiveFeed
 
-        def fake_get(url):
-            calls.append(url)
-            return {"prices": [[1790000000000, 86.0],
-                               [1790000060000, 87.5]]}
-
-        out = fetch_market_chart("SOL", 1, http_get=fake_get)
+        feed = LiveFeed()
+        base = 1790000000000 // 900_000 * 900_000 / 1000.0
+        feed.ingest(MINT, 0.5, "test", now=base)
+        feed.ingest(MINT, 0.55, "test", now=base + 60.0)
+        out = fetch_market_chart(MINT, 1, feed=feed)
         self.assertIsNone(out["error"])
         self.assertEqual(len(out["points"]), 2)
-        self.assertEqual(out["points"][0]["price"], 86.0)
-        self.assertIn("solana", calls[0])
-        self.assertIn("days=1", calls[0])
+        self.assertEqual(out["points"][0]["price"], 0.5)
+        self.assertEqual(out["points"][1]["price"], 0.55)
 
     def test_market_chart_mint_has_no_history(self):
         from tradingbot.charts import fetch_market_chart
-        out = fetch_market_chart(generate_keypair()[1], 1,
-                                 http_get=lambda url: (_ for _ in ()).throw(
-                                     AssertionError("no fetch for mints")))
+        from tradingbot.livefeed import LiveFeed
+
+        out = fetch_market_chart(MINT, 1, feed=LiveFeed())
         self.assertEqual(out["points"], [])
         self.assertIsNotNone(out["error"])
 
-    def test_market_chart_failure_is_an_error_not_fake_data(self):
+    def test_market_chart_symbol_and_missing_feed_are_errors(self):
         from tradingbot.charts import fetch_market_chart
+        from tradingbot.livefeed import LiveFeed
 
-        def boom(url):
-            raise RuntimeError("network down")
-
-        out = fetch_market_chart("SOL", 7, http_get=boom)
+        # A symbol is not a coin any more — never fake data.
+        out = fetch_market_chart("SOL", 7, feed=LiveFeed())
         self.assertEqual(out["points"], [])
-        self.assertIn("network down", out["error"])
+        self.assertIn("no chart history", out["error"])
+        # No feed at all is an error, not an empty chart.
+        out = fetch_market_chart(MINT, 7, feed=None)
+        self.assertEqual(out["points"], [])
+        self.assertIn("live feed unavailable", out["error"])
 
     def test_high_low_from_series(self):
         from tradingbot.charts import high_low_24h

@@ -2,13 +2,18 @@
 the signing-bot allowlist, the mainnet gate, and the full
 quote -> swap -> sign -> settle path in simulation.
 
-No real SOL moves in any test: the RPC is fake, the wallet is a
-throwaway keypair, Jupiter's HTTP answers are mocked, and every
-signed transaction is decoded and checked — including a
-cryptographic signature verification against the wallet key.
+Jupiter trades graduated pump.fun coins ONLY, by mint address —
+there is no symbol resolution and no wrapped-majors map any more.
+The coin under test is a graduated mint (6 decimals, like every
+pump.fun mint). No real SOL moves in any test: the RPC is fake,
+the wallet is a throwaway keypair, Jupiter's HTTP answers are
+mocked, and every signed transaction is decoded and checked —
+including a cryptographic signature verification against the
+wallet key.
 
 Covers: parsing a REAL captured Jupiter swap transaction (base64
-captured live 2026-11-11, SOL -> wZEC, throwaway fee payer);
+captured live 2026-11-11, SOL -> wZEC, throwaway fee payer — the
+parser is mint-agnostic, so the wZEC shape still proves it);
 parsing + allowlist accept/refuse on a synthetic v0 transaction
 built to the same shape; signing; the gate OFF (refuses, nothing
 sent) and ON (executes in simulation, mainnet only); stale-quote /
@@ -41,6 +46,8 @@ from tradingbot.solana import (
     find_associated_token_address, generate_keypair)
 
 FAKE_SIGNATURE = "5" * 43
+# A graduated pump.fun mint (6 decimals by construction).
+GRAD_MINT = "Grad1111111111111111111111111111111111111111"
 BLOCKHASH = "11111111111111111111111111111111"
 TABLE_PROGRAM = "AddressLookupTab1e1111111111111111111111111"
 
@@ -68,7 +75,7 @@ def build_swap_tx(wallet, wsol_ata, out_ata, input_mint, output_mint,
                   side, swap_input_units, table_pubkey,
                   wrap_dest_idx=1, jupiter_prog_idx=3,
                   compute_price=50000, compute_limit=1400000,
-                  token_decimals=8, extra_static=(),
+                  token_decimals=6, extra_static=(),
                   extra_instructions=()):
     """A synthetic v0 Jupiter swap transaction in the exact shape
     the real one has (ComputeBudget, ATA creates, SOL wrap,
@@ -209,11 +216,18 @@ class JupiterExecutorBase(unittest.TestCase):
         _, self.table_pubkey, _ = generate_keypair()
         self.wsol_ata = find_associated_token_address(
             self.pubkey, jup.SOL_MINT)
-        self.wzec_mint = jup.WRAPPED_MINTS["ZEC"]["mint"]
-        self.wzec_ata = find_associated_token_address(
-            self.pubkey, self.wzec_mint)
+        self.grad_mint = GRAD_MINT
+        self.grad_ata = find_associated_token_address(
+            self.pubkey, self.grad_mint)
+        # The executor reads decimals from the chain via its own
+        # RPC client (not the injected fake): mock it to 6, the
+        # pump.fun decimal count, so no live RPC is touched.
+        self.decimals_patch = mock.patch.object(
+            jex, "mint_decimals", return_value=6)
+        self.decimals_patch.start()
 
     def tearDown(self):
+        self.decimals_patch.stop()
         self.tmp.cleanup()
 
     def _bot(self, mode="real", buy_size=20):
@@ -242,29 +256,30 @@ class JupiterExecutorBase(unittest.TestCase):
 
     def _rpc(self, **kwargs):
         return FakeJupiterRpc(
-            self.pubkey, self.wzec_ata, self.table_pubkey,
-            [jup.SOL_MINT, self.wzec_mint], **kwargs)
+            self.pubkey, self.grad_ata, self.table_pubkey,
+            [jup.SOL_MINT, self.grad_mint], **kwargs)
 
     def _buy_tx(self, swap_lamports=100_000_000, **kwargs):
         return build_swap_tx(
-            self.pubkey, self.wsol_ata, self.wzec_ata,
-            jup.SOL_MINT, self.wzec_mint, "buy", swap_lamports,
+            self.pubkey, self.wsol_ata, self.grad_ata,
+            jup.SOL_MINT, self.grad_mint, "buy", swap_lamports,
             self.table_pubkey, **kwargs)
 
-    def _sell_tx(self, token_base=100_000, **kwargs):
+    def _sell_tx(self, token_base=1000, **kwargs):
+        # 0.001 tokens at 6 decimals = 1,000 base units.
         return build_swap_tx(
-            self.pubkey, self.wzec_ata, self.wsol_ata,
-            self.wzec_mint, jup.SOL_MINT, "sell", token_base,
+            self.pubkey, self.grad_ata, self.wsol_ata,
+            self.grad_mint, jup.SOL_MINT, "sell", token_base,
             self.table_pubkey, **kwargs)
 
     def _quote(self, side="buy", out_amount=838_000,
-               out_amount_ui=0.00838, price_impact_pct=0.0,
+               out_amount_ui=0.838, price_impact_pct=0.0,
                fetched_at=None):
         fetched = fetched_at or datetime.now(
             timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return {"side": side, "symbol": "ZEC", "wrapped": True,
-                "display_name": "Zcash",
-                "in_amount": 100_000_000 if side == "buy" else 100_000,
+        return {"side": side, "symbol": GRAD_MINT, "wrapped": False,
+                "display_name": GRAD_MINT,
+                "in_amount": 100_000_000 if side == "buy" else 1000,
                 "out_amount": out_amount,
                 "in_amount_ui": 0.1 if side == "buy" else 0.001,
                 "out_amount_ui": out_amount_ui,
@@ -333,7 +348,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         self.assertEqual(len(parsed["address_table_lookups"]), 1)
         keys = jex.resolved_account_keys(parsed, self._rpc())
         self.assertEqual(keys[8], jup.SOL_MINT)
-        self.assertEqual(keys[9], self.wzec_mint)
+        self.assertEqual(keys[9], self.grad_mint)
         # No raise: the allowlist accepts the real shape.
         jex.verify_jupiter_transaction(
             parsed, keys, self.pubkey, jup.SOL_MINT, 100_000_000,
@@ -344,7 +359,7 @@ class TestVerifyJupiterTransaction(JupiterExecutorBase):
         parsed = jex.parse_versioned_transaction(tx)
         keys = jex.resolved_account_keys(parsed, self._rpc())
         jex.verify_jupiter_transaction(
-            parsed, keys, self.pubkey, self.wzec_mint, 100_000,
+            parsed, keys, self.pubkey, self.grad_mint, 1000,
             "sell", self.wsol_ata)
 
     def test_verify_refuses_swapped_jupiter_instruction(self):
@@ -424,7 +439,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
     def test_gate_off_refuses_plainly_and_sends_nothing(self):
         rpc = self._rpc()
         result = jex.execute_jupiter_swap(
-            self._bot(), self.user_id, "ZEC", "buy", 0.1,
+            self._bot(), self.user_id, GRAD_MINT, "buy", 0.1,
             self.db, self.cfg, rpc_client=rpc,
             quote=self._quote())
         self.assertEqual(result["status"], "skipped")
@@ -434,7 +449,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
     def test_gate_on_but_devnet_refuses(self):
         rpc = self._rpc()
         result = jex.execute_jupiter_swap(
-            self._bot(), self.user_id, "ZEC", "buy", 0.1,
+            self._bot(), self.user_id, GRAD_MINT, "buy", 0.1,
             self.db, self._devnet_gate_cfg(), rpc_client=rpc,
             quote=self._quote())
         self.assertEqual(result["status"], "skipped")
@@ -447,12 +462,12 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
         with mock.patch.object(jex, "fetch_swap_transaction",
                                return_value=self._buy_tx()):
             result = jex.execute_jupiter_swap(
-                self._bot(), self.user_id, "ZEC", "buy", 0.1,
+                self._bot(), self.user_id, GRAD_MINT, "buy", 0.1,
                 self.db, self._mainnet_cfg(), rpc_client=rpc,
                 quote=self._quote())
         self.assertEqual(result["status"], "executed", result)
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
-        self.assertAlmostEqual(result["coin_amount"], 0.00838)
+        self.assertAlmostEqual(result["coin_amount"], 0.838)
         # NO fee (removed 2026-11-12): no fee keys at all, and
         # exactly ONE send — the swap itself. The swap wraps the
         # FULL 0.1 SOL (the mock tx's wrap instruction carries
@@ -472,14 +487,14 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
 
     def test_gate_on_mainnet_sell_executes(self):
         rpc = self._rpc()
-        rpc._ata_balances[self.wzec_ata] = 1_000_000
+        rpc._ata_balances[self.grad_ata] = 1_000_000
         rpc.sell_credit_lamports = 11_713_224
         quote = self._quote(side="sell", out_amount=11_713_224,
                             out_amount_ui=0.011713224)
         with mock.patch.object(jex, "fetch_swap_transaction",
                                return_value=self._sell_tx()):
             result = jex.execute_jupiter_swap(
-                self._bot(), self.user_id, "ZEC", "sell", 0.001,
+                self._bot(), self.user_id, GRAD_MINT, "sell", 0.001,
                 self.db, self._mainnet_cfg(), rpc_client=rpc,
                 quote=quote)
         self.assertEqual(result["status"], "executed", result)
@@ -498,7 +513,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
     def test_paper_bot_refuses(self):
         rpc = self._rpc()
         result = jex.execute_jupiter_swap(
-            self._bot(mode="paper"), self.user_id, "ZEC", "buy", 0.1,
+            self._bot(mode="paper"), self.user_id, GRAD_MINT, "buy", 0.1,
             self.db, self._mainnet_cfg(), rpc_client=rpc,
             quote=self._quote())
         self.assertEqual(result["status"], "skipped")
@@ -508,7 +523,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
     def test_buy_over_limit_refuses(self):
         rpc = self._rpc()
         result = jex.execute_jupiter_swap(
-            self._bot(buy_size=20), self.user_id, "ZEC", "buy", 5.0,
+            self._bot(buy_size=20), self.user_id, GRAD_MINT, "buy", 5.0,
             self.db, self._mainnet_cfg(), rpc_client=rpc,
             quote=self._quote())
         self.assertEqual(result["status"], "skipped")
@@ -518,7 +533,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
     def test_buy_insufficient_fee_reserve_refuses(self):
         rpc = self._rpc(balance_lamports=100_500_000)
         result = jex.execute_jupiter_swap(
-            self._bot(buy_size=100), self.user_id, "ZEC", "buy", 0.1,
+            self._bot(buy_size=100), self.user_id, GRAD_MINT, "buy", 0.1,
             self.db, self._mainnet_cfg(), rpc_client=rpc,
             quote=self._quote())
         self.assertEqual(result["status"], "skipped")
@@ -530,7 +545,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
         old = (datetime.now(timezone.utc) - timedelta(hours=1)
                ).strftime("%Y-%m-%dT%H:%M:%SZ")
         result = jex.execute_jupiter_swap(
-            self._bot(), self.user_id, "ZEC", "buy", 0.1,
+            self._bot(), self.user_id, GRAD_MINT, "buy", 0.1,
             self.db, self._mainnet_cfg(), rpc_client=rpc,
             quote=self._quote(fetched_at=old))
         self.assertEqual(result["status"], "skipped")
@@ -540,7 +555,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
     def test_price_impact_refuses(self):
         rpc = self._rpc()
         result = jex.execute_jupiter_swap(
-            self._bot(), self.user_id, "ZEC", "buy", 0.1,
+            self._bot(), self.user_id, GRAD_MINT, "buy", 0.1,
             self.db, self._mainnet_cfg(), rpc_client=rpc,
             quote=self._quote(price_impact_pct=6.0))
         self.assertEqual(result["status"], "skipped")
@@ -554,7 +569,7 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
                                return_value=self._buy_tx(
                                    wrap_dest_idx=2)):
             result = jex.execute_jupiter_swap(
-                self._bot(), self.user_id, "ZEC", "buy", 0.1,
+                self._bot(), self.user_id, GRAD_MINT, "buy", 0.1,
                 self.db, self._mainnet_cfg(), rpc_client=rpc,
                 quote=self._quote())
         self.assertEqual(result["status"], "skipped")
@@ -563,9 +578,9 @@ class TestExecuteJupiterSwap(JupiterExecutorBase):
 
     def test_sell_over_held_balance_refuses(self):
         rpc = self._rpc()
-        rpc._ata_balances[self.wzec_ata] = 50_000  # < 100,000 needed
+        rpc._ata_balances[self.grad_ata] = 500  # < 1,000 needed
         result = jex.execute_jupiter_swap(
-            self._bot(), self.user_id, "ZEC", "sell", 0.001,
+            self._bot(), self.user_id, GRAD_MINT, "sell", 0.001,
             self.db, self._mainnet_cfg(), rpc_client=rpc,
             quote=self._quote(side="sell", out_amount=11_713_224,
                               out_amount_ui=0.011713224))

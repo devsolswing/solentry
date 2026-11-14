@@ -25,6 +25,13 @@ from tradingbot.pnl import (RANGES, chart_points, chart_svg,
 from tradingbot.silent_loop import run_once
 from tradingbot.trenches import _entry as feed_entry
 
+# Gate (the devnet pump.fun coin): the mint every paper-buy test
+# uses — SOL is not a buyable coin any more (no SOL detail page,
+# no SOL buy route), so buys price the mint from the mocked
+# trenches feed.
+GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+GATE_PRICE = 0.01
+
 
 class FakeRpc:
     def __init__(self, url, balance_lamports=2_000_000_000):
@@ -184,24 +191,46 @@ class TestPnlPage(PnlBase):
         self.assertNotIn("$100.00 CAD", html)
 
     def test_paper_buy_records_snapshot_and_home_shows_it(self):
+        # A real paper buy of the Gate mint: $10 at the mocked
+        # $0.01 feed price buys 1000 GATE. The trenches feed +
+        # coin_meta are mocked out so no test hits live
+        # RPC/DexScreener.
         token = csrf(self.client, "/dashboard")
-        resp = self.client.post("/coins/SOL/buy", data={
-            "csrf_token": token, "usd": "10", "bot_id": ""},
-            follow_redirects=False)
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn("Bought", resp.get_data(as_text=True))
+        with mock.patch.object(
+                routes, "fetch_prices_for_mints",
+                return_value={GATE_MINT: GATE_PRICE}), \
+                mock.patch.object(
+                    routes, "fetch_mint_1h_changes",
+                    return_value={GATE_MINT: 2.5}), \
+                mock.patch.object(
+                    routes, "fetch_mint_identities",
+                    return_value={GATE_MINT: {"name": "Gate",
+                                              "symbol": "GATE"}}), \
+                mock.patch.object(routes, "ensure_coin_meta",
+                                  return_value=None), \
+                mock.patch.object(
+                    routes, "get_prices",
+                    return_value={"prices": {"SOL": {"price": 100.0,
+                                                     "change_24h": 5.0,
+                                                     "change_1h": None}},
+                                  "source": "live", "as_of": "test"}):
+            resp = self.client.post(f"/coins/{GATE_MINT}/buy", data={
+                "csrf_token": token, "usd": "10", "bot_id": ""},
+                follow_redirects=False)
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn("Bought", resp.get_data(as_text=True))
+            html = self.client.get("/wallet").get_data(as_text=True)
         rows = self.db.execute(
             "SELECT * FROM portfolio_snapshots WHERE user_id = ?",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1)
-        # $10 buy: cash $90 + 0.1 SOL at $100 ($10) = $100.00 — no
-        # fee (removed 2026-11-12), so the total is the full $100.
+        # $10 buy: cash $90 + 1000 GATE at $0.01 ($10) = $100.00 —
+        # no fee (removed 2026-11-12), so the total is the full $100.
         self.assertAlmostEqual(rows[0]["total_value_usd"], 100.0,
                                places=1)
         # The home page now shows the portfolio total (the old /pnl
         # page is gone): $100.00 CAD.
-        html = self.client.get("/wallet").get_data(as_text=True)
-        self.assertIn("SOL", html)
+        self.assertIn("GATE", html)
         self.assertIn("$100.00 CAD", html)
 
     def test_silent_loop_evaluation_records_snapshot(self):

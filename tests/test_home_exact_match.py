@@ -23,7 +23,7 @@ from unittest import mock
 import tradingbot.home_holdings as hh
 import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
-from test_home_mockup import HomeMockupBase
+from test_home_mockup import GATE_MINT, HomeMockupBase
 
 
 def _css():
@@ -136,17 +136,21 @@ class TestHoldingsRowExact(HomeMockupBase):
 
     def test_amount_sits_under_the_price(self):
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_mint()
         html = self._html("/wallet")
-        # 1 SOL bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
-        # 1.0000 SOL worth $10.00; the price is $10.00; 1h +2.50%.
-        self.assertIn("1.0000 SOL", html)
+        # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
+        # (removed 2026-11-12), leaves 1,000.0000 GATE worth $10.00;
+        # the price is $0.0100; 1h +2.50%.
+        self.assertIn("1,000.0000 GATE", html)
+        self.assertIn("$0.0100", html)
         self.assertIn("$10.00", html)
         self.assertIn("+2.50%", html)
         # The amount comes after the price and before the % — it is
         # under the price on the right, not under the name.
-        self.assertLess(html.index("$10.00"), html.index("1.0000 SOL"))
-        self.assertLess(html.index("1.0000 SOL"), html.index("+2.50%"))
+        self.assertLess(html.index("$0.0100"),
+                        html.index("1,000.0000 GATE"))
+        self.assertLess(html.index("1,000.0000 GATE"),
+                        html.index("+2.50%"))
         # The $ value is still in the page (hidden, for the live
         # paper total) but not a visible row line.
         self.assertIn("$10.00", html)
@@ -155,7 +159,7 @@ class TestHoldingsRowExact(HomeMockupBase):
 
     def test_no_1h_label_under_the_percent(self):
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_mint()
         html = self._html("/wallet")
         self.assertNotIn("holdings-1h-label", html)
         # The holdings list follows the balance box directly (no
@@ -259,22 +263,24 @@ class TestSparkline1h(unittest.TestCase):
     def test_last_hour_from_feed_history(self):
         # Three ticks an hour apart: only the last hour (ending at
         # the newest tick) comes back.
-        feed = self.Feed({"MINT": [(1700000000, 1.0),
-                                   (1700003600, 2.0),
-                                   (1700007200, 3.0)]})
+        feed = self.Feed({GATE_MINT: [(1700000000, 1.0),
+                                      (1700003600, 2.0),
+                                      (1700007200, 3.0)]})
         self.assertEqual(
-            hh.sparkline_points_1h("MINT", is_mint=True, feed=feed),
+            hh.sparkline_points_1h(GATE_MINT, is_mint=True, feed=feed),
             [2.0, 3.0])
 
     def test_fewer_than_two_points_in_the_hour_is_empty(self):
-        feed = self.Feed({"MINT": [(1700000000, 1.0)]})
+        feed = self.Feed({GATE_MINT: [(1700000000, 1.0)]})
         self.assertEqual(
-            hh.sparkline_points_1h("MINT", is_mint=True, feed=feed), [])
+            hh.sparkline_points_1h(GATE_MINT, is_mint=True, feed=feed),
+            [])
         self.assertEqual(
-            hh.sparkline_svg_1h("MINT", is_mint=True, feed=feed), "")
+            hh.sparkline_svg_1h(GATE_MINT, is_mint=True, feed=feed), "")
 
-    def test_major_falls_back_to_coingecko(self):
-        # No feed history: CoinGecko's 1-day chart, last hour only.
+    def test_last_hour_comes_from_the_feed_chart(self):
+        # No feed history: the feed-based market chart, last hour
+        # only. There is no CoinGecko fallback any more.
         with mock.patch.object(
                 hh, "fetch_market_chart",
                 return_value={"points": [
@@ -283,14 +289,14 @@ class TestSparkline1h(unittest.TestCase):
                     {"ts": 1700007200000, "price": 11.0}],
                     "error": None}):
             self.assertEqual(
-                hh.sparkline_points_1h("SOL", feed=self.Feed({})),
+                hh.sparkline_points_1h(GATE_MINT, feed=self.Feed({})),
                 [10.0, 11.0])
 
     def test_svg_1h_is_a_gold_line(self):
-        feed = self.Feed({"MINT": [(1700000000, 1.0),
-                                   (1700003600, 2.0),
-                                   (1700007200, 3.0)]})
-        svg = hh.sparkline_svg_1h("MINT", is_mint=True, feed=feed)
+        feed = self.Feed({GATE_MINT: [(1700000000, 1.0),
+                                      (1700003600, 2.0),
+                                      (1700007200, 3.0)]})
+        svg = hh.sparkline_svg_1h(GATE_MINT, is_mint=True, feed=feed)
         self.assertIn("<svg", svg)
         self.assertIn("<polyline", svg)
         self.assertIn('stroke="#ffd700"', svg)
@@ -307,12 +313,12 @@ class TestSparklinesEndpoint(HomeMockupBase):
                         now=now - (len(prices) - 1 - i) * 60)
 
     def test_returns_svg_for_a_coin_with_recent_history(self):
-        self._ingest("SOL", [10.0, 10.1, 10.2])
-        resp = self.client.get("/api/sparklines?coins=SOL")
+        self._ingest(GATE_MINT, [10.0, 10.1, 10.2])
+        resp = self.client.get(f"/api/sparklines?coins={GATE_MINT}")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertTrue(data["ok"])
-        svg = data["sparklines"]["SOL"]
+        svg = data["sparklines"][GATE_MINT]
         self.assertIn("<svg", svg)
         self.assertIn("holdings-spark-svg", svg)
 
@@ -320,16 +326,16 @@ class TestSparklinesEndpoint(HomeMockupBase):
         with mock.patch.object(
                 hh, "fetch_market_chart",
                 return_value={"points": [], "error": "test"}):
-            resp = self.client.get("/api/sparklines?coins=BTC")
+            resp = self.client.get(f"/api/sparklines?coins={GATE_MINT}")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertTrue(data["ok"])
-        self.assertIsNone(data["sparklines"]["BTC"])
+        self.assertIsNone(data["sparklines"][GATE_MINT])
 
     def test_requires_login(self):
         tmp = tempfile.TemporaryDirectory()
         _app, anon = make_client(tmp.name)
-        resp = anon.get("/api/sparklines?coins=SOL")
+        resp = anon.get(f"/api/sparklines?coins={GATE_MINT}")
         self.assertIn(resp.status_code, (302, 401))
         tmp.cleanup()
 

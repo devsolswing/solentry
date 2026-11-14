@@ -300,13 +300,17 @@ class TestSilentLoop(SilentBase):
             "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"], 0)
 
     def test_real_trade_skipped_no_swap_path_no_fake_fill(self):
+        # "SOL" is not a token mint, so it has no swap path in this
+        # app: the loop refuses it up front as an invalid token
+        # address (the executor itself still answers "real swap not
+        # available in v1" for a non-mint it is handed directly).
         self._insert_bot(silent=1, mode="real")
         outcomes = self._run(make_prices({"SOL": (100.0, 5.0)}),
                              rpc_balance=5_000_000_000)
         skips = [a for a in outcomes[0]["actions"]
                  if a["action"] == "skip"]
         self.assertEqual(len(skips), 1)
-        self.assertEqual(skips[0]["reason"], "real swap not available in v1")
+        self.assertEqual(skips[0]["reason"], "Not a valid token address")
         # No fill anywhere: no position, no paper trade, no send intent.
         self.assertEqual(self.db.execute(
             "SELECT COUNT(*) c FROM bot_positions").fetchone()["c"], 0)
@@ -314,7 +318,7 @@ class TestSilentLoop(SilentBase):
             "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"], 0)
         self.assertEqual(self.db.execute(
             "SELECT COUNT(*) c FROM send_intents").fetchone()["c"], 0)
-        self.assertIn("real swap not available",
+        self.assertIn("Not a valid token address",
                       self._activity("silent_skip")[0]["detail"])
 
     def test_injected_executor_wiring_records_fill(self):

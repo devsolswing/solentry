@@ -42,7 +42,7 @@ from flask import render_template
 import tradingbot.home_holdings as hh
 import tradingbot.routes as routes
 from helpers import make_client, signup
-from test_home_mockup import HomeMockupBase
+from test_home_mockup import GATE_MINT, HomeMockupBase
 
 # The mockup photo's figures — examples only, never the user's data.
 MOCKUP_NUMBERS = ("2.45 SOL", "$185.20", "+5.82%", "0.0731 SOL",
@@ -120,16 +120,16 @@ class TestHomeRebuildNavigation(HomeMockupBase):
     belongs to — scanned from the photo."""
 
     def test_every_holdings_row_links_to_its_coin_page(self):
-        # A real paper buy: the SOL row taps through to the coin
+        # A real paper buy: the Gate row taps through to the coin
         # detail page, not a popup.
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_mint()
         html = self._html("/wallet")
-        self.assertIn("/coins/SOL/detail", html)
+        self.assertIn(f"/coins/{GATE_MINT}/detail", html)
         # The row itself is a link to the coin page — not a popup
         # trigger.
         row = html.split('class="coin-row holdings-row"')[1].split("</a>")[0]
-        self.assertIn("/coins/SOL/detail", row)
+        self.assertIn(f"/coins/{GATE_MINT}/detail", row)
         self.assertNotIn("data-popup", row)
 
     def test_fabricated_rows_each_link_to_their_coin_page(self):

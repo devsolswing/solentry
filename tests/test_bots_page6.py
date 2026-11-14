@@ -110,31 +110,22 @@ class TestBotsPage6(UiBase):
         self.assertNotIn("data-wallet-rotator", js)
         self.assertNotIn("data-wallet-panel", js)
 
-    def test_platform_wallet_create_still_works_but_not_on_bots(self):
-        # The create route (a Page 8 feature) still works — the
-        # wallet is really created — but nothing about it shows
-        # on Page 6 anymore.
+    def test_platform_wallet_create_route_is_gone(self):
+        # The platform-wallet feature is deleted entirely in the
+        # pump.fun-only rebuild (platforms.py gone, the
+        # /platforms/<platform>/create route gone, the
+        # platform_wallets table dropped): the create route 404s,
+        # and nothing about platform wallets shows on Page 6.
         self._choose_mode("paper")
         resp = self.client.post(
             "/platforms/pump.fun/create",
             data={"csrf_token": csrf(self.client, "/bots"),
                   "return_to": "/bots"})
-        self.assertIn(resp.status_code, (200, 302))
-        db = self.app.config["DB"]
-        row = db.execute(
-            "SELECT pubkey FROM platform_wallets "
-            "WHERE user_id = ? AND platform = 'pump.fun'",
-            (self.user_id,)).fetchone()
-        self.assertIsNotNone(row)
-        # The create route flashes the new address once on the
-        # redirect target — that flash is the route's own message,
-        # not the deleted selector. Load the page again (flash
-        # consumed) and nothing about the wallet may remain.
-        self._html("/bots")
+        self.assertEqual(resp.status_code, 404)
         html = self._html("/bots")
-        self.assertNotIn(row["pubkey"], html)
         self.assertNotIn("Wallet ready.", html)
         self.assertNotIn("Platform wallets", html)
+        self.assertNotIn("/platforms/pump.fun/create", html)
 
     def test_edit_bot_same_size_as_add_bot(self):
         self._choose_mode("paper")

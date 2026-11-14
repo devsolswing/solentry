@@ -1,18 +1,21 @@
-"""Jupiter route endpoint + coin page buy flow (HTTP level).
+"""Graduated-coin Jupiter dispatch + coin page buy flow (HTTP level).
 
 Rules under test:
-- GET /api/coins/<coin>/route shows the "Finding route…" scan's
-  result: the real quoted route (pools/DEXes, expected output,
-  price impact, fetch time) or an honest "No liquid route found"
-  when Jupiter has no liquid route — never a dead route, never a
-  made-up one. TOKEN_NOT_TRADABLE maps to the same plain message;
-  Jupiter being unreachable is reported as itself.
+- The "Finding route…" route endpoint is GONE: GET
+  /api/coins/<coin>/route 404s for every coin, and so does
+  /api/wrapped-majors. The coin detail page shows no route box,
+  no "Finding route…" state, and no wrapped-majors picker.
+- A real buy dispatches by bonding-curve completeness: a
+  graduated mint goes through the Jupiter executor, a mint still
+  bonding through the pump.fun executor, and an unreadable curve
+  refuses plainly — the venue is never guessed.
+- Paper buys price from the live Jupiter quote when the coin has
+  one (a graduated coin); a failed quote falls back to the live
+  price and never blocks the trade.
 - There is NO per-coin wallet step: the coin page shows no
   "Create wallet" button and no wallet indicator, the Buy button
   is enabled, and a Buy goes through with no wallet tap first.
   The old /api/coins/<coin>/wallet endpoint is gone (404).
-- Wrapped coins are labelled wrapped on the coin page, and paper
-  buys price from the live Jupiter quote.
 No SOL moves in these tests; Jupiter's HTTP answers are mocked
 (except the live tests in test_jupiter.py, which hit the real API).
 """
@@ -27,9 +30,11 @@ import tradingbot.prices as prices
 import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
 from test_jupiter import REAL_QUOTE
-from tradingbot.solana import generate_keypair
 
-MINT = "11111111111111111111111111111111"
+# A graduated pump.fun mint (6 decimals by construction).
+MINT = "Grad1111111111111111111111111111111111111111"
+# A mint still on its bonding curve.
+BONDING_MINT = "Bond1111111111111111111111111111111111111111"
 
 
 class FakeRpc:
@@ -49,16 +54,7 @@ class FakeRpc:
         return True
 
 
-def fake_ohlc(*args, **kwargs):
-    return {"candles": [
-        {"ts": 1790000000000, "open": 80.0, "high": 82.0,
-         "low": 79.0, "close": 81.0},
-        {"ts": 1790001800000, "open": 81.0, "high": 83.0,
-         "low": 80.0, "close": 82.0}],
-        "interval": 1800, "error": None}
-
-
-def fake_chart(coin, days):
+def fake_chart(coin, days, feed=None, http_get=None):
     return {"points": [
         {"ts": 1790000000000, "price": 80.0},
         {"ts": 1790000060000, "price": 84.0},
@@ -67,39 +63,19 @@ def fake_chart(coin, days):
 
 
 def make_prices():
-    out = {}
-    for coin, price in (("SOL", 100.0), ("ZEC", 990.0),
-                        ("BTC", 74000.0), ("ETH", 2100.0),
-                        ("ADA", 0.5), ("USDC", 1.0)):
-        out[coin] = {"price": price, "change_24h": 0.0,
-                     "change_1h": 0.0}
-    return {"prices": out, "source": "live", "as_of": "test"}
+    return {"prices": {"SOL": {"price": 100.0, "change_24h": 0.0,
+                               "change_1h": 0.0}},
+            "source": "live", "as_of": "test"}
 
 
-def zec_buy_quote():
-    """A normalised SOL -> wZEC buy quote, from the real captured
-    quote shape: 0.1 SOL in, 0.00853837 wZEC out."""
+def grad_buy_quote():
+    """A normalised SOL -> graduated-mint buy quote, from the real
+    captured quote shape: 0.1 SOL in, 0.853837 tokens out."""
     quote = jup._parse_quote(
-        dict(REAL_QUOTE,
-             outputMint=jup.WRAPPED_MINTS["ZEC"]["mint"],
-             outAmount="853837"),
-        side="buy", symbol="ZEC", wrapped=True, display_name="Zcash")
+        dict(REAL_QUOTE, outputMint=MINT, outAmount="853837"),
+        side="buy", symbol=MINT, wrapped=False, display_name=MINT)
     quote["in_amount_ui"] = 0.1
-    quote["out_amount_ui"] = 0.00853837
-    return quote
-
-
-def zec_sell_quote():
-    """A normalised wZEC -> SOL sell quote: 0.001 wZEC in,
-    ~0.0117 SOL out."""
-    quote = jup._parse_quote(
-        dict(REAL_QUOTE,
-             inputMint=jup.WRAPPED_MINTS["ZEC"]["mint"],
-             outputMint=jup.SOL_MINT,
-             inAmount="100000", outAmount="11713224"),
-        side="sell", symbol="ZEC", wrapped=True, display_name="Zcash")
-    quote["in_amount_ui"] = 0.001
-    quote["out_amount_ui"] = 0.011713224
+    quote["out_amount_ui"] = 0.853837
     return quote
 
 
@@ -119,9 +95,6 @@ class JupiterRoutesBase(unittest.TestCase):
         self.chart_patch = mock.patch.object(
             routes, "fetch_market_chart", side_effect=fake_chart)
         self.chart_patch.start()
-        self.ohlc_patch = mock.patch.object(
-            routes, "fetch_ohlc", side_effect=fake_ohlc)
-        self.ohlc_patch.start()
         self.flow_patch = mock.patch.object(
             routes, "fetch_trade_flow",
             return_value={"buys": 120, "sells": 80,
@@ -133,6 +106,13 @@ class JupiterRoutesBase(unittest.TestCase):
                           "source": "dexscreener", "as_of": "test",
                           "error": None})
         self.trenches_patch.start()
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            return_value={MINT: 0.002, BONDING_MINT: 0.001})
+        self.mint_prices_patch.start()
+        self.meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.meta_patch.start()
         signup(self.client, "alice")
         self.db = self.app.config["DB"]
         self.user_id = self.db.execute(
@@ -143,9 +123,10 @@ class JupiterRoutesBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
 
     def tearDown(self):
+        self.meta_patch.stop()
+        self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.flow_patch.stop()
-        self.ohlc_patch.stop()
         self.chart_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()
@@ -157,163 +138,166 @@ class JupiterRoutesBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, path)
         return resp.get_data(as_text=True)
 
+    def _make_real_bot(self):
+        import hashlib
+        cur = self.db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self.user_id, "Trenches", "balanced",
+             json.dumps([MINT]), 20, 7, "real", 0, 3,
+             hashlib.sha256(b"tok").hexdigest()))
+        self.db.commit()
+        return cur.lastrowid
 
-class TestJupiterRouteEndpoint(JupiterRoutesBase):
-    def test_route_buy_returns_real_route(self):
-        with mock.patch.object(jup, "quote_buy",
-                               return_value=zec_buy_quote()):
-            resp = self.client.get("/api/coins/ZEC/route"
-                                   "?amount_sol=0.1")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertTrue(data["ok"], data)
-        self.assertEqual(data["coin_id"], "ZEC")
-        self.assertEqual(data["side"], "buy")
-        self.assertTrue(data["wrapped"])
-        self.assertEqual(data["display_name"], "Zcash")
-        self.assertEqual(data["route_labels"], ["Byreal", "Scorch"])
-        self.assertAlmostEqual(data["out_amount_ui"], 0.00853837)
-        self.assertTrue(data["fetched_at"])
-        self.assertEqual(data["source"], "jupiter")
-        text = "\n".join(data["lines"])
-        self.assertIn("WRAPPED", text)
-        self.assertIn("not the native coin", text)
+    def _switch_mode(self, mode):
+        resp = self.client.post("/choose-mode", data={
+            "csrf_token": csrf(self.client, "/wallet"), "mode": mode})
+        self.assertEqual(resp.status_code, 302)
 
-    def test_route_sell_returns_sol_output(self):
-        with mock.patch.object(jup, "quote_sell",
-                               return_value=zec_sell_quote()):
-            resp = self.client.get("/api/coins/ZEC/route"
-                                   "?side=sell&amount_sol=0.1")
-        data = resp.get_json()
-        self.assertTrue(data["ok"], data)
-        self.assertEqual(data["side"], "sell")
-        self.assertAlmostEqual(data["out_amount_ui"], 0.011713224)
 
-    def test_route_no_route_says_so_plainly(self):
-        with mock.patch.object(
-                jup, "quote_buy",
-                side_effect=jup.NoRouteError("No route found")):
-            resp = self.client.get("/api/coins/ZEC/route"
-                                   "?amount_sol=0.1")
-        data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error"], jup.NO_LIQUID_ROUTE)
-        self.assertEqual(data["error"],
-                         "No liquid route found for this coin.")
+class TestRouteEndpointGone(JupiterRoutesBase):
+    def test_route_endpoint_404s_for_mint(self):
+        resp = self.client.get(f"/api/coins/{MINT}/route")
+        self.assertEqual(resp.status_code, 404)
 
-    def test_route_not_tradable_says_so_plainly(self):
-        with mock.patch.object(
-                jup, "quote_buy",
-                side_effect=jup.JupiterError(
-                    "The token EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1"
-                    " is not tradable")):
-            resp = self.client.get("/api/coins/ZEC/route"
-                                   "?amount_sol=0.1")
-        data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error"], jup.NO_LIQUID_ROUTE)
+    def test_route_endpoint_404s_for_symbol(self):
+        resp = self.client.get("/api/coins/ZEC/route?amount_sol=0.1")
+        self.assertEqual(resp.status_code, 404)
 
-    def test_route_unreachable_reports_itself(self):
-        with mock.patch.object(
-                jup, "quote_buy",
-                side_effect=jup.JupiterError(
-                    "Jupiter is unreachable right now.")):
-            resp = self.client.get("/api/coins/ZEC/route"
-                                   "?amount_sol=0.1")
-        data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertIn("unreachable", data["error"])
-        self.assertNotIn("No liquid route", data["error"])
+    def test_wrapped_majors_endpoint_404s(self):
+        resp = self.client.get("/api/wrapped-majors")
+        self.assertEqual(resp.status_code, 404)
 
-    def test_route_pumpfun_mint_has_no_jupiter_route(self):
-        with mock.patch.object(routes, "fetch_prices_for_mints",
-                               return_value={}):
-            resp = self.client.get(f"/api/coins/{MINT}/route")
-        data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertIn("pump.fun", data["error"])
-
-    def test_route_sol_needs_no_route(self):
-        resp = self.client.get("/api/coins/SOL/route")
-        data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertIn("no route needed", data["error"])
-
-    def test_route_amount_must_be_positive(self):
-        resp = self.client.get("/api/coins/ZEC/route?amount_sol=0")
-        data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertIn("more than 0", data["error"])
+    def test_detail_has_no_route_box_or_wrapped_picker(self):
+        html = self._html(f"/coins/{MINT}/detail")
+        self.assertNotIn("jupiter-route-status", html)
+        self.assertNotIn("Finding route", html)
+        self.assertNotIn("wrapped-majors", html)
+        self.assertNotIn("Wrapped majors", html)
+        self.assertNotIn("Trades as", html)
 
 
 class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
     def test_buy_works_with_no_wallet_step(self):
         # No tap first: the Buy goes straight through.
-        resp = self.client.post("/coins/ZEC/buy", data={
-            "csrf_token": csrf(self.client, "/coins/ZEC"),
+        resp = self.client.post(f"/coins/{MINT}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{MINT}"),
             "usd": "10", "bot_id": ""})
         self.assertIn("Bought", resp.get_data(as_text=True))
         count = self.db.execute(
             "SELECT COUNT(*) c FROM paper_holdings WHERE user_id = ? "
-            "AND coin_id = 'ZEC'", (self.user_id,)).fetchone()["c"]
+            "AND coin_id = ?", (self.user_id, MINT)).fetchone()["c"]
         self.assertEqual(count, 1)
 
     def test_detail_has_no_wallet_step_and_buy_enabled(self):
-        html = self._html("/coins/ZEC/detail")
+        html = self._html(f"/coins/{MINT}/detail")
         self.assertNotIn("Create wallet", html)
         self.assertNotIn("wallet-create-btn", html)
         self.assertNotIn("wallet-connected", html)
         self.assertNotIn("coin-wallet", html)
         # The Buy button carries no disabled attribute.
         self.assertNotIn("data-buy-btn", html)
-        # And a Buy from the page goes through with no tap first.
-        resp = self.client.post("/coins/ZEC/buy", data={
-            "csrf_token": csrf(self.client, "/coins/ZEC"),
-            "usd": "10", "bot_id": ""})
-        self.assertIn("Bought", resp.get_data(as_text=True))
-        html = self._html("/coins/ZEC/detail")
-        self.assertNotIn("Create wallet", html)
-        self.assertNotIn("wallet-connected", html)
 
-    def test_detail_shows_finding_route_state(self):
-        html = self._html("/coins/ZEC/detail")
-        self.assertIn("jupiter-route-status", html)
-        self.assertIn("Finding route…", html)
-
-    def test_detail_labels_wrapped_coin(self):
-        html = self._html("/coins/ZEC/detail")
-        self.assertIn("Trades as Zcash on Solana", html)
-        self.assertIn("the wrapped token, not native", html)
-
-    def test_wallet_endpoint_is_gone_and_ada_buys_in_paper(self):
-        # The per-coin wallet endpoint no longer exists.
-        resp = self.client.post("/api/coins/ADA/wallet", data={
-            "csrf_token": csrf(self.client, "/coins/ADA")})
+    def test_wallet_endpoint_is_gone(self):
+        resp = self.client.post(f"/api/coins/{MINT}/wallet", data={
+            "csrf_token": csrf(self.client, f"/coins/{MINT}")})
         self.assertEqual(resp.status_code, 404)
-        # And with no wallet gate, an ADA paper buy goes through.
-        resp = self.client.post("/coins/ADA/buy", data={
-            "csrf_token": csrf(self.client, "/coins/ADA"),
-            "usd": "10", "bot_id": ""})
-        html = resp.get_data(as_text=True)
-        self.assertIn("Bought", html)
 
     def test_paper_buy_prices_from_jupiter_quote(self):
         # 0.1 SOL at a $100 SOL price is $10; the Jupiter quote
-        # says that buys 0.00853837 wZEC, so the fill price is
-        # ~$1,171/wZEC — not the $100 feed price (which would
-        # fill 0.1 wZEC). No fee (removed 2026-11-12).
-        with mock.patch.object(jup, "quote_buy",
-                               return_value=zec_buy_quote()):
-            resp = self.client.post("/coins/ZEC/buy", data={
-                "csrf_token": csrf(self.client, "/coins/ZEC"),
+        # says that buys 0.853837 tokens, so the fill price is
+        # ~$11.71/token — not the $0.002 feed price (which would
+        # fill 5,000 tokens). No fee (removed 2026-11-12).
+        with mock.patch.object(
+                jup, "jupiter_usd_price_mint", return_value=11.71):
+            resp = self.client.post(f"/coins/{MINT}/buy", data={
+                "csrf_token": csrf(self.client, f"/coins/{MINT}"),
                 "amount_sol": "0.1", "bot_id": ""})
         self.assertIn("Bought", resp.get_data(as_text=True))
         amount = self.db.execute(
             "SELECT amount FROM paper_holdings WHERE user_id = ? "
-            "AND coin_id = 'ZEC'", (self.user_id,)).fetchone()["amount"]
-        expected = 10.0 / (0.1 * 100.0 / 0.00853837)
-        self.assertAlmostEqual(amount, expected, places=5)
-        self.assertNotAlmostEqual(amount, 0.1, places=3)
+            "AND coin_id = ?", (self.user_id, MINT)
+            ).fetchone()["amount"]
+        self.assertAlmostEqual(amount, 10.0 / 11.71, places=5)
+        self.assertNotAlmostEqual(amount, 5000.0, places=3)
+
+    def test_paper_buy_falls_back_to_feed_when_quote_fails(self):
+        # Jupiter cannot quote (bonding coin, no route): the buy
+        # still goes through at the live feed price.
+        with mock.patch.object(
+                jup, "jupiter_usd_price_mint", return_value=None):
+            resp = self.client.post(f"/coins/{MINT}/buy", data={
+                "csrf_token": csrf(self.client, f"/coins/{MINT}"),
+                "amount_sol": "0.1", "bot_id": ""})
+        self.assertIn("Bought", resp.get_data(as_text=True))
+        amount = self.db.execute(
+            "SELECT amount FROM paper_holdings WHERE user_id = ? "
+            "AND coin_id = ?", (self.user_id, MINT)
+            ).fetchone()["amount"]
+        self.assertAlmostEqual(amount, 10.0 / 0.002, places=3)
+
+
+class TestRealBuyDispatchByCurve(JupiterRoutesBase):
+    def _buy(self, mint, bot_id):
+        return self.client.post(f"/coins/{mint}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{mint}"),
+            "amount_sol": "0.1", "bot_id": str(bot_id)})
+
+    def test_graduated_mint_goes_through_jupiter(self):
+        bot_id = self._make_real_bot()
+        self._switch_mode("devnet")
+        with mock.patch.object(routes, "is_curve_complete",
+                               return_value=True), \
+                mock.patch.object(
+                    routes, "execute_jupiter_swap",
+                    return_value={"status": "executed",
+                                  "coin_amount": 0.5,
+                                  "signature": "sig1",
+                                  "signing_bot": "SB1"}) as jup_exec, \
+                mock.patch.object(
+                    routes, "execute_real_trade") as pump_exec:
+            resp = self._buy(MINT, bot_id)
+        self.assertIn("Bought", resp.get_data(as_text=True))
+        self.assertEqual(jup_exec.call_count, 1)
+        self.assertEqual(pump_exec.call_count, 0)
+        args = jup_exec.call_args[0]
+        self.assertEqual(args[2], MINT)
+        self.assertEqual(args[3], "buy")
+
+    def test_bonding_mint_goes_through_pumpfun(self):
+        bot_id = self._make_real_bot()
+        self._switch_mode("devnet")
+        with mock.patch.object(routes, "is_curve_complete",
+                               return_value=False), \
+                mock.patch.object(
+                    routes, "execute_jupiter_swap") as jup_exec, \
+                mock.patch.object(
+                    routes, "execute_real_trade",
+                    return_value={"status": "executed",
+                                  "coin_amount": 0.5,
+                                  "signature": "sig2",
+                                  "signing_bot": "SB1"}) as pump_exec:
+            resp = self._buy(BONDING_MINT, bot_id)
+        self.assertIn("Bought", resp.get_data(as_text=True))
+        self.assertEqual(pump_exec.call_count, 1)
+        self.assertEqual(jup_exec.call_count, 0)
+
+    def test_unreadable_curve_refuses_plainly(self):
+        bot_id = self._make_real_bot()
+        self._switch_mode("devnet")
+        with mock.patch.object(routes, "is_curve_complete",
+                               return_value=None), \
+                mock.patch.object(
+                    routes, "execute_jupiter_swap") as jup_exec, \
+                mock.patch.object(
+                    routes, "execute_real_trade") as pump_exec:
+            resp = self._buy(MINT, bot_id)
+        html = resp.get_data(as_text=True)
+        self.assertIn("Nothing was bought", html)
+        self.assertIn("Bonding curve unavailable", html)
+        self.assertEqual(jup_exec.call_count, 0)
+        self.assertEqual(pump_exec.call_count, 0)
 
 
 if __name__ == "__main__":

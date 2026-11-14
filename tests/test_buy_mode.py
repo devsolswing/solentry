@@ -8,8 +8,71 @@ get the confirmation page (200), not a redirect."""
 
 import tempfile
 import unittest
+from unittest import mock
 
+import tradingbot.coin_meta as coin_meta_mod
+import tradingbot.home_holdings as home_holdings_mod
+import tradingbot.jupiter as jupiter_mod
+import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
+
+# Gate — the devnet pump.fun mint used as the test coin throughout
+# this file. SOL is the unit of account, never a listed/buyable
+# coin, so every buy test uses this mint instead.
+GATE = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+GATE_PRICE = 0.0000005
+
+
+def start_route_mocks(tc):
+    """Keep every live feed local: the trenches price/identity for
+    the Gate mint, a SOL-only price list, and no logo/RPC/Metaplex
+    or Jupiter calls in these tests."""
+    tc.mint_prices = {GATE: GATE_PRICE}
+    tc.mint_identities = {GATE: {"name": "Gate", "symbol": "GATE"}}
+    patches = [
+        mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            side_effect=lambda mints, http_get=None: {
+                m: tc.mint_prices[m] for m in mints
+                if m in tc.mint_prices}),
+        mock.patch.object(routes, "fetch_mint_1h_changes",
+                          return_value={}),
+        mock.patch.object(
+            routes, "fetch_mint_identities",
+            side_effect=lambda mints, http_get=None: {
+                m: tc.mint_identities[m] for m in mints
+                if m in tc.mint_identities}),
+        mock.patch.object(routes, "ensure_coin_meta",
+                          return_value=None),
+        mock.patch.object(home_holdings_mod, "ensure_coin_meta",
+                          return_value=None),
+        mock.patch.object(home_holdings_mod, "_default_get",
+                          return_value={"pairs": []}),
+        mock.patch.object(coin_meta_mod, "_from_metaplex",
+                          return_value=None),
+        mock.patch.object(
+            jupiter_mod, "quote_buy_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests")),
+        mock.patch.object(
+            jupiter_mod, "quote_sell_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests")),
+        mock.patch.object(
+            routes, "fetch_trenches_scan",
+            return_value={"candidates": [], "prices": {},
+                          "source": "dexscreener", "as_of": "test",
+                          "error": None}),
+        mock.patch.object(
+            routes, "get_prices",
+            return_value={"prices": {"SOL": {
+                "price": 10.0, "change_24h": 5.25,
+                "change_1h": None}},
+                "source": "live", "as_of": "test"}),
+    ]
+    for p in patches:
+        p.start()
+        tc.addCleanup(p.stop)
+    routes._TRENCHES_CACHE.update({"at": 0.0, "rows": None, "error": None})
+    home_holdings_mod.clear_image_cache()
 
 
 class TestDeleteButton(unittest.TestCase):
@@ -23,6 +86,7 @@ class TestDeleteButton(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
+        start_route_mocks(self)
         signup(self.client, "alice")
 
     def tearDown(self):
@@ -76,8 +140,8 @@ class TestDeleteButton(unittest.TestCase):
     def test_delete_bot_with_open_position_keeps_holdings(self):
         bot_id = self._create()
         # Manual buy with this bot as managing bot opens a position.
-        resp = self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        resp = self.client.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "usd": "10", "bot_id": str(bot_id)})
         self.assertEqual(resp.status_code, 200)
         db = self.app.config["DB"]
@@ -96,8 +160,8 @@ class TestDeleteButton(unittest.TestCase):
         # The coins stay in the paper holdings — only the bot's
         # management record is gone.
         holding = db.execute(
-            "SELECT amount FROM paper_holdings WHERE coin_id = 'SOL'"
-            ).fetchone()
+            "SELECT amount FROM paper_holdings WHERE coin_id = ?",
+            (GATE,)).fetchone()
         self.assertIsNotNone(holding)
         self.assertGreater(holding["amount"], 0)
 
@@ -167,6 +231,7 @@ class TestBuySelectors(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
+        start_route_mocks(self)
         signup(self.client, "alice")
         self.db = self.app.config["DB"]
 
@@ -181,7 +246,7 @@ class TestBuySelectors(unittest.TestCase):
         return self.db.execute("SELECT id FROM bots WHERE name = ?",
                                (name,)).fetchone()["id"]
 
-    def _buy(self, coin="SOL", usd="10", bot_id=""):
+    def _buy(self, coin=GATE, usd="10", bot_id=""):
         return self.client.post(f"/coins/{coin}/buy", data={
             "csrf_token": csrf(self.client, f"/coins/{coin}"),
             "usd": usd, "bot_id": bot_id})
@@ -193,14 +258,14 @@ class TestBuySelectors(unittest.TestCase):
         self.assertIn("Bought", resp.get_data(as_text=True))
         holding = self.db.execute(
             "SELECT amount, avg_price FROM paper_holdings "
-            "WHERE coin_id = 'SOL'").fetchone()
+            "WHERE coin_id = ?", (GATE,)).fetchone()
         self.assertIsNotNone(holding)
         self.assertGreater(holding["amount"], 0)
         pos = self.db.execute(
             "SELECT * FROM bot_positions WHERE bot_id = ?",
             (bot_id,)).fetchone()
         self.assertIsNotNone(pos, "managing bot should own a position")
-        self.assertEqual(pos["coin_id"], "SOL")
+        self.assertEqual(pos["coin_id"], GATE)
         self.assertAlmostEqual(pos["amount"], holding["amount"])
         self.assertEqual(pos["mode"], "paper")
         self.assertIsNotNone(pos["peak_price"])
@@ -223,8 +288,8 @@ class TestBuySelectors(unittest.TestCase):
         # Bob, a second user on the same app, tries to use Alice's bot.
         bob = self.app.test_client()
         signup(bob, "bob")
-        resp = bob.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(bob, "/coins/SOL"),
+        resp = bob.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(bob, f"/coins/{GATE}"),
             "usd": "10", "bot_id": str(bot_id)})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Nothing was bought", resp.get_data(as_text=True))
@@ -268,8 +333,8 @@ class TestBuySelectors(unittest.TestCase):
             "mode": "devnet"})
         cash_before = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        resp = self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        resp = self.client.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "amount_sol": "0.1", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
@@ -285,7 +350,7 @@ class TestBuySelectors(unittest.TestCase):
 
     def test_popup_buy_form_follows_active_mode(self):
         self._create()
-        html = self.client.get("/coins/SOL").get_data(as_text=True)
+        html = self.client.get(f"/coins/{GATE}").get_data(as_text=True)
         self.assertIn("Buy (paper)", html)
         self.assertIn('name="amount_sol"', html)
         self.assertIn('name="bot_id"', html)
@@ -293,7 +358,7 @@ class TestBuySelectors(unittest.TestCase):
         self.client.post("/mode", data={
             "csrf_token": csrf(self.client, "/dashboard"),
             "mode": "devnet"})
-        html = self.client.get("/coins/SOL").get_data(as_text=True)
+        html = self.client.get(f"/coins/{GATE}").get_data(as_text=True)
         self.assertIn("Buy (real, devnet)", html)
         self.assertIn("Choose a real bot", html)
 

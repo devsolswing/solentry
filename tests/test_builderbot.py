@@ -158,7 +158,7 @@ class TestIdentity(BuilderBotBase):
 
 
 class TestConversation(BuilderBotBase):
-    ANSWERS = ["Luna", "pump.fun", "Paper", "$10,000", "5% in 5 minutes",
+    ANSWERS = ["Luna", "Paper", "$10,000", "5% in 5 minutes",
                "20%", "3", "7%", "Default ladder", "7%", "Yes, both",
                "1 minute"]
 
@@ -201,8 +201,8 @@ class TestConversation(BuilderBotBase):
 
     def test_scanner_flow(self):
         answers = list(self.ANSWERS)
-        answers[4] = "5% in 3 minutes"
-        answers[11] = "30 seconds"
+        answers[3] = "5% in 3 minutes"
+        answers[10] = "30 seconds"
         self._run_conversation(answers)
         result = bb.answer(self.db, self.user_id, self.enc_key, "yes")
         self.assertIn("created", result)
@@ -269,8 +269,8 @@ class TestConversation(BuilderBotBase):
         bb.start_conversation(self.db, self.user_id, self.enc_key)
         answers = list(self.ANSWERS)
         answers[0] = "Sniper2"
-        answers[4] = "5% in 3 minutes"
-        answers[11] = "30 seconds"
+        answers[3] = "5% in 3 minutes"
+        answers[10] = "30 seconds"
         for answer in answers:
             result = bb.answer(self.db, self.user_id, self.enc_key, answer)
         result = bb.answer(self.db, self.user_id, self.enc_key, "yes")
@@ -767,12 +767,16 @@ class TestBuilderBotHttp(unittest.TestCase):
                          "trenches")
 
     def test_full_chatbox_flow_asks_each_question_in_order(self):
-        """Regression: all 12 questions are asked, in order, each
+        """Regression: all 11 questions are asked, in order, each
         with its own suggestions — and the created bot stores the
         stop loss the user actually answered. A double-sent
         suggestion used to answer the NEXT question too, so the
         stop-loss question was skipped (see
-        test_chatbox_sends_each_suggestion_once)."""
+        test_chatbox_sends_each_suggestion_once). The platform
+        question is gone (the rebuild has no platform step: every
+        bot is pump.fun), so the answers run name → mode →
+        market-cap → signal → buy size → max open → stop loss →
+        ladder → trailing → top-10 → scan interval."""
         self.client.get("/bots/create")
         for i, answer in enumerate(TestConversation.ANSWERS):
             data = self._ask(answer)
@@ -785,7 +789,7 @@ class TestBuilderBotHttp(unittest.TestCase):
                                  next_step["suggestions"])
             else:
                 self.assertTrue(data["confirm"])
-            if i == 6:  # just answered max_open — stop loss is next
+            if i == 5:  # just answered max_open — stop loss is next
                 self.assertTrue(
                     data["messages"][-1]["text"].startswith(
                         "Stop loss"))

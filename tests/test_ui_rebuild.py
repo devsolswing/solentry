@@ -34,6 +34,11 @@ import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
 from tradingbot.solana import generate_keypair
 
+# Gate (the devnet pump.fun coin): the mint the UI tests buy and
+# hold, priced at $0.01 with a +2.50% 1h change from the mocked
+# trenches feed.
+GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+
 
 def make_prices(changes):
     """changes: {coin: (price, change_24h)}"""
@@ -104,6 +109,24 @@ class UiBase(unittest.TestCase):
                           "source": "dexscreener", "as_of": "test",
                           "error": None})
         self.trenches_patch.start()
+        # The trenches feed prices + names the Gate mint; coin_meta
+        # is mocked out so no test ever hits live RPC/DexScreener.
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            return_value={GATE_MINT: 0.01})
+        self.mint_prices_patch.start()
+        self.mint_1h_patch = mock.patch.object(
+            routes, "fetch_mint_1h_changes",
+            return_value={GATE_MINT: 2.5})
+        self.mint_1h_patch.start()
+        self.mint_idents_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            return_value={GATE_MINT: {"name": "Gate",
+                                      "symbol": "GATE"}})
+        self.mint_idents_patch.start()
+        self.coin_meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.coin_meta_patch.start()
         routes._TRENCHES_CACHE.update(
             {"at": 0.0, "rows": None, "error": None})
         signup(self.client, "alice")
@@ -113,6 +136,10 @@ class UiBase(unittest.TestCase):
         ).fetchone()["id"]
 
     def tearDown(self):
+        self.coin_meta_patch.stop()
+        self.mint_idents_patch.stop()
+        self.mint_1h_patch.stop()
+        self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()
@@ -134,9 +161,12 @@ class UiBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="10"):
-        return self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+    def _buy_mint(self, usd="10"):
+        # A real paper buy of the Gate mint: $10 at the mocked
+        # $0.01 feed price buys 1000 GATE. SOL is not a buyable
+        # coin any more (no SOL detail page, no SOL buy route).
+        return self.client.post(f"/coins/{GATE_MINT}/buy", data={
+            "csrf_token": csrf(self.client, "/wallet"),
             "usd": usd, "bot_id": ""})
 
     def _create_bot(self, name="Luna", strategy="bold"):
@@ -374,21 +404,21 @@ class TestHomePage(UiBase):
         # P&L columns live on the coins page and the coin detail
         # page now.
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_mint()
         html = self._html("/wallet")
         # The HOLDINGS heading is back (rebuild from scratch,
         # 2026-11-11 — the photo has one).
         self.assertIn("HOLDINGS", html)
-        self.assertIn("Solana", html)
-        self.assertIn("SOL", html)
+        self.assertIn("Gate", html)
+        self.assertIn("(GATE)", html)
         self.assertIn("holdings-row", html)
-        # 1 SOL bought at the mocked $10 price: no fee (removed
-        # 2026-11-12), so 1.0000 SOL worth $10.00.
-        self.assertIn("1.0000 SOL", html)
+        # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
+        # (removed 2026-11-12), so 1,000.0000 GATE worth $10.00.
+        self.assertIn("1,000.0000 GATE", html)
         self.assertIn("$10.00", html)
         self.assertNotIn("coin-pnl", html)
         self.assertNotIn("coin-change", html)
-        self.assertIn("/coins/SOL/detail", html)
+        self.assertIn(f"/coins/{GATE_MINT}/detail", html)
 
 
 class TestBotsPage(UiBase):
@@ -516,11 +546,17 @@ class TestWalletDetails(UiBase):
         self.assertIn("🇨🇦", html)
         self.assertNotIn("Send history", html)
 
-    def test_details_real_shows_deposit_and_platforms(self):
+    def test_details_real_shows_deposit_without_platforms(self):
+        # The pump.fun-only rebuild deleted platforms entirely:
+        # one wallet (the per-user app wallet) is the pump.fun
+        # wallet, so there is no "Platform wallets" section any
+        # more — Deposit, Send history and the Pump.fun trading
+        # wallet stay.
         self._choose_mode("devnet")
         html = self._html("/wallet/details")
         self.assertIn("Deposit", html)
-        self.assertIn("Platform wallets", html)
+        self.assertNotIn("Platform wallets", html)
+        self.assertNotIn("/platforms/", html)
         self.assertIn("Send history", html)
         self.assertIn("Pump.fun trading wallet", html)
 

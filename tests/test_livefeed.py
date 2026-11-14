@@ -1,13 +1,18 @@
 """Live price feed: tick validation, the app WebSocket, the REST
 snapshot, and the silent loop reading only validated prices.
 
+The feed is pump.fun-only now: DexScreener polls for mints (Raydium
+pairs for graduated coins, bonding-curve prices for devnet watchlist
+mints) and Jupiter for the SOL price (the unit of account). There is
+no Kraken WebSocket and no CoinGecko any more.
+
 No live upstream is contacted here except the app's own WebSocket
-test server on localhost: Kraken/DexScreener/Jupiter threads are
-never started in tests (only run.py starts them). The WebSocket
-test spins the real app on a real port and speaks to it with
-websocket-client.
+test server on localhost: DexScreener/Jupiter threads are never
+started in tests (only run.py starts them). The WebSocket test spins
+the real app on a real port and speaks to it with websocket-client.
 """
 
+import io
 import json
 import socket
 import tempfile
@@ -17,10 +22,10 @@ import unittest
 import urllib.request
 from unittest import mock
 
+import tradingbot.livefeed as livefeed_mod
 import tradingbot.routes as routes
 from helpers import make_client, signup
-from tradingbot.livefeed import KRAKEN_PAIRS, LiveFeed, parse_kraken_ticker
-from tradingbot.prices import COINS
+from tradingbot.livefeed import JUPITER_SOL_MINT, LiveFeed
 from tradingbot.routes import _coin_rows
 from tradingbot.silent_loop import run_once
 
@@ -45,54 +50,54 @@ def make_prices(changes):
     return {
         "prices": {c: {"price": p, "change_24h": ch}
                    for c, (p, ch) in changes.items()},
-        "source": "snapshot", "as_of": "test",
+        "source": "live", "as_of": "test",
     }
 
 
 class TestValidation(unittest.TestCase):
     def test_first_tick_accepted(self):
         feed = LiveFeed()
-        self.assertTrue(feed.ingest("SOL", 10.0, "kraken"))
+        self.assertTrue(feed.ingest("SOL", 10.0, "jupiter"))
         self.assertEqual(feed.snapshot(["SOL"])["SOL"]["price"], 10.0)
 
     def test_small_move_accepted(self):
         feed = LiveFeed()
-        feed.ingest("SOL", 10.0, "kraken")
-        self.assertTrue(feed.ingest("SOL", 14.0, "kraken"))
+        feed.ingest("SOL", 10.0, "jupiter")
+        self.assertTrue(feed.ingest("SOL", 14.0, "jupiter"))
         self.assertEqual(feed.snapshot(["SOL"])["SOL"]["price"], 14.0)
 
     def test_absurd_jump_rejected_last_good_stands(self):
         feed = LiveFeed()
-        feed.ingest("SOL", 10.0, "kraken")
+        feed.ingest("SOL", 10.0, "jupiter")
         # The $709,599.60 shape: one tick, ~200x the last good price.
-        self.assertFalse(feed.ingest("SOL", 2000.0, "kraken"))
+        self.assertFalse(feed.ingest("SOL", 2000.0, "jupiter"))
         self.assertEqual(feed.snapshot(["SOL"])["SOL"]["price"], 10.0)
         # A second absurd tick at a different level is rejected too.
-        self.assertFalse(feed.ingest("SOL", 1500.0, "kraken"))
+        self.assertFalse(feed.ingest("SOL", 1500.0, "jupiter"))
         self.assertEqual(feed.snapshot(["SOL"])["SOL"]["price"], 10.0)
 
     def test_non_positive_and_non_finite_rejected(self):
         feed = LiveFeed()
-        feed.ingest("SOL", 10.0, "kraken")
+        feed.ingest("SOL", 10.0, "jupiter")
         for bad in (0, -5.0, float("nan"), float("inf"), "not-a-price"):
-            self.assertFalse(feed.ingest("SOL", bad, "kraken"))
+            self.assertFalse(feed.ingest("SOL", bad, "jupiter"))
         self.assertEqual(feed.snapshot(["SOL"])["SOL"]["price"], 10.0)
 
     def test_genuine_step_change_rebases_after_agreeing_ticks(self):
         feed = LiveFeed()
-        feed.ingest("SOL", 10.0, "kraken")
+        feed.ingest("SOL", 10.0, "jupiter")
         # A real move persists: three ticks agreeing at the new level
         # re-base the reference instead of being rejected forever.
-        self.assertFalse(feed.ingest("SOL", 20.0, "kraken"))
-        self.assertFalse(feed.ingest("SOL", 20.1, "kraken"))
-        self.assertTrue(feed.ingest("SOL", 20.0, "kraken"))
+        self.assertFalse(feed.ingest("SOL", 20.0, "jupiter"))
+        self.assertFalse(feed.ingest("SOL", 20.1, "jupiter"))
+        self.assertTrue(feed.ingest("SOL", 20.0, "jupiter"))
         self.assertEqual(feed.snapshot(["SOL"])["SOL"]["price"], 20.0)
-        self.assertTrue(feed.ingest("SOL", 21.0, "kraken"))
+        self.assertTrue(feed.ingest("SOL", 21.0, "jupiter"))
 
     def test_would_accept_is_read_only(self):
         feed = LiveFeed()
         self.assertTrue(feed.would_accept("SOL", 999999.0))
-        feed.ingest("SOL", 10.0, "kraken")
+        feed.ingest("SOL", 10.0, "jupiter")
         self.assertTrue(feed.would_accept("SOL", 14.0))
         self.assertFalse(feed.would_accept("SOL", 2000.0))
         # Asking did not move the reference.
@@ -101,11 +106,11 @@ class TestValidation(unittest.TestCase):
     def test_stale_flag(self):
         feed = LiveFeed()
         now = time.time()
-        feed.ingest("SOL", 10.0, "kraken", now=now - 60)
+        feed.ingest("SOL", 10.0, "jupiter", now=now - 60)
         snap = feed.snapshot(["SOL"], now=now)
         self.assertTrue(snap["SOL"]["stale"])
         self.assertTrue(feed.is_stale("SOL", now=now))
-        feed.ingest("SOL", 10.0, "kraken", now=now)
+        feed.ingest("SOL", 10.0, "jupiter", now=now)
         snap = feed.snapshot(["SOL"], now=now)
         self.assertFalse(snap["SOL"]["stale"])
         self.assertFalse(feed.is_stale("SOL", now=now))
@@ -117,91 +122,130 @@ class TestValidation(unittest.TestCase):
 
     def test_changes_kept_when_new_tick_lacks_them(self):
         feed = LiveFeed()
-        feed.ingest("SOL", 10.0, "kraken", change_24h=5.0)
-        feed.ingest("SOL", 10.5, "kraken")
+        feed.ingest("SOL", 10.0, "jupiter", change_24h=5.0)
+        feed.ingest("SOL", 10.5, "jupiter")
         snap = feed.snapshot(["SOL"])["SOL"]
         self.assertEqual(snap["change_24h"], 5.0)
 
 
-class TestKrakenParsing(unittest.TestCase):
-    def test_ticker_frame(self):
-        # Real Kraken shape: "o" is ["open today", "open 24h"] —
-        # the 24h change is last vs element [1].
-        raw = json.dumps([123, {"c": ["83.26", "1.5"],
-                                "o": ["86.50", "86.00"]},
-                          "ticker", "SOL/USD"])
-        self.assertEqual(parse_kraken_ticker(raw),
-                         ("SOL", 83.26, (83.26 / 86.00 - 1.0) * 100.0))
+class TestNoKraken(unittest.TestCase):
+    """The Kraken WebSocket is gone: no Kraken names, pairs, or
+    parser survive anywhere in the live feed."""
 
-    def test_zec_ticker_frame(self):
-        # ZEC is the proof case for the full-universe feed: its
-        # Kraken tick is the real CEX price, not a thin Solana
-        # wrapped copy.
-        raw = json.dumps([15990792,
-                          {"c": ["995.90", "1.46"],
-                           "o": ["1050.00", "1044.01"]},
-                          "ticker", "ZEC/USD"])
-        self.assertEqual(parse_kraken_ticker(raw),
-                         ("ZEC", 995.90, (995.90 / 1044.01 - 1.0) * 100.0))
+    def test_no_kraken_names_on_module(self):
+        for name in ("KRAKEN_PAIRS", "KRAKEN_WS_URL",
+                     "parse_kraken_ticker"):
+            self.assertFalse(hasattr(livefeed_mod, name), name)
 
-    def test_doge_echo_is_xdg(self):
-        # Kraken calls DOGE "XDG": a DOGE/USD subscription is
-        # accepted but echoed as XDG/USD, so the map key must be
-        # XDG/USD.
-        raw = json.dumps([123, {"c": ["0.15", "1"],
-                                "o": ["0.15", "0.14"]},
-                          "ticker", "XDG/USD"])
-        self.assertEqual(parse_kraken_ticker(raw),
-                         ("DOGE", 0.15, (0.15 / 0.14 - 1.0) * 100.0))
-
-    def test_real_kraken_frame_parses(self):
-        # A verbatim real frame (captured live 2026-11-11): the
-        # old parser returned None for this — float() on the
-        # two-element "o" list — so the feed silently delivered
-        # no Kraken tick at all. This test pins the real shape.
-        raw = json.dumps([119930888,
-                          {"a": ["74441.90000", 0, "0.39346109"],
-                           "b": ["74441.80000", 0, "0.03317549"],
-                           "c": ["74441.90000", "0.00295054"],
-                           "v": ["1988.74315469", "2416.18552500"],
-                           "p": ["73941.68266", "73909.83055"],
-                           "t": [136305, 156895],
-                           "l": ["73113.60000", "73113.60000"],
-                           "h": ["74754.10000", "74754.10000"],
-                           "o": ["73699.40000", "73637.60000"]},
-                          "ticker", "XBT/USD"])
-        self.assertEqual(
-            parse_kraken_ticker(raw),
-            ("BTC", 74441.9, (74441.9 / 73637.6 - 1.0) * 100.0))
-
-    def test_every_known_coin_has_a_kraken_pair(self):
-        # The live feed must tick every coin the app lists: a
-        # symbol in COINS with no Kraken pair would have no live
-        # source and its Buy/Sell price would go stale again.
-        self.assertEqual(set(KRAKEN_PAIRS.values()), set(COINS))
-        self.assertEqual(len(KRAKEN_PAIRS), len(COINS))
-
-    def test_kraken_open_subscribes_all_pairs(self):
-        sent = []
-
-        class FakeWs:
-            def send(self, raw):
-                sent.append(json.loads(raw))
-
+    def test_no_kraken_methods_on_feed(self):
         feed = LiveFeed()
-        feed._on_kraken_open(FakeWs())
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["event"], "subscribe")
-        self.assertEqual(sent[0]["subscription"], {"name": "ticker"})
-        self.assertEqual(set(sent[0]["pair"]), set(KRAKEN_PAIRS))
-        self.assertIn("ZEC/USD", sent[0]["pair"])
+        for name in ("_kraken_loop", "_on_kraken_open",
+                     "_on_kraken_message"):
+            self.assertFalse(hasattr(feed, name), name)
 
-    def test_non_ticker_frames_ignored(self):
-        self.assertIsNone(parse_kraken_ticker(json.dumps(
-            {"event": "heartbeat"})))
-        self.assertIsNone(parse_kraken_ticker(json.dumps(
-            [1, {"c": ["1", "1"], "o": "1"}, "ticker", "DOGE/USD"])))
-        self.assertIsNone(parse_kraken_ticker("not json"))
+    def test_start_only_spawns_dexscreener_and_jupiter(self):
+        feed = LiveFeed()
+        feed.start()
+        try:
+            names = {t.name for t in feed._threads}
+            self.assertEqual(names, {"livefeed-dexscreener",
+                                     "livefeed-jupiter"})
+        finally:
+            feed.stop()
+
+
+class TestJupiterSolCheck(unittest.TestCase):
+    def _fake_urlopen(self, payload):
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        return FakeResp()
+
+    def test_jupiter_check_ingests_sol(self):
+        feed = LiveFeed()
+        payload = {"data": {JUPITER_SOL_MINT: {
+            "usdPrice": 78.5, "priceChange24h": 2.5}}}
+        with mock.patch("urllib.request.urlopen",
+                        return_value=self._fake_urlopen(payload)):
+            feed._jupiter_check()
+        snap = feed.snapshot(["SOL"])["SOL"]
+        self.assertEqual(snap["price"], 78.5)
+        self.assertEqual(snap["source"], "jupiter")
+        self.assertEqual(snap["change_24h"], 2.5)
+
+    def test_jupiter_check_failure_leaves_no_tick(self):
+        feed = LiveFeed()
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=Exception("down")):
+            feed._jupiter_check()
+        self.assertEqual(feed.snapshot(["SOL"]), {})
+
+    def test_jupiter_check_bad_payload_leaves_no_tick(self):
+        feed = LiveFeed()
+        for payload in ({"data": {}}, {"data": {JUPITER_SOL_MINT: {}}},
+                        {"data": {JUPITER_SOL_MINT: {"usdPrice": -1}}}):
+            with mock.patch("urllib.request.urlopen",
+                            return_value=self._fake_urlopen(payload)):
+                feed._jupiter_check()
+            self.assertEqual(feed.snapshot(["SOL"]), {})
+
+
+def _dex_pair(mint, price="0.002", dex_id="pumpfun"):
+    return {
+        "chainId": "solana",
+        "dexId": dex_id, "pairAddress": "PairAddr111111111111111111111111111",
+        "baseToken": {"address": mint, "name": "Test Coin",
+                      "symbol": "TEST"},
+        "priceUsd": price, "liquidity": {"usd": 50000},
+        "priceChange": {"h24": 5.0, "h1": 1.0},
+        "txns": {"h24": {"buys": 10, "sells": 4}},
+    }
+
+
+class TestDexscreenerPoll(unittest.TestCase):
+    def test_poll_ingests_pumpfun_mint(self):
+        feed = LiveFeed()
+        payload = {"pairs": [_dex_pair(MINT)]}
+        with mock.patch("tradingbot.trenches._default_get",
+                        return_value=payload):
+            feed._poll_dexscreener([MINT])
+        snap = feed.snapshot([MINT])[MINT]
+        self.assertEqual(snap["price"], 0.002)
+        self.assertEqual(snap["source"], "dexscreener")
+        self.assertEqual(snap["change_24h"], 5.0)
+
+    def test_poll_ingests_graduated_raydium_pair(self):
+        # A graduated coin has no pump.fun pair any more — its
+        # Raydium pair still prices it.
+        feed = LiveFeed()
+        payload = {"pairs": [_dex_pair(MINT, dex_id="raydium")]}
+        with mock.patch("tradingbot.trenches._default_get",
+                        return_value=payload):
+            feed._poll_dexscreener([MINT])
+        self.assertEqual(feed.snapshot([MINT])[MINT]["price"], 0.002)
+
+    def test_poll_skips_other_dexes(self):
+        feed = LiveFeed()
+        payload = {"pairs": [_dex_pair(MINT, dex_id="meteora")]}
+        with mock.patch("tradingbot.trenches._default_get",
+                        return_value=payload):
+            feed._poll_dexscreener([MINT])
+        self.assertEqual(feed.snapshot([MINT]), {})
+
+    def test_poll_failure_leaves_last_good_tick(self):
+        feed = LiveFeed()
+        feed.ingest(MINT, 0.002, "dexscreener")
+        with mock.patch("tradingbot.trenches._default_get",
+                        side_effect=Exception("down")):
+            feed._poll_dexscreener([MINT])
+        self.assertEqual(feed.snapshot([MINT])[MINT]["price"], 0.002)
 
 
 class TestSanitizers(unittest.TestCase):
@@ -231,7 +275,7 @@ class TestSanitizers(unittest.TestCase):
 
     def test_sanitize_prices_data_drops_absurd_symbol(self):
         feed = LiveFeed()
-        feed.ingest("SOL", 10.0, "kraken")
+        feed.ingest("SOL", 10.0, "jupiter")
         data = make_prices({"SOL": (2000.0, 0.0), "BTC": (74000.0, 0.0)})
         out = feed.sanitize_prices_data(data)
         self.assertNotIn("SOL", out["prices"])
@@ -296,7 +340,7 @@ class TestLoopSanitization(LiveFeedBase):
         # With the feed seeded at the good price, the same spike is
         # dropped: the holding is valued at cost, $20, and no trade
         # is made on the absurd price.
-        self.feed.ingest("SOL", 10.0, "kraken")
+        self.feed.ingest("SOL", 10.0, "jupiter")
         before_trades = self.db.execute(
             "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"]
         run_once(self.db, self.cfg,
@@ -338,13 +382,13 @@ class TestLoopSanitization(LiveFeedBase):
 
 class TestApiLive(LiveFeedBase):
     def test_snapshot_returns_seeded_ticks(self):
-        self.feed.ingest("SOL", 10.5, "kraken", change_24h=5.0)
+        self.feed.ingest("SOL", 10.5, "jupiter", change_24h=5.0)
         resp = self.client.get("/api/live?coins=SOL,BTC")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["ticks"]["SOL"]["price"], 10.5)
-        self.assertEqual(data["ticks"]["SOL"]["source"], "kraken")
+        self.assertEqual(data["ticks"]["SOL"]["source"], "jupiter")
         self.assertEqual(data["ticks"]["SOL"]["change_24h"], 5.0)
         self.assertNotIn("BTC", data["ticks"])
 
@@ -353,6 +397,15 @@ class TestApiLive(LiveFeedBase):
         resp = anon.get("/api/live?coins=SOL")
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/login", resp.headers["Location"])
+
+    def test_mint_tick_returns_dexscreener_source(self):
+        self.feed.ingest(MINT, 0.002, "dexscreener", change_24h=5.0)
+        resp = self.client.get(f"/api/live?coins={MINT}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["ticks"][MINT]["price"], 0.002)
+        self.assertEqual(data["ticks"][MINT]["source"], "dexscreener")
 
 
 def _free_port() -> int:
@@ -393,7 +446,7 @@ class TestWebSocket(LiveFeedBase):
 
         port = _free_port()
         self._start_server(port)
-        self.feed.ingest("SOL", 10.0, "kraken", change_24h=5.0)
+        self.feed.ingest("SOL", 10.0, "jupiter", change_24h=5.0)
         ws = websocket.create_connection(
             f"ws://127.0.0.1:{port}/ws/live",
             timeout=10,
@@ -405,7 +458,7 @@ class TestWebSocket(LiveFeedBase):
             self.assertEqual(snapshot["type"], "snapshot")
             self.assertEqual(snapshot["ticks"]["SOL"]["price"], 10.0)
             # A fresh tick is pushed without another subscribe.
-            self.feed.ingest("SOL", 10.5, "kraken")
+            self.feed.ingest("SOL", 10.5, "jupiter")
             deadline = time.time() + 10
             tick = None
             while time.time() < deadline:
@@ -416,43 +469,45 @@ class TestWebSocket(LiveFeedBase):
                     break
             self.assertIsNotNone(tick, "no tick pushed")
             self.assertEqual(tick["price"], 10.5)
-            self.assertEqual(tick["source"], "kraken")
+            self.assertEqual(tick["source"], "jupiter")
         finally:
             ws.close()
 
-    def test_subscribe_zec_snapshot_then_tick(self):
-        """ZEC over the app socket: a browser on the ZEC Buy/Sell
-        page subscribes to ZEC and gets the Kraken tick — snapshot
-        first, then pushed ticks as they arrive. This is the path
-        the coin page's big price updates from."""
+    def test_subscribe_mint_snapshot_then_tick(self):
+        """A pump.fun mint over the app socket: a browser on the
+        mint's Buy/Sell page subscribes to the mint and gets the
+        DexScreener tick — snapshot first, then pushed ticks as
+        they arrive. This is the path the coin page's big price
+        updates from."""
         import websocket
 
         port = _free_port()
         self._start_server(port)
-        self.feed.ingest("ZEC", 1000.0, "kraken", change_24h=-4.6)
+        self.feed.ingest(MINT, 0.002, "dexscreener", change_24h=-4.6)
         ws = websocket.create_connection(
             f"ws://127.0.0.1:{port}/ws/live",
             timeout=10,
             cookie=f"session={self._session_cookie()}")
         try:
-            ws.send(json.dumps({"subscribe": ["ZEC"]}))
+            ws.send(json.dumps({"subscribe": [MINT]}))
             ws.settimeout(10)
             snapshot = json.loads(ws.recv())
             self.assertEqual(snapshot["type"], "snapshot")
-            self.assertEqual(snapshot["ticks"]["ZEC"]["price"], 1000.0)
-            self.assertEqual(snapshot["ticks"]["ZEC"]["source"], "kraken")
-            self.feed.ingest("ZEC", 1001.5, "kraken")
+            self.assertEqual(snapshot["ticks"][MINT]["price"], 0.002)
+            self.assertEqual(
+                snapshot["ticks"][MINT]["source"], "dexscreener")
+            self.feed.ingest(MINT, 0.0025, "dexscreener")
             deadline = time.time() + 10
             tick = None
             while time.time() < deadline:
                 msg = json.loads(ws.recv())
                 if msg.get("type") == "tick" \
-                        and msg.get("coin_id") == "ZEC":
+                        and msg.get("coin_id") == MINT:
                     tick = msg
                     break
-            self.assertIsNotNone(tick, "no ZEC tick pushed")
-            self.assertEqual(tick["price"], 1001.5)
-            self.assertEqual(tick["source"], "kraken")
+            self.assertIsNotNone(tick, "no mint tick pushed")
+            self.assertEqual(tick["price"], 0.0025)
+            self.assertEqual(tick["source"], "dexscreener")
         finally:
             ws.close()
 
@@ -465,7 +520,7 @@ class TestWebSocket(LiveFeedBase):
         port = _free_port()
         self._start_server(port)
         now = time.time()
-        self.feed.ingest("SOL", 10.0, "kraken", now=now)
+        self.feed.ingest("SOL", 10.0, "jupiter", now=now)
         ws = websocket.create_connection(
             f"ws://127.0.0.1:{port}/ws/live",
             timeout=10,
@@ -476,7 +531,7 @@ class TestWebSocket(LiveFeedBase):
             snapshot = json.loads(ws.recv())
             self.assertEqual(snapshot["ticks"]["SOL"]["price"], 10.0)
             # Same second, different price.
-            self.feed.ingest("SOL", 10.5, "kraken", now=now)
+            self.feed.ingest("SOL", 10.5, "jupiter", now=now)
             deadline = time.time() + 10
             tick = None
             while time.time() < deadline:

@@ -24,8 +24,8 @@ Rules under test:
   a live price that ticks every second while the page is open
   (GET /api/coins/<id>/tick) — real prices only, never invented;
   a failed tick keeps the last real price and its time. The chart
-  itself is a real candlestick chart (CoinGecko OHLC for known
-  coins, live-feed tick history for mints) with a corner button
+  itself is a real candlestick chart (live-feed tick history for
+  the mint) with a corner button
   switching it to the regular line chart; it re-renders at most
   once per candle interval, never every second. Send,
   Receive, Buy and Sell are four separate windows over the coin
@@ -43,27 +43,37 @@ No SOL moves in these tests; sends are never confirmed.
 
 import json
 import tempfile
+import time
 import unittest
 from unittest import mock
 
+import tradingbot.coin_meta as coin_meta_mod
+import tradingbot.home_holdings as home_holdings_mod
+import tradingbot.jupiter as jupiter_mod
 import tradingbot.prices as prices
 import tradingbot.routes as routes
 from helpers import csrf, login, make_client, signup
 
 DEST = "11111111111111111111111111111111"
 MINT = "11111111111111111111111111111111"
+# Gate — the devnet pump.fun mint used as the test coin throughout
+# this file. SOL is the unit of account, never a listed/buyable
+# coin, so every buy/sell/detail test uses this mint instead.
+GATE = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+GATE_PRICE = 10.0
 
 
 def make_prices(changes):
     """changes: {coin: (price, change_24h)} or
-    (price, change_24h, change_1h)"""
+    (price, change_24h, change_1h) — pump.fun only, so the list
+    holds just SOL, the unit of account."""
     out = {}
     for c, tup in changes.items():
         price, ch24 = tup[0], tup[1]
         ch1h = tup[2] if len(tup) > 2 else None
         out[c] = {"price": price, "change_24h": ch24,
                   "change_1h": ch1h}
-    return {"prices": out, "source": "snapshot", "as_of": "test"}
+    return {"prices": out, "source": "live", "as_of": "test"}
 
 
 def fake_chart(points):
@@ -71,29 +81,69 @@ def fake_chart(points):
                        for i, p in enumerate(points)], "error": None}
 
 
-def fake_ohlc(*args, **kwargs):
-    """Two 30-minute candles — enough for a candlestick chart."""
-    return {"candles": [
-        {"ts": 1790000000000, "open": 80.0, "high": 82.0,
-         "low": 79.0, "close": 81.0},
-        {"ts": 1790001800000, "open": 81.0, "high": 83.0,
-         "low": 80.5, "close": 82.0}],
-        "interval": 1800, "error": None}
-
-
 class HomeRedoBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
+        # The price list is SOL only now (unit of account); mints
+        # are priced by the trenches feed, mocked below. Gate is
+        # priced at $10 here so a $10 buy holds exactly 1.0 GATE.
         self.prices_patch = mock.patch.object(
             routes, "get_prices",
-            return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25, 2.5), "USDC": (1.0, 0.0)}))
+            return_value=make_prices({"SOL": (10.0, 5.25, 2.5)}))
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
-            prices, "get_price", return_value=(10.0, "snapshot", "test"))
+            prices, "get_price", return_value=(10.0, "live", "test"))
         self.price_patch.start()
+        self.mint_prices = {GATE: GATE_PRICE}
+        self.mint_1h = {GATE: 2.5}
+        self.mint_identities = {
+            GATE: {"name": "Gate", "symbol": "GATE"}}
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_prices[m] for m in mints
+                if m in self.mint_prices})
+        self.mint_prices_patch.start()
+        self.mint_1h_patch = mock.patch.object(
+            routes, "fetch_mint_1h_changes",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_1h[m] for m in mints
+                if m in self.mint_1h})
+        self.mint_1h_patch.start()
+        self.mint_id_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_identities[m] for m in mints
+                if m in self.mint_identities})
+        self.mint_id_patch.start()
+        # Logo fetch on purchase / render must stay local: no live
+        # RPC, Metaplex or DexScreener calls in these tests.
+        self.meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.meta_patch.start()
+        self.hh_meta_patch = mock.patch.object(
+            home_holdings_mod, "ensure_coin_meta", return_value=None)
+        self.hh_meta_patch.start()
+        self.hh_get_patch = mock.patch.object(
+            home_holdings_mod, "_default_get",
+            return_value={"pairs": []})
+        self.hh_get_patch.start()
+        home_holdings_mod.clear_image_cache()
+        self.metaplex_patch = mock.patch.object(
+            coin_meta_mod, "_from_metaplex", return_value=None)
+        self.metaplex_patch.start()
+        # Paper trades price from a Jupiter quote when one exists;
+        # there is no route in tests, so refuse the quote instead
+        # of hitting the live API.
+        self.jup_buy_patch = mock.patch.object(
+            jupiter_mod, "quote_buy_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests"))
+        self.jup_buy_patch.start()
+        self.jup_sell_patch = mock.patch.object(
+            jupiter_mod, "quote_sell_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests"))
+        self.jup_sell_patch.start()
         self.trenches_patch = mock.patch.object(
             routes, "fetch_trenches_scan",
             return_value={"candidates": [], "prices": {},
@@ -113,6 +163,15 @@ class HomeRedoBase(unittest.TestCase):
 
     def tearDown(self):
         self.trenches_patch.stop()
+        self.jup_sell_patch.stop()
+        self.jup_buy_patch.stop()
+        self.metaplex_patch.stop()
+        self.hh_get_patch.stop()
+        self.hh_meta_patch.stop()
+        self.meta_patch.stop()
+        self.mint_id_patch.stop()
+        self.mint_1h_patch.stop()
+        self.mint_prices_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()
         self.tmp.cleanup()
@@ -128,9 +187,10 @@ class HomeRedoBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="10"):
-        return self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+    def _buy_gate(self, usd="10"):
+        # $10 at the mocked $10 Gate price buys exactly 1.0 GATE.
+        return self.client.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "usd": usd, "bot_id": ""})
 
     def _drop_session_flag(self):
@@ -169,7 +229,7 @@ class TestHoldingsHalfPanel(HomeRedoBase):
 
     def test_holdings_rows_are_normal_size_with_value_and_1h(self):
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_gate()
         html = self._html("/wallet")
         self.assertIn("holdings-row", html)
         # Rebuild from scratch (2026-11-11): the HOLDINGS heading
@@ -178,11 +238,11 @@ class TestHoldingsHalfPanel(HomeRedoBase):
         self.assertIn("HOLDINGS", html)
         self.assertNotIn("All coins", html)
         self.assertNotIn("holdings-summary", html)
-        self.assertIn("Solana", html)
-        self.assertIn("(SOL)", html)
-        # 1 SOL bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
-        # 1.0000 SOL worth $10.00.
-        self.assertIn("1.0000 SOL", html)
+        self.assertIn("Gate", html)
+        self.assertIn("(GATE)", html)
+        # 1 GATE bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
+        # 1.0000 GATE worth $10.00.
+        self.assertIn("1.0000 GATE", html)
         self.assertIn("$10.00", html)
         # Normal-size rows now carry the 1-hour % (mocked +2.5%)
         # next to the amount + value.
@@ -228,36 +288,41 @@ class TestCoinDetailActions(HomeRedoBase):
         self._choose_mode("paper")
         self.chart_patch = mock.patch.object(
             routes, "fetch_market_chart",
-            side_effect=lambda coin, days: fake_chart(
-                [80.0, 84.0, 86.0, 90.0, 88.0]))
+            side_effect=lambda coin, days, feed=None, http_get=None: (
+                fake_chart([80.0, 84.0, 86.0, 90.0, 88.0])))
         self.chart_patch.start()
         self.flow_patch = mock.patch.object(
             routes, "fetch_trade_flow",
             return_value={"buys": 120, "sells": 80,
                           "buys_pct": 60.0, "sells_pct": 40.0})
         self.flow_patch.start()
-        self.ohlc_patch = mock.patch.object(
-            routes, "fetch_ohlc", side_effect=fake_ohlc)
-        self.ohlc_patch.start()
         self.addCleanup(self.chart_patch.stop)
         self.addCleanup(self.flow_patch.stop)
-        self.addCleanup(self.ohlc_patch.stop)
-        self._buy_sol()
+        # Real feed history for Gate (three ticks across three
+        # 60-second candle buckets) so the detail page draws a
+        # real candlestick chart and shows the line-view toggle.
+        # Prices stay near the mocked $10 so the feed never rejects
+        # the trenches price on render.
+        feed = self.app.config["LIVE_FEED"]
+        now = time.time()
+        for i, price in enumerate([9.9, 10.1, 10.0]):
+            feed.ingest(GATE, price, "test", now=now - 180 + i * 90)
+        self._buy_gate()
 
     def test_four_action_buttons_each_open_their_own_window(self):
-        html = self._html("/coins/SOL/detail")
+        html = self._html(f"/coins/{GATE}/detail")
         for overlay in ("coin-send-overlay", "coin-receive-overlay",
                         "coin-buy-overlay", "coin-sell-overlay"):
             self.assertIn(f'data-overlay-open="{overlay}"', html)
             self.assertIn(f'id="{overlay}"', html)
         # Buy / Sell reuse the existing coin endpoints.
-        self.assertIn('action="/coins/SOL/buy"', html)
-        self.assertIn('action="/coins/SOL/sell"', html)
+        self.assertIn(f'action="/coins/{GATE}/buy"', html)
+        self.assertIn(f'action="/coins/{GATE}/sell"', html)
         self.assertIn('name="sell_all"', html)
         # Send reuses the wallet send flow, with a way back to
         # this coin; Receive shows the app wallet address + copy.
         self.assertIn('action="/wallet/send"', html)
-        self.assertIn('value="coin:SOL"', html)
+        self.assertIn(f'value="coin:{GATE}"', html)
         self.assertIn(self.pubkey, html)
         self.assertIn(f'data-copy="{self.pubkey}"', html)
 
@@ -267,34 +332,34 @@ class TestCoinDetailActions(HomeRedoBase):
         # every second, but the chart re-renders at most once per
         # candle interval, and a corner button switches it to the
         # regular line view.
-        html = self._html("/coins/SOL/detail")
+        html = self._html(f"/coins/{GATE}/detail")
         self.assertIn('id="live-chart"', html)
-        self.assertIn('data-tick-url="/api/coins/SOL/tick"', html)
+        self.assertIn(f'data-tick-url="/api/coins/{GATE}/tick"', html)
         self.assertIn('id="live-price"', html)
         self.assertIn('id="live-updated"', html)
         self.assertNotIn('id="live-chart-svg"', html)
         self.assertNotIn("updating every second", html)
-        self.assertIn('aria-label="Candlestick chart"', html)
+        self.assertIn('aria-label="Switch chart view"', html)
         self.assertIn('id="chart-view-toggle"', html)
 
     def test_coin_result_links_back_to_coin(self):
-        resp = self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        resp = self.client.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "amount_sol": "1", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Back to coin", html)
-        self.assertIn('href="/coins/SOL/detail"', html)
+        self.assertIn(f'href="/coins/{GATE}/detail"', html)
 
-    def test_tick_endpoint_known_coin(self):
+    def test_tick_endpoint_sol_is_not_a_coin(self):
+        # SOL is the unit of account, never a listed coin: its tick
+        # endpoint says so instead of returning a price.
         resp = self.client.get("/api/coins/SOL/tick")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.get_data(as_text=True))
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["coin_id"], "SOL")
-        self.assertEqual(data["price"], 10.0)
-        self.assertEqual(data["source"], "snapshot")
-        self.assertEqual(data["as_of"], "test")
+        self.assertFalse(data["ok"])
+        self.assertIsNone(data["price"])
+        self.assertIn("Unknown coin", data["error"])
 
     def test_tick_endpoint_unknown_coin_says_so(self):
         resp = self.client.get("/api/coins/NOPE/tick")
@@ -316,7 +381,7 @@ class TestCoinDetailActions(HomeRedoBase):
 
     def test_tick_endpoint_needs_login(self):
         self.client.get("/logout")
-        resp = self.client.get("/api/coins/SOL/tick")
+        resp = self.client.get(f"/api/coins/{MINT}/tick")
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/login", resp.headers["Location"])
 
@@ -384,12 +449,12 @@ class TestSendReturnToCoin(HomeRedoBase):
         return resp.headers["Location"]
 
     def test_send_carries_coin_return_to_confirm_page(self):
-        location = self._create_intent("coin:SOL")
+        location = self._create_intent(f"coin:{GATE}")
         self.assertIn("/wallet/send/", location)
-        self.assertIn("return_to=coin:SOL", location)
+        self.assertIn(f"return_to=coin:{GATE}", location)
         html = self._html(location)
         self.assertIn("Back to coin", html)
-        self.assertIn('href="/coins/SOL/detail"', html)
+        self.assertIn(f'href="/coins/{GATE}/detail"', html)
 
     def test_send_return_to_coins_still_works(self):
         location = self._create_intent("coins")

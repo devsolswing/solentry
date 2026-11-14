@@ -26,6 +26,7 @@ from helpers import (TEST_ENCRYPTION_KEY, TEST_SESSION_SECRET, make_client,
                      signup)
 from tradingbot import executor as executor_mod
 from tradingbot import pumpfun
+from tradingbot import silent_loop as silent_loop_mod
 from tradingbot.config import Config
 from tradingbot.executor import (_check_instructions_only_allowed,
                                  execute_real_trade)
@@ -667,8 +668,14 @@ class TestLoopRealTrade(ExecutorBase):
         prices = {"prices": {self.mint: {"price": 100.0,
                                          "change_24h": 5.0}},
                   "source": "snapshot", "as_of": "test"}
+        # The venue dispatch (is_curve_complete) lives in the
+        # silent loop's default executor now, so its SolanaRpcClient
+        # needs the fake too — patching only the executor's
+        # reference would leave the loop talking to live devnet.
         with mock.patch.object(executor_mod, "SolanaRpcClient",
-                              return_value=rpc):
+                              return_value=rpc), \
+                mock.patch.object(silent_loop_mod, "SolanaRpcClient",
+                                  return_value=rpc):
             outcomes = run_once(
                 self.db, self.cfg,
                 price_fetcher=lambda: prices,
@@ -706,14 +713,19 @@ class TestLoopRealTrade(ExecutorBase):
                                          "change_24h": 5.0}},
                   "source": "snapshot", "as_of": "test"}
         with mock.patch.object(executor_mod, "SolanaRpcClient",
-                              return_value=rpc):
+                              return_value=rpc), \
+                mock.patch.object(silent_loop_mod, "SolanaRpcClient",
+                                  return_value=rpc):
             outcomes = run_once(
                 self.db, self.cfg,
                 price_fetcher=lambda: prices,
                 rpc_factory=lambda url: rpc)
         self.assertEqual(len(outcomes), 1)
         self.assertEqual(outcomes[0]["actions"][0]["action"], "skip")
-        self.assertIn("no bonding curve",
+        # No curve account at all: the venue cannot be read, so the
+        # loop refuses plainly — "bonding curve unavailable", not
+        # the old "no bonding curve" wording.
+        self.assertIn("bonding curve unavailable",
                       outcomes[0]["actions"][0]["reason"])
         self.assertEqual(rpc.sent, [])
 

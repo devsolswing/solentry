@@ -22,10 +22,10 @@ template) may hardcode them. Holdings come from the route's real
 coin_rows; a missing price is "—", never invented.
 
 The home_holdings helper (image resolution, sparkline SVG, chain
-reconciliation) is NOT wired into the route yet — routes.py is owned
-by the Android PWA build — so these tests cover the helper directly
-plus the template branches it will feed (rendered with fabricated
-rows), and report the wiring as a follow-up.
+reconciliation) is wired into the route: routes._coin_rows attaches
+each row's real image + 1hr sparkline via enrich_row, so these
+tests cover the helper directly plus the template branches it feeds
+(rendered with fabricated rows) and the live route end to end.
 No SOL moves in these tests; sends are never confirmed.
 """
 
@@ -39,6 +39,13 @@ import tradingbot.home_holdings as hh
 import tradingbot.prices as prices
 import tradingbot.routes as routes
 from helpers import csrf, login, make_client, signup
+
+# Gate (the devnet pump.fun coin): the mint every home test buys
+# and holds, priced at $0.01 with a +2.50% 1h change from the
+# mocked trenches feed.
+GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+GATE_PRICE = 0.01
+GATE_CHANGE_1H = 2.5
 
 
 def make_prices(changes):
@@ -175,27 +182,39 @@ class TestResolveTokenImage(unittest.TestCase):
             "MINT", is_mint=True, http_get=fake_get,
             http_head=fake_head_not_found))
 
-    def test_major_image_from_coingecko(self):
+    def test_major_symbol_has_no_image(self):
+        # Majors are gone: there is no CoinGecko lookup any more,
+        # so a symbol (SOL, BTC, ...) has no token image — only a
+        # pump.fun mint resolves one, from its stored coin_meta or
+        # its DexScreener pair. The fetcher must not even be called.
         def fake_get(url):
-            self.assertIn("api.coingecko.com", url)
-            self.assertIn("/coins/bitcoin", url)
-            return {"image": {
-                "large": "https://assets.coingecko.com/btc.png",
-                "small": "https://assets.coingecko.com/btc-s.png"}}
-        url = hh.resolve_token_image(
+            raise AssertionError("no fetch for a symbol: %s" % url)
+        self.assertIsNone(hh.resolve_token_image(
+            "SOL", is_mint=False, http_get=fake_get,
+            http_head=fake_head_ok))
+        self.assertIsNone(hh.resolve_token_image(
             "BTC", is_mint=False, http_get=fake_get,
-            http_head=fake_head_ok)
-        self.assertEqual(url, "https://assets.coingecko.com/btc.png")
+            http_head=fake_head_ok))
 
     def test_image_is_cached(self):
         calls = []
 
         def fake_get(url):
             calls.append(url)
-            return {"image": {"large": "https://assets.coingecko.com/e.png"}}
-        hh.resolve_token_image("ETH", is_mint=False, http_get=fake_get,
-                               http_head=fake_head_ok)
-        hh.resolve_token_image("ETH", is_mint=False, http_get=fake_get,
+            return {"pairs": [{
+                "chainId": "solana", "dexId": "pumpfun",
+                "priceUsd": "0.001",
+                "liquidity": {"usd": 1000},
+                "baseToken": {"address": GATE_MINT,
+                              "name": "Gate", "symbol": "GATE"},
+                "info": {"imageUrl":
+                         "https://dd.dexscreener.com/gate.png"}}]}
+        url = hh.resolve_token_image(
+            GATE_MINT, is_mint=True, http_get=fake_get,
+            http_head=fake_head_ok)
+        self.assertEqual(url, "https://dd.dexscreener.com/gate.png")
+        hh.resolve_token_image(GATE_MINT, is_mint=True,
+                               http_get=fake_get,
                                http_head=fake_head_ok)
         self.assertEqual(len(calls), 1)
 
@@ -205,7 +224,7 @@ class TestResolveTokenImage(unittest.TestCase):
 # ------------------------------------------------------------------
 
 class TestSparklinePoints(unittest.TestCase):
-    def test_major_points_from_coingecko_market_chart(self):
+    def test_points_from_feed_market_chart(self):
         def fake_get(url):
             return {"points": [
                 {"ts": 1, "price": 10.0}, {"ts": 2, "price": 11.0},
@@ -217,7 +236,7 @@ class TestSparklinePoints(unittest.TestCase):
                     {"ts": 1, "price": 10.0},
                     {"ts": 2, "price": 11.0},
                     {"ts": 3, "price": 10.5}], "error": None}):
-            points = hh.sparkline_points_for_coin("SOL")
+            points = hh.sparkline_points_for_coin(GATE_MINT)
         self.assertEqual(points, [10.0, 11.0, 10.5])
 
     def test_mint_points_from_feed_history(self):
@@ -228,14 +247,14 @@ class TestSparklinePoints(unittest.TestCase):
                 seen.append(coin_id)
                 return [(1000.0, 1.0), (1005.0, 1.5), (1010.0, 1.2)]
         self.assertEqual(
-            hh.sparkline_points_for_coin("MINT", is_mint=True,
+            hh.sparkline_points_for_coin(GATE_MINT, is_mint=True,
                                          feed=Feed()),
             [1.0, 1.5, 1.2])
-        self.assertEqual(seen, ["MINT"])
+        self.assertEqual(seen, [GATE_MINT])
 
     def test_mint_without_feed_has_no_points(self):
         self.assertEqual(
-            hh.sparkline_points_for_coin("MINT", is_mint=True), [])
+            hh.sparkline_points_for_coin(GATE_MINT, is_mint=True), [])
 
 
 class TestFetchChainTokenBalances(unittest.TestCase):
@@ -321,7 +340,7 @@ class TestEnrichRow(unittest.TestCase):
                     "chainId": "solana", "dexId": "pumpfun",
                     "priceUsd": "0.001",
                     "liquidity": {"usd": 5},
-                    "baseToken": {"address": "MINT"},
+                    "baseToken": {"address": GATE_MINT},
                     "info": {"imageUrl": "https://dd.dexscreener.com/m.png"}}]}
             return {"points": [{"ts": 1, "price": 1.0},
                                {"ts": 2, "price": 2.0}],
@@ -331,10 +350,16 @@ class TestEnrichRow(unittest.TestCase):
             def history(self, coin_id):
                 return [(1000.0, 1.0), (1005.0, 2.0)]
 
-        row = {"coin_id": "MINT", "is_mint": True, "ticker": "GATE"}
+        row = {"coin_id": GATE_MINT, "is_mint": True, "ticker": "GATE"}
+        # The 1hr sparkline comes from the feed-based market chart
+        # (epoch-ms points, like the live feed records) — the mock
+        # must return real points, not an empty chart.
         with mock.patch.object(
                 hh, "fetch_market_chart",
-                return_value={"points": [], "error": None}):
+                return_value={"points": [
+                    {"ts": 1700000000000, "price": 1.0},
+                    {"ts": 1700003600000, "price": 2.0}],
+                    "error": None}):
             out = hh.enrich_row(row, feed=Feed(), http_get=fake_get,
                                 http_head=fake_head_ok)
         self.assertEqual(out["image_url"],
@@ -360,14 +385,15 @@ class HomeMockupBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
+        # SOL only now — the app prices no major coins; pump.fun
+        # mints are priced by the trenches feed (mocked below).
         self.prices_patch = mock.patch.object(
             routes, "get_prices",
             return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25, 2.5), "USDC": (1.0, 0.0)}))
+                "SOL": (10.0, 5.25, 2.5)}))
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
-            prices, "get_price", return_value=(10.0, "snapshot", "test"))
+            prices, "get_price", return_value=(10.0, "live", "test"))
         self.price_patch.start()
         self.trenches_patch = mock.patch.object(
             routes, "fetch_trenches_scan",
@@ -375,6 +401,24 @@ class HomeMockupBase(unittest.TestCase):
                           "source": "dexscreener", "as_of": "test",
                           "error": None})
         self.trenches_patch.start()
+        # The trenches feed prices + names the Gate mint; coin_meta
+        # is mocked out so no test ever hits live RPC/DexScreener.
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            return_value={GATE_MINT: GATE_PRICE})
+        self.mint_prices_patch.start()
+        self.mint_1h_patch = mock.patch.object(
+            routes, "fetch_mint_1h_changes",
+            return_value={GATE_MINT: GATE_CHANGE_1H})
+        self.mint_1h_patch.start()
+        self.mint_idents_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            return_value={GATE_MINT: {"name": "Gate",
+                                      "symbol": "GATE"}})
+        self.mint_idents_patch.start()
+        self.coin_meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.coin_meta_patch.start()
         routes._TRENCHES_CACHE.update(
             {"at": 0.0, "rows": None, "error": None})
         signup(self.client, "alice")
@@ -384,6 +428,10 @@ class HomeMockupBase(unittest.TestCase):
         ).fetchone()["id"]
 
     def tearDown(self):
+        self.coin_meta_patch.stop()
+        self.mint_idents_patch.stop()
+        self.mint_1h_patch.stop()
+        self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()
@@ -400,9 +448,12 @@ class HomeMockupBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="10"):
-        return self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+    def _buy_mint(self, usd="10"):
+        # A real paper buy of the Gate mint: $10 at the mocked
+        # $0.01 feed price buys 1000 GATE. SOL is not a buyable
+        # coin any more (no SOL detail page, no SOL buy route).
+        return self.client.post(f"/coins/{GATE_MINT}/buy", data={
+            "csrf_token": csrf(self.client, "/wallet"),
             "usd": usd, "bot_id": ""})
 
 
@@ -457,14 +508,17 @@ class TestHomeMockupLayout(HomeMockupBase):
 
     def test_holdings_row_shows_real_data_not_the_mockup(self):
         self._choose_mode("paper")
-        self._buy_sol()
+        resp = self._buy_mint()
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Bought", resp.get_data(as_text=True))
         html = self._html("/wallet")
-        self.assertIn("Solana", html)
-        self.assertIn("(SOL)", html)
-        # 1 SOL bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
-        # 1.0000 SOL worth $10.00; the price is $10.00.
-        self.assertIn("1.0000 SOL", html)
-        self.assertIn("$10.00", html)
+        self.assertIn("Gate", html)
+        self.assertIn("(GATE)", html)
+        # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
+        # (removed 2026-11-12), leaves 1000.0000 GATE worth $10.00;
+        # the price is $0.0100; 1h +2.50%.
+        self.assertIn("1,000.0000 GATE", html)
+        self.assertIn("$0.0100", html)
         self.assertIn("$10.00", html)
         self.assertIn("+2.50%", html)
         # The screenshot's figures are examples, never the data:

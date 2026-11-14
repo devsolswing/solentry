@@ -6,6 +6,10 @@ import unittest
 
 from helpers import csrf, make_client, signup
 
+# Gate (the devnet pump.fun coin): the only coin the bot forms may
+# carry now — coins are mint addresses only, never symbols.
+GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+
 
 class TestBots(unittest.TestCase):
     def setUp(self):
@@ -54,7 +58,9 @@ class TestBots(unittest.TestCase):
         db = self.app.config["DB"]
         bot = db.execute("SELECT * FROM bots WHERE name = 'Bad'").fetchone()
         self.assertEqual(bot["strategy"], "balanced")
-        self.assertEqual(bot["coins"], '["SOL"]')
+        # "NOPE" is not a mint address, so it is dropped — and there
+        # is no default coin any more (SIGNALS_DEFAULT_COINS = []).
+        self.assertEqual(bot["coins"], '[]')
         self.assertEqual(bot["buy_size_pct"], 100)
         self.assertEqual(bot["stop_loss_pct"], 50)
 
@@ -65,7 +71,7 @@ class TestBots(unittest.TestCase):
                             ).fetchone()["id"]
         resp = self.client.post(f"/bots/{bot_id}/edit", data={
             "csrf_token": csrf(self.client, f"/bots/{bot_id}/edit"),
-            "name": "Luna2", "strategy": "careful", "coins": "ETH",
+            "name": "Luna2", "strategy": "careful", "coins": GATE_MINT,
             "buy_size_pct": "10", "stop_loss_pct": "3"})
         self.assertEqual(resp.status_code, 302)
         bot = db.execute("SELECT * FROM bots WHERE id = ?",
@@ -74,7 +80,9 @@ class TestBots(unittest.TestCase):
         # The edit form has no strategy picker any more: the stored
         # strategy is kept, never overwritten from the form.
         self.assertEqual(bot["strategy"], "balanced")
-        self.assertEqual(bot["coins"], '["ETH"]')
+        # A valid mint address is stored; a symbol ("ETH") would be
+        # dropped, since coins are mint addresses only.
+        self.assertEqual(bot["coins"], f'["{GATE_MINT}"]')
 
     def test_delete_removes_bot(self):
         self._create()

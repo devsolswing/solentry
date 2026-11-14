@@ -13,12 +13,19 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import csrf, login, make_client, signup
+import tradingbot.routes as routes
 from tradingbot.page_numbers import (PAGE_ALIASES, PAGE_NUMBERS,
                                      page_number_for)
 
 TEMPLATES = Path(__file__).resolve().parent.parent / "tradingbot" / "templates"
+
+# Gate (the devnet pump.fun coin): the mint the coin pages open,
+# priced at $0.002 from the mocked trenches feed. SOL has no coin
+# pages any more.
+GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
 
 
 class TestPageNumberSource(unittest.TestCase):
@@ -65,6 +72,40 @@ class TestPageNumbersRender(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
+        # The coin pages price the Gate mint from the mocked
+        # trenches feed; coin_meta / trade flow / trenches scan are
+        # mocked out so no test ever hits live RPC/DexScreener.
+        self.prices_patch = mock.patch.object(
+            routes, "get_prices",
+            return_value={"prices": {"SOL": {"price": 10.0,
+                                             "change_24h": 5.0,
+                                             "change_1h": None}},
+                          "source": "live", "as_of": "test"})
+        self.prices_patch.start()
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            return_value={GATE_MINT: 0.002})
+        self.mint_prices_patch.start()
+        self.mint_1h_patch = mock.patch.object(
+            routes, "fetch_mint_1h_changes", return_value={})
+        self.mint_1h_patch.start()
+        self.mint_idents_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            return_value={GATE_MINT: {"name": "Gate",
+                                      "symbol": "GATE"}})
+        self.mint_idents_patch.start()
+        self.coin_meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.coin_meta_patch.start()
+        self.flow_patch = mock.patch.object(
+            routes, "fetch_trade_flow", return_value=None)
+        self.flow_patch.start()
+        self.trenches_patch = mock.patch.object(
+            routes, "fetch_trenches_scan",
+            return_value={"candidates": [], "prices": {},
+                          "source": "dexscreener", "as_of": "test",
+                          "error": None})
+        self.trenches_patch.start()
         signup(self.client, "alice")
         login(self.client, "alice")
         # A second client on the same app, never logged in, for the
@@ -72,6 +113,13 @@ class TestPageNumbersRender(unittest.TestCase):
         self.anon = self.app.test_client()
 
     def tearDown(self):
+        self.trenches_patch.stop()
+        self.flow_patch.stop()
+        self.coin_meta_patch.stop()
+        self.mint_idents_patch.stop()
+        self.mint_1h_patch.stop()
+        self.mint_prices_patch.stop()
+        self.prices_patch.stop()
         self.tmp.cleanup()
 
     def _html(self, client, path):
@@ -118,7 +166,7 @@ class TestPageNumbersRender(unittest.TestCase):
         ids = self._make_preset_bots()
         pages = [
             ("/wallet", 3), ("/dashboard", 4),
-            ("/coins/SOL/detail", 5), ("/bots", 6),
+            (f"/coins/{GATE_MINT}/detail", 5), ("/bots", 6),
             (f"/bots/{ids['trenches']}", 7),
             (f"/bots/{ids['trenches']}/edit", 8),
             ("/bots/create", 9), ("/trenches", 10), ("/logs", 11),
@@ -129,7 +177,8 @@ class TestPageNumbersRender(unittest.TestCase):
             self._assert_page_id(self._html(self.client, path), number)
 
     def test_coin_popup_keeps_the_dashboard_number(self):
-        self._assert_page_id(self._html(self.client, "/coins/SOL"), 4)
+        self._assert_page_id(self._html(self.client, f"/coins/{GATE_MINT}"),
+                             4)
 
     def test_forgot_password_steps(self):
         # Set a recovery question, then walk the forgot flow on the

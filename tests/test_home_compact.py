@@ -23,7 +23,7 @@ import unittest
 from unittest import mock
 
 import tradingbot.routes as routes
-from test_home_mockup import HomeMockupBase
+from test_home_mockup import GATE_MINT, HomeMockupBase
 
 
 def _css():
@@ -101,17 +101,19 @@ class TestHomeCompactLayout(HomeMockupBase):
 
     def test_rows_keep_icon_sparkline_price_amount_and_1h(self):
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_mint()
         html = self._html("/wallet")
         # Circular icon (image when there is one, ticker-initial
         # fallback otherwise) + sparkline slot + price + amount +
-        # 1h % far right. 1 SOL at the mocked $10 price, no fee
-        # (removed 2026-11-12), leaves 1.0000 SOL worth $10.00; 1h +2.50%.
+        # 1h % far right. $10 at the mocked $0.01 feed price buys
+        # 1000 GATE, no fee (removed 2026-11-12), worth $10.00;
+        # 1h +2.50%.
         self.assertTrue("coin-ico" in html or "coin-img" in html)
         self.assertIn("holdings-spark", html)
-        self.assertIn('data-sparkline-coin="SOL"', html)
+        self.assertIn(f'data-sparkline-coin="{GATE_MINT}"', html)
+        self.assertIn("$0.0100", html)
+        self.assertIn("1,000.0000 GATE", html)
         self.assertIn("$10.00", html)
-        self.assertIn("1.0000 SOL", html)
         self.assertIn("holdings-1h", html)
         self.assertIn("+2.50%", html)
         # The name column takes the free space so the sparkline

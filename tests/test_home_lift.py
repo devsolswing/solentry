@@ -12,11 +12,12 @@ holdings:
   never guessed. The page scrolls now (owner, 2026-11-12), so the
   holdings panel grows with the list and never scrolls internally
   (supersedes the compact build's internal scroll).
-- 1h data: CoinGecko simple/price with include_1hr_change for the
-  known coins; DexScreener best-pair priceChange.h1 for pump.fun
-  mints (new fetch_mint_1h_changes, mirroring
-  fetch_prices_for_mints). Snapshot fallback carries change_1h
-  None.
+- 1h data: SOL's 1h change is always None (the SOL price feed
+  carries no 1h figure); pump.fun mints get theirs from
+  DexScreener best-pair priceChange.h1 (new fetch_mint_1h_changes,
+  mirroring fetch_prices_for_mints). A price feed that cannot be
+  reached reports "unavailable" with no price at all — there is no
+  snapshot fallback any more.
 - The portfolio chart moved off the home page to make room; the
   total and the 24h change stay. The candlestick build (2026-11-10)
   brings a COMPACT chart back into the balance card — candlestick
@@ -40,6 +41,13 @@ import tradingbot.trenches as trenches
 from helpers import csrf, make_client, signup
 
 MINT = "11111111111111111111111111111111"
+# Gate (the devnet pump.fun coin): the mint the lift tests buy
+# and hold, priced at $0.01 with a +2.50% 1h change from the
+# mocked trenches feed. MINT above is the unnamed mint used for
+# the no-data dash test.
+GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+GATE_PRICE = 0.01
+GATE_CHANGE_1H = 2.5
 
 
 def make_prices(changes):
@@ -58,14 +66,15 @@ class HomeLiftBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
+        # SOL only now — the app prices no major coins; pump.fun
+        # mints are priced by the trenches feed (mocked below).
         self.prices_patch = mock.patch.object(
             routes, "get_prices",
             return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25, 2.5), "USDC": (1.0, 0.0)}))
+                "SOL": (10.0, 5.25, 2.5)}))
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
-            prices, "get_price", return_value=(10.0, "snapshot", "test"))
+            prices, "get_price", return_value=(10.0, "live", "test"))
         self.price_patch.start()
         self.trenches_patch = mock.patch.object(
             routes, "fetch_trenches_scan",
@@ -74,11 +83,21 @@ class HomeLiftBase(unittest.TestCase):
                           "error": None})
         self.trenches_patch.start()
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints", return_value={})
+            routes, "fetch_prices_for_mints",
+            return_value={GATE_MINT: GATE_PRICE})
         self.mint_prices_patch.start()
         self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes", return_value={})
+            routes, "fetch_mint_1h_changes",
+            return_value={GATE_MINT: GATE_CHANGE_1H})
         self.mint_1h_patch.start()
+        self.mint_idents_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            return_value={GATE_MINT: {"name": "Gate",
+                                      "symbol": "GATE"}})
+        self.mint_idents_patch.start()
+        self.coin_meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.coin_meta_patch.start()
         routes._TRENCHES_CACHE.update(
             {"at": 0.0, "rows": None, "error": None})
         signup(self.client, "alice")
@@ -88,6 +107,8 @@ class HomeLiftBase(unittest.TestCase):
         ).fetchone()["id"]
 
     def tearDown(self):
+        self.coin_meta_patch.stop()
+        self.mint_idents_patch.stop()
         self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.trenches_patch.stop()
@@ -106,16 +127,19 @@ class HomeLiftBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="10"):
-        return self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+    def _buy_mint(self, usd="10"):
+        # A real paper buy of the Gate mint: $10 at the mocked
+        # $0.01 feed price buys 1000 GATE. SOL is not a buyable
+        # coin any more (no SOL detail page, no SOL buy route).
+        return self.client.post(f"/coins/{GATE_MINT}/buy", data={
+            "csrf_token": csrf(self.client, "/wallet"),
             "usd": usd, "bot_id": ""})
 
-    def _hold_mint(self, amount=100.0, avg_price=0.01):
+    def _hold_mint(self, amount=100.0, avg_price=0.01, mint=MINT):
         self.db.execute(
             "INSERT INTO paper_holdings (user_id, coin_id, amount, "
             "avg_price) VALUES (?, ?, ?, ?)",
-            (self.user_id, MINT, amount, avg_price))
+            (self.user_id, mint, amount, avg_price))
         self.db.commit()
 
 
@@ -171,13 +195,13 @@ class TestHomeLiftLayout(HomeLiftBase):
 
     def test_holdings_show_name_ticker_value_and_1h(self):
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_mint()
         html = self._html("/wallet")
-        self.assertIn("Solana", html)
-        self.assertIn("(SOL)", html)
-        # 1 SOL bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
-        # 1.0000 SOL worth $10.00.
-        self.assertIn("1.0000 SOL", html)
+        self.assertIn("Gate", html)
+        self.assertIn("(GATE)", html)
+        # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
+        # (removed 2026-11-12), leaves 1,000.0000 GATE worth $10.00.
+        self.assertIn("1,000.0000 GATE", html)
         self.assertIn("$10.00", html)
         self.assertIn("holdings-1h", html)
         self.assertIn("+2.50%", html)
@@ -186,7 +210,10 @@ class TestHomeLiftLayout(HomeLiftBase):
         self._choose_mode("paper")
         self._hold_mint()
         html = self._html("/wallet")
-        self.assertIn("Pump.fun token 1111…1111", html)
+        # Nothing names this mint (no feed identity, no coin_meta),
+        # so it shows as "Unknown coin" — never a mint address and
+        # never the old "Pump.fun token …" label.
+        self.assertIn("Unknown coin", html)
         # No 1h data: the 1h cell still shows a dash, never a guess.
         # (The dash sits in the live-update value span, so the live
         # feed can fill it when data arrives. The screenshot shows
@@ -250,25 +277,13 @@ class TestChange1hFeed(unittest.TestCase):
                 return json.dumps(self._data).encode("utf-8")
         return FakeResp(payload)
 
-    def test_coingecko_live_fetch_carries_1h_change(self):
-        payload = {
-            "bitcoin": {"usd": 74000.0, "usd_24h_change": -2.5,
-                        "usd_1h_change": 0.4},
-            "ethereum": {"usd": 2100.0, "usd_24h_change": 1.0,
-                         "usd_1h_change": -0.2},
-            "solana": {"usd": 10.0, "usd_24h_change": 5.25,
-                       "usd_1h_change": 2.5},
-            "usd-coin": {"usd": 1.0, "usd_24h_change": 0.0,
-                         "usd_1h_change": 0.0},
-            "dogecoin": {"usd": 0.07, "usd_24h_change": 3.0},
-            "pepe": {"usd": 0.000005, "usd_24h_change": -1.0,
-                     "usd_1h_change": 1.1},
-            "bonk": {"usd": 0.000003, "usd_24h_change": 8.0,
-                     "usd_1h_change": -4.0},
-            "jupiter-exchange-solana": {"usd": 0.23,
-                                        "usd_24h_change": -0.5,
-                                        "usd_1h_change": 0.9},
-        }
+    def test_jupiter_live_fetch_prices_sol_only(self):
+        # The only price list left is SOL (the unit of account),
+        # from Jupiter's lite-api price v3 — no CoinGecko, no
+        # 36-coin list, no 1h figure anywhere (SOL's change_1h is
+        # always None; mints get theirs from the trenches feed).
+        payload = {"data": {prices.SOL_MINT: {
+            "usdPrice": 10.0, "priceChange24h": 5.25}}}
         seen = {}
 
         def fake_urlopen(req, timeout=10):
@@ -277,20 +292,26 @@ class TestChange1hFeed(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", fake_urlopen):
             data = prices.get_prices()
-        self.assertIn("include_1hr_change=true", seen["url"])
+        self.assertIn("lite-api.jup.ag/price/v3", seen["url"])
+        self.assertIn(prices.SOL_MINT, seen["url"])
         self.assertEqual(data["source"], "live")
-        self.assertEqual(data["prices"]["SOL"]["change_1h"], 2.5)
-        self.assertEqual(data["prices"]["BTC"]["change_1h"], 0.4)
-        # A coin the feed gives no 1h figure for reads None ("—").
-        self.assertIsNone(data["prices"]["DOGE"]["change_1h"])
+        self.assertEqual(list(data["prices"]), ["SOL"])
+        self.assertEqual(data["prices"]["SOL"]["price"], 10.0)
+        self.assertEqual(data["prices"]["SOL"]["change_24h"], 5.25)
+        # No 1h figure is ever carried for SOL ("—" on the page).
+        self.assertIsNone(data["prices"]["SOL"]["change_1h"])
 
-    def test_snapshot_fallback_has_no_1h_change(self):
+    def test_fetch_failure_is_unavailable_not_a_snapshot(self):
+        # No snapshot fallback any more: a feed that does not
+        # answer reports "unavailable" with no price at all — the
+        # old baked CoinGecko snapshot once served 4-day-old
+        # prices as if they were live, and it is gone for good.
         with mock.patch("urllib.request.urlopen",
                         side_effect=Exception("no network")):
             data = prices.get_prices()
-        self.assertEqual(data["source"], "snapshot")
-        for entry in data["prices"].values():
-            self.assertIsNone(entry["change_1h"])
+        self.assertEqual(data["source"], "unavailable")
+        self.assertIsNone(data["prices"]["SOL"]["price"])
+        self.assertIsNone(data["prices"]["SOL"]["change_1h"])
 
     def _dex_pair(self, mint, h1, liq=1000.0):
         return {"chainId": "solana", "dexId": "pumpfun",
@@ -329,25 +350,35 @@ class TestChange1hFeed(unittest.TestCase):
 
 
 class TestCoinRowsChange1h(HomeLiftBase):
-    def test_known_coin_and_mint_rows_carry_change_1h(self):
+    def test_mint_rows_carry_change_1h_and_legacy_sol_has_none(self):
+        # Two mints, priced by the trenches feed: each row carries
+        # its own 1h change and value. A legacy SOL holding (bought
+        # when the app still listed major coins) has no feed any
+        # more — it is shown at cost with no live price and no 1h
+        # figure, never hidden and never guessed.
         self.db.execute(
             "INSERT INTO paper_holdings (user_id, coin_id, amount, "
             "avg_price) VALUES (?, 'SOL', 2.0, 5.0)",
             (self.user_id,))
         self._hold_mint()
+        self._hold_mint(amount=50.0, avg_price=0.2, mint=GATE_MINT)
         self.db.commit()
         with mock.patch.object(
                 routes, "fetch_prices_for_mints",
-                return_value={MINT: 0.5}), mock.patch.object(
+                return_value={MINT: 0.5, GATE_MINT: 0.25}), \
+                mock.patch.object(
                 routes, "fetch_mint_1h_changes",
-                return_value={MINT: -3.25}):
+                return_value={MINT: -3.25, GATE_MINT: 4.0}):
             rows = routes._coin_rows(
                 self.db, self.user_id, "paper",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}))
         by_id = {r["coin_id"]: r for r in rows}
-        self.assertEqual(by_id["SOL"]["change_1h"], 2.5)
         self.assertEqual(by_id[MINT]["change_1h"], -3.25)
         self.assertEqual(by_id[MINT]["value"], 50.0)
+        self.assertEqual(by_id[GATE_MINT]["change_1h"], 4.0)
+        self.assertEqual(by_id[GATE_MINT]["value"], 12.5)
+        self.assertIsNone(by_id["SOL"]["change_1h"])
+        self.assertIsNone(by_id["SOL"]["price"])
 
     def test_missing_1h_figures_are_none_not_zero(self):
         self.db.execute(

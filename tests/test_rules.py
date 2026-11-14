@@ -18,7 +18,12 @@ from helpers import csrf, login, make_client, signup
 from tradingbot.assistant import parse_message
 from tradingbot.rules import (TRENCHES_CATEGORY, load_rules, summarize_rules,
                               trenches_ruleset, validate_ruleset)
+from tradingbot import silent_loop
 from tradingbot.silent_loop import run_once
+
+# Gate (the devnet pump.fun coin): signals bots watch mint
+# addresses, never symbols — "SOL" has no price in the mint map.
+GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
 
 TRENCHES_SPEC = (
     "scan the trenches every minute and buy any coin gaining 3.4% in "
@@ -527,15 +532,24 @@ class TestRulesEngine(RulesEngineBase):
                                   "profit_pct": 10}],
                  "trailing_stop_pct": 7.0}
         bot_id = self._insert_bot(name="Majors", rules=rules, category="")
-        self.db.execute("UPDATE bots SET coins = '[\"SOL\"]' WHERE id = ?",
-                        (bot_id,))
+        self.db.execute("UPDATE bots SET coins = ? WHERE id = ?",
+                        (json.dumps([GATE_MINT]), bot_id))
         self.db.commit()
         prices = {"prices": {"SOL": {"price": 100.0, "change_24h": 2.5}},
                   "source": "snapshot", "as_of": "test"}
-        outcomes = run_once(self.db, self.cfg,
-                            price_fetcher=lambda: prices)
+        # Signals bots price their mints from the trenches feed, not
+        # the SOL-only price list: mock the feed's mint prices so
+        # the test never hits live DexScreener.
+        with mock.patch.object(
+                silent_loop, "fetch_prices_for_mints",
+                return_value={GATE_MINT: 100.0}), \
+                mock.patch.object(
+                    silent_loop, "fetch_mint_24h_changes",
+                    return_value={GATE_MINT: 2.5}):
+            outcomes = run_once(self.db, self.cfg,
+                                price_fetcher=lambda: prices)
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
-        self.assertIsNotNone(self._position(bot_id, "SOL"))
+        self.assertIsNotNone(self._position(bot_id, GATE_MINT))
 
     def test_legacy_bot_unchanged(self):
         bot_id = self._insert_bot(name="Legacy", rules=None, category="")

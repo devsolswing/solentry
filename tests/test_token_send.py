@@ -531,10 +531,16 @@ class TestTokenSendFlow(unittest.TestCase):
         self.assertIn("this sends GATE", html)
         self.assertNotIn("SolEntry sends SOL only", html)
 
-    def test_sol_coin_page_send_window_unchanged(self):
-        html = self.client.get("/coins/SOL/detail").get_data(as_text=True)
+    def test_sol_send_window_lives_on_the_wallet_send_page(self):
+        # SOL has no coin detail page any more (it is the unit of
+        # account, never a listed coin), so its send window moved
+        # to the wallet send page: SOL is the default token there,
+        # and the review step is the same two-step confirm flow.
+        self.assertEqual(self.client.get("/coins/SOL/detail").status_code,
+                         404)
+        html = self.client.get("/wallet/send").get_data(as_text=True)
         self.assertIn('name="token" value="SOL"', html)
-        self.assertIn("Amount (SOL)", html)
+        self.assertIn("SOL by default", html)
         self.assertIn("Review send", html)
 
 

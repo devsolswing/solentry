@@ -6,7 +6,7 @@ Rules under test:
   an empty state, not the whole price list.
 - A small "Buy or Sell Coin" button below the list opens a
   full-screen pop-up: type a coin name and live results appear
-  (CoinGecko list + DexScreener search, never invented), then an
+  (DexScreener search of Solana pairs, never invented), then an
   amount in $ or tokens at the live price, bought/sold through the
   existing coin endpoints (which now also accept a token amount on
   buy and a $ amount on sell, converted at the server's own live
@@ -27,12 +27,20 @@ import unittest
 from unittest import mock
 
 import tradingbot.charts as charts_mod
+import tradingbot.coin_meta as coin_meta_mod
+import tradingbot.home_holdings as home_holdings_mod
+import tradingbot.jupiter as jupiter_mod
 import tradingbot.prices as prices_mod
 import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
 from tradingbot.rules import load_rules, scanner_ruleset
 
 DEST = "11111111111111111111111111111111"
+# Gate — the devnet pump.fun mint used as the test coin throughout
+# this file. SOL is the unit of account, never a listed/buyable
+# coin, so every buy/sell/detail test uses this mint instead.
+GATE = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+GATE_PRICE = 0.0000005
 
 
 class FakeRpc:
@@ -59,11 +67,12 @@ class FakeRpc:
 
 
 def make_prices(changes):
-    """changes: {coin: (price, change_24h)}"""
+    """changes: {coin: (price, change_24h)} — pump.fun only, so the
+    list holds just SOL, the unit of account."""
     return {
-        "prices": {c: {"price": p, "change_24h": ch}
+        "prices": {c: {"price": p, "change_24h": ch, "change_1h": None}
                    for c, (p, ch) in changes.items()},
-        "source": "snapshot", "as_of": "test",
+        "source": "live", "as_of": "test",
     }
 
 
@@ -87,17 +96,66 @@ class CoinsPageBase(unittest.TestCase):
         self.rpc_patch.start()
         FakeRpc.instances.clear()
         FakeRpc.balance_lamports = 0
+        # The price list is SOL only now (unit of account); mints
+        # are priced by the trenches feed, mocked below.
         self.prices_patch = mock.patch.object(
             routes, "get_prices",
-            return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25), "USDC": (1.0, 0.0),
-                "DOGE": (0.07, 3.0), "PEPE": (0.000005, -1.0),
-                "BONK": (0.000003, 8.0), "JUP": (0.23, -0.5)}))
+            return_value=make_prices({"SOL": (10.0, 5.25)}))
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
-            prices_mod, "get_price", return_value=(10.0, "snapshot", "test"))
+            prices_mod, "get_price", return_value=(10.0, "live", "test"))
         self.price_patch.start()
+        # Mint prices / 1h changes / identities, driven by dicts
+        # tests can tweak (self.mint_prices[...] = ...).
+        self.mint_prices = {GATE: GATE_PRICE}
+        self.mint_1h = {}
+        self.mint_identities = {
+            GATE: {"name": "Gate", "symbol": "GATE"}}
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_prices[m] for m in mints
+                if m in self.mint_prices})
+        self.mint_prices_patch.start()
+        self.mint_1h_patch = mock.patch.object(
+            routes, "fetch_mint_1h_changes",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_1h[m] for m in mints
+                if m in self.mint_1h})
+        self.mint_1h_patch.start()
+        self.mint_id_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_identities[m] for m in mints
+                if m in self.mint_identities})
+        self.mint_id_patch.start()
+        # Logo fetch on purchase / render must stay local: no live
+        # RPC, Metaplex or DexScreener calls in these tests.
+        self.meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.meta_patch.start()
+        self.hh_meta_patch = mock.patch.object(
+            home_holdings_mod, "ensure_coin_meta", return_value=None)
+        self.hh_meta_patch.start()
+        self.hh_get_patch = mock.patch.object(
+            home_holdings_mod, "_default_get",
+            return_value={"pairs": []})
+        self.hh_get_patch.start()
+        home_holdings_mod.clear_image_cache()
+        self.metaplex_patch = mock.patch.object(
+            coin_meta_mod, "_from_metaplex", return_value=None)
+        self.metaplex_patch.start()
+        # Paper sells/buys price from a Jupiter quote when one
+        # exists; there is no route in tests, so refuse the quote
+        # instead of hitting the live API.
+        self.jup_buy_patch = mock.patch.object(
+            jupiter_mod, "quote_buy_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests"))
+        self.jup_buy_patch.start()
+        self.jup_sell_patch = mock.patch.object(
+            jupiter_mod, "quote_sell_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests"))
+        self.jup_sell_patch.start()
         self.trenches_patch = mock.patch.object(
             routes, "fetch_trenches_scan",
             return_value={"candidates": [], "prices": {},
@@ -131,6 +189,15 @@ class CoinsPageBase(unittest.TestCase):
         self.chart_patch.stop()
         self.search_patch.stop()
         self.trenches_patch.stop()
+        self.jup_sell_patch.stop()
+        self.jup_buy_patch.stop()
+        self.metaplex_patch.stop()
+        self.hh_get_patch.stop()
+        self.hh_meta_patch.stop()
+        self.meta_patch.stop()
+        self.mint_id_patch.stop()
+        self.mint_1h_patch.stop()
+        self.mint_prices_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()
         self.rpc_patch.stop()
@@ -147,12 +214,13 @@ class CoinsPageBase(unittest.TestCase):
         self.assertEqual(resp.status_code, 302)
         return resp
 
-    def _buy_sol(self, usd="10"):
-        return self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+    def _buy_gate(self, usd="10"):
+        # $10 at the mocked Gate price buys 20,000,000 GATE.
+        return self.client.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "usd": usd, "bot_id": ""})
 
-    def _holding(self, coin="SOL"):
+    def _holding(self, coin=GATE):
         row = self.db.execute(
             "SELECT amount FROM paper_holdings WHERE user_id = ? "
             "AND coin_id = ?", (self.user_id, coin)).fetchone()
@@ -164,12 +232,12 @@ class TestHeldCoinsOnly(CoinsPageBase):
         self._choose_mode("paper")
         html = self._html("/dashboard")
         self.assertIn("You hold no coins", html)
-        self.assertNotIn("/coins/SOL/detail", html)
+        self.assertNotIn(f"/coins/{GATE}/detail", html)
         self.assertNotIn("/coins/BTC/detail", html)
-        self._buy_sol()
+        self._buy_gate()
         html = self._html("/dashboard")
-        self.assertIn("/coins/SOL/detail", html)
-        self.assertIn("Solana", html)
+        self.assertIn(f"/coins/{GATE}/detail", html)
+        self.assertIn("Gate", html)
         self.assertNotIn("/coins/BTC/detail", html)
         self.assertNotIn("Bitcoin", html)
         self.assertNotIn("You hold no coins", html)
@@ -178,10 +246,10 @@ class TestHeldCoinsOnly(CoinsPageBase):
         self._choose_mode("paper")
         html = self._html("/wallet")
         self.assertIn("You hold no coins", html)
-        self._buy_sol()
+        self._buy_gate()
         html = self._html("/wallet")
-        self.assertIn("/coins/SOL/detail", html)
-        self.assertIn("Solana", html)
+        self.assertIn(f"/coins/{GATE}/detail", html)
+        self.assertIn("Gate", html)
         self.assertNotIn("/coins/BTC/detail", html)
         self.assertNotIn("Bitcoin", html)
 
@@ -203,8 +271,8 @@ class TestHeldCoinsOnly(CoinsPageBase):
         html = self._html("/dashboard")
         self.assertIn("↻ Refresh live data", html)
         self.assertIn('action="/dashboard/refresh"', html)
-        self._buy_sol()
-        detail = self._html("/coins/SOL/detail")
+        self._buy_gate()
+        detail = self._html(f"/coins/{GATE}/detail")
         self.assertIn("↻ Refresh", detail)
 
 
@@ -214,18 +282,22 @@ class TestCoinSearch(CoinsPageBase):
         self.assertEqual(resp.status_code, 200)
         return resp.get_json()
 
-    def test_search_returns_live_known_coin(self):
-        self._choose_mode("paper")
+    def test_search_never_lists_sol_or_majors(self):
+        # SOL is the unit of account, never a listed coin — a name
+        # search for it returns only the DexScreener Solana pairs,
+        # never a SOL entry; a majors query with an empty feed
+        # returns nothing invented.
         data = self._search("sol")
         ids = [r["coin_id"] for r in data["results"]]
-        self.assertIn("SOL", ids)
-        sol = next(r for r in data["results"] if r["coin_id"] == "SOL")
-        self.assertEqual(sol["name"], "Solana")
-        self.assertEqual(sol["price_usd"], 10.0)
-        self.assertEqual(sol["held"], 0.0)
-        # Every result is a real coin with a live price — nothing
-        # invented, no Ethereum pair from the DexScreener payload.
-        self.assertNotIn("EFUN", [r["symbol"] for r in data["results"]])
+        self.assertNotIn("SOL", ids)
+        self.assertNotIn("Solana", [r["name"] for r in data["results"]])
+        self.assertIn("BfunMint11111111111111111111111111111111", ids)
+        with mock.patch.object(charts_mod, "_default_get",
+                               return_value={"pairs": []}):
+            charts_mod._search_cache.clear()
+            data = self._search("btc")
+        self.assertEqual(data["results"], [])
+        self.assertIsNone(data["error"])
 
     def test_search_returns_dexscreener_mint(self):
         data = self._search("bfun")
@@ -239,12 +311,17 @@ class TestCoinSearch(CoinsPageBase):
 
     def test_search_includes_held_amount(self):
         self._choose_mode("paper")
-        self._buy_sol()
-        data = self._search("sol")
-        sol = next(r for r in data["results"] if r["coin_id"] == "SOL")
-        # 1 SOL bought at $10: no fee (removed 2026-11-12), so 1.0
-        # SOL held.
-        self.assertAlmostEqual(sol["held"], 1.0, places=9)
+        self._buy_gate()
+        with mock.patch.object(charts_mod, "fetch_prices_for_mints",
+                               return_value={GATE: GATE_PRICE}), \
+                mock.patch.object(charts_mod, "fetch_mint_identities",
+                                  return_value={GATE: {"name": "Gate",
+                                                      "symbol": "GATE"}}):
+            charts_mod._search_cache.clear()
+            data = self._search(GATE)
+        entry = data["results"][0]
+        # $10 at the mocked $0.0000005 price: 20,000,000 GATE held.
+        self.assertAlmostEqual(entry["held"], 20_000_000.0, places=3)
 
     def test_search_nonsense_returns_nothing_invented(self):
         with mock.patch.object(charts_mod, "_default_get",
@@ -261,10 +338,23 @@ class TestCoinSearch(CoinsPageBase):
             data = self._search("zzzzqq")
             self.assertEqual(data["results"], [])
             self.assertIsNotNone(data["error"])
-            # Known coins still come from the price feed.
+            # No majors list to fall back on: a majors query is
+            # empty too, with the same error.
             data = self._search("sol")
-            self.assertIn("SOL", [r["coin_id"] for r in data["results"]])
+            self.assertEqual(data["results"], [])
             self.assertIsNotNone(data["error"])
+        # A pasted mint address still resolves while the
+        # name-search feed is down.
+        with mock.patch.object(charts_mod, "fetch_prices_for_mints",
+                               return_value={GATE: GATE_PRICE}), \
+                mock.patch.object(charts_mod, "fetch_mint_identities",
+                                  return_value={GATE: {"name": "Gate",
+                                                      "symbol": "GATE"}}):
+            charts_mod._search_cache.clear()
+            data = self._search(GATE)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["coin_id"], GATE)
+        self.assertIsNone(data["error"])
 
     def test_search_short_query_returns_nothing(self):
         data = self._search("s")
@@ -295,7 +385,7 @@ class TestCoinSearch(CoinsPageBase):
         # honest label, no price — never a fabricated name or price.
         # The real buy is priced from the bonding curve, not the
         # feed, so the coin is still buyable from the popup.
-        gate = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+        gate = GATE
         with mock.patch.object(charts_mod, "fetch_prices_for_mints",
                                return_value={}), \
                 mock.patch.object(charts_mod, "fetch_mint_identities",
@@ -305,7 +395,8 @@ class TestCoinSearch(CoinsPageBase):
         self.assertEqual(len(data["results"]), 1)
         entry = data["results"][0]
         self.assertEqual(entry["coin_id"], gate)
-        self.assertEqual(entry["name"], "Pump.fun token Eu4u…8uLE")
+        self.assertEqual(entry["name"], "Unknown coin")
+        self.assertIsNone(entry["symbol"])
         self.assertIsNone(entry["price_usd"])
         self.assertTrue(entry["is_mint"])
 
@@ -330,13 +421,27 @@ class TestCoinSearch(CoinsPageBase):
 
     def test_pasted_address_opens_coin_detail(self):
         # The pasted address resolves to the same detail/buy view
-        # as a name search — the buy form is on that page.
-        gate = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+        # as a name search — the buy form is on that page. A mint
+        # nothing names shows the honest "Unknown coin" label, so
+        # the feed must name nothing here as well as price nothing.
+        gate = GATE
         self._choose_mode("paper")
         with mock.patch.object(routes, "fetch_prices_for_mints",
-                               return_value={}):
+                               return_value={}), \
+                mock.patch.object(routes, "fetch_mint_identities",
+                                  return_value={}):
             html = self._html(f"/coins/{gate}/detail")
-        self.assertIn("Pump.fun token Eu4u…8uLE", html)
+        self.assertIn("Unknown coin", html)
+        self.assertIn("Buy", html)
+
+    def test_pasted_address_with_feed_name_opens_named_detail(self):
+        # The same mint with the feed naming it shows its real
+        # name + ticker on the detail page, not the fallback.
+        gate = GATE
+        self._choose_mode("paper")
+        html = self._html(f"/coins/{gate}/detail")
+        self.assertIn("Gate", html)
+        self.assertIn("(GATE)", html)
         self.assertIn("Buy", html)
 
     def test_search_requires_login(self):
@@ -349,35 +454,38 @@ class TestCoinSearch(CoinsPageBase):
 class TestQuickTradeAmounts(CoinsPageBase):
     def test_buy_by_token_amount(self):
         self._choose_mode("paper")
-        resp = self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        resp = self.client.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "amount_tokens": "2", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Bought", resp.get_data(as_text=True))
-        # 2 tokens at $10: $20 spent, no fee (removed 2026-11-12),
-        # net $20 = 2.0.
-        self.assertAlmostEqual(self._holding("SOL"), 2.0, places=9)
+        # 2 tokens at $0.0000005: $0.000001 spent, no fee (removed
+        # 2026-11-12), net 2.0 GATE.
+        self.assertAlmostEqual(self._holding(GATE), 2.0, places=9)
 
     def test_sell_by_usd_amount(self):
         self._choose_mode("paper")
-        self._buy_sol()
-        self.assertAlmostEqual(self._holding("SOL"), 1.0, places=9)
-        resp = self.client.post("/coins/SOL/sell", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        self._buy_gate()
+        self.assertAlmostEqual(self._holding(GATE), 20_000_000.0,
+                               places=3)
+        resp = self.client.post(f"/coins/{GATE}/sell", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "amount_usd": "5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertAlmostEqual(self._holding("SOL"), 0.5, places=9)
+        self.assertAlmostEqual(self._holding(GATE), 10_000_000.0,
+                               places=3)
 
     def test_sell_by_token_amount_still_works(self):
         self._choose_mode("paper")
-        self._buy_sol()
-        resp = self.client.post("/coins/SOL/sell", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        self._buy_gate()
+        resp = self.client.post(f"/coins/{GATE}/sell", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "amount": "0.5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertAlmostEqual(self._holding("SOL"), 0.5, places=9)
+        self.assertAlmostEqual(self._holding(GATE), 19_999_999.5,
+                               places=3)
 
     def test_buy_tokens_without_price_refuses_plainly(self):
         self._choose_mode("paper")
@@ -396,10 +504,10 @@ class TestQuickTradeAmounts(CoinsPageBase):
 
     def test_sell_usd_without_price_refuses_plainly(self):
         self._choose_mode("paper")
-        self._buy_sol()
+        self._buy_gate()
         with mock.patch.object(routes, "fetch_prices_for_mints",
                                return_value={}):
-            # SOL has a price, so use a mint holding instead: put a
+            # Gate has a price, so use a mint holding instead: put a
             # mint holding in directly and sell it by $.
             self.db.execute(
                 "INSERT INTO paper_holdings (user_id, coin_id, amount, "
@@ -416,7 +524,9 @@ class TestQuickTradeAmounts(CoinsPageBase):
 
 class TestRefreshLive(unittest.TestCase):
     """Refresh with the REAL price feed path (no routes.get_prices
-    patch) so the 60-second cache is actually exercised."""
+    patch) so the 60-second SOL price cache is actually exercised;
+    the trenches list's 120-second cache is what the page shows
+    going stale and then fresh."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -425,27 +535,71 @@ class TestRefreshLive(unittest.TestCase):
         self.rpc_patch.start()
         FakeRpc.instances.clear()
         FakeRpc.balance_lamports = 0
-        self.trenches_patch = mock.patch.object(
-            routes, "fetch_trenches_scan",
-            return_value={"candidates": [], "prices": {},
-                          "source": "dexscreener", "as_of": "test",
-                          "error": None})
-        self.trenches_patch.start()
-        routes._TRENCHES_CACHE.update(
-            {"at": 0.0, "rows": None, "error": None})
+        # Gate priced at $10 for this class, so the holding row
+        # reads "$10.0000" like the old SOL row did.
+        self.mint_prices = {GATE: 10.0}
+        self.mint_identities = {GATE: {"name": "Gate", "symbol": "GATE"}}
+        self.mint_prices_patch = mock.patch.object(
+            routes, "fetch_prices_for_mints",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_prices[m] for m in mints
+                if m in self.mint_prices})
+        self.mint_prices_patch.start()
+        self.mint_id_patch = mock.patch.object(
+            routes, "fetch_mint_identities",
+            side_effect=lambda mints, http_get=None: {
+                m: self.mint_identities[m] for m in mints
+                if m in self.mint_identities})
+        self.mint_id_patch.start()
+        self.mint_1h_patch = mock.patch.object(
+            routes, "fetch_mint_1h_changes", return_value={})
+        self.mint_1h_patch.start()
+        self.meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.meta_patch.start()
+        self.hh_meta_patch = mock.patch.object(
+            home_holdings_mod, "ensure_coin_meta", return_value=None)
+        self.hh_meta_patch.start()
+        self.hh_get_patch = mock.patch.object(
+            home_holdings_mod, "_default_get",
+            return_value={"pairs": []})
+        self.hh_get_patch.start()
+        home_holdings_mod.clear_image_cache()
+        self.jup_buy_patch = mock.patch.object(
+            jupiter_mod, "quote_buy_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests"))
+        self.jup_buy_patch.start()
+        self.jup_sell_patch = mock.patch.object(
+            jupiter_mod, "quote_sell_mint",
+            side_effect=jupiter_mod.JupiterError("no route in tests"))
+        self.jup_sell_patch.start()
         prices_mod.clear_price_cache()
         self.sol_price = 10.0
 
         def _live():
-            base = {"BTC": 74000.0, "ETH": 2100.0, "SOL": self.sol_price,
-                    "USDC": 1.0, "DOGE": 0.07, "PEPE": 0.000005,
-                    "BONK": 0.000003, "JUP": 0.23}
-            return {s: {"price": p, "change_24h": 0.0}
-                    for s, p in base.items()}
+            return self.sol_price, 0.0
 
         self.live_patch = mock.patch.object(
-            prices_mod, "_fetch_live", side_effect=_live)
+            prices_mod, "_fetch_sol_price", side_effect=_live)
         self.live_patch.start()
+        # The trenches row carries the price that proves the cache:
+        # it moves only after a refresh clears the 120-second list.
+        self.trench_price = 10.0
+
+        def _scan():
+            return {"candidates": [
+                {"mint": "Bond1111111111111111111111111111111111111111",
+                 "symbol": "BOND", "name": "Bondy",
+                 "price_usd": self.trench_price,
+                 "change_1h_pct": 5.0}],
+                "prices": {}, "source": "dexscreener",
+                "as_of": "test", "error": None}
+
+        self.trenches_patch = mock.patch.object(
+            routes, "fetch_trenches_scan", side_effect=_scan)
+        self.trenches_patch.start()
+        routes._TRENCHES_CACHE.update(
+            {"at": 0.0, "rows": None, "error": None})
         signup(self.client, "alice")
         self.db = self.app.config["DB"]
         self.user_id = self.db.execute(
@@ -453,13 +607,21 @@ class TestRefreshLive(unittest.TestCase):
         ).fetchone()["id"]
         self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "paper"})
-        self.client.post("/coins/SOL/buy", data={
-            "csrf_token": csrf(self.client, "/coins/SOL"),
+        self.client.post(f"/coins/{GATE}/buy", data={
+            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "usd": "10", "bot_id": ""})
 
     def tearDown(self):
         self.live_patch.stop()
         self.trenches_patch.stop()
+        self.jup_sell_patch.stop()
+        self.jup_buy_patch.stop()
+        self.hh_get_patch.stop()
+        self.hh_meta_patch.stop()
+        self.meta_patch.stop()
+        self.mint_1h_patch.stop()
+        self.mint_id_patch.stop()
+        self.mint_prices_patch.stop()
         self.rpc_patch.stop()
         self.tmp.cleanup()
 
@@ -475,9 +637,13 @@ class TestRefreshLive(unittest.TestCase):
 
     def test_refresh_clears_price_cache_and_records_snapshot(self):
         self.assertIn("$10.0000", self._html("/dashboard"))
+        self.trench_price = 99.0
         self.sol_price = 99.0
-        # Still the cached price until a refresh.
+        # Still the cached trenches rows (and the cached SOL price)
+        # until a refresh.
         self.assertIn("$10.0000", self._html("/dashboard"))
+        self.assertNotIn("$99.0000", self._html("/dashboard"))
+        self.assertEqual(prices_mod.get_sol_price_usd(), 10.0)
         before = self._snapshots()
         resp = self.client.post("/dashboard/refresh", data={
             "csrf_token": csrf(self.client, "/dashboard")})
@@ -486,6 +652,7 @@ class TestRefreshLive(unittest.TestCase):
         html = self._html("/dashboard")
         self.assertIn("$99.0000", html)
         self.assertIn("Refreshed with live data.", html)
+        self.assertEqual(prices_mod.get_sol_price_usd(), 99.0)
         self.assertGreater(self._snapshots(), before)
 
     def test_refresh_requires_login(self):

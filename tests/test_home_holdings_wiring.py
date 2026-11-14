@@ -12,9 +12,11 @@ the home route (routes._coin_rows):
   appears on Home with the chain amount, avg_price None and P&L
   None — never guessed. A chain failure or partial read never
   hides a DB-recorded holding.
-- The Content-Security-Policy img-src allows the two token-image
-  hosts (DexScreener + CoinGecko) so the images can load; no other
-  directive is widened.
+- The Content-Security-Policy img-src allows the token-image
+  hosts (DexScreener + pump.fun's image host + IPFS + Arweave)
+  so the images can load; no other directive is widened, and
+  CoinGecko is not an allowed image host any more — the app
+  lists no major coins.
 No SOL moves in these tests; sends are never confirmed. The Gate
 mint address below is a public token address, not a secret.
 """
@@ -34,7 +36,6 @@ GATE_BASE_UNITS = "550340693346715"
 MINT = "11111111111111111111111111111111"
 DEX_IMG = ("https://dd.dexscreener.com/ds-data/tokens/solana/"
            "11111111111111111111111111111111.png")
-CG_IMG = "https://assets.coingecko.com/coins/images/1/large/solana.png"
 
 
 def make_prices(changes):
@@ -57,6 +58,20 @@ class FakeFeed:
 
     def history(self, coin_id):
         return self._history.get(coin_id, [])
+
+    def snapshot(self, coin_ids=None):
+        """Current ticks, built from the recorded history: the last
+        point per coin, never stale."""
+        ids = (list(coin_ids) if coin_ids is not None
+               else list(self._history))
+        out = {}
+        for cid in ids:
+            hist = self._history.get(cid)
+            if hist:
+                out[cid] = {"coin_id": cid, "price": hist[-1][1],
+                            "stale": False, "source": "test",
+                            "as_of": "test"}
+        return out
 
     def would_accept(self, coin_id, price):
         return True
@@ -90,19 +105,18 @@ class FakeRpc:
 
 
 def _fake_home_get(url):
-    """DexScreener pairs for mints, CoinGecko image for majors."""
+    """DexScreener pairs for mints (with a token image)."""
     if "dexscreener.com" in url:
         return {"pairs": [{
             "chainId": "solana", "dexId": "pumpfun",
             "priceUsd": "0.00001", "liquidity": {"usd": 1000},
             "info": {"imageUrl": DEX_IMG}}]}
-    if "api.coingecko.com/api/v3/coins/" in url:
-        return {"image": {"large": CG_IMG}}
     return {}
 
 
 def _fake_charts_get(url):
-    """CoinGecko market_chart: three rising prices."""
+    """Unused by the feed-based sparkline now; kept for the
+    enrichment patches' shape."""
     return {"prices": [[1700000000000, 9.0],
                        [1700003600000, 10.0],
                        [1700007200000, 11.0]]}
@@ -114,9 +128,7 @@ class WiringBase(unittest.TestCase):
         self.app, self.client = make_client(self.tmp.name)
         self.prices_patch = mock.patch.object(
             routes, "get_prices",
-            return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25, 2.5), "USDC": (1.0, 0.0)}))
+            return_value=make_prices({"SOL": (10.0, 5.25, 2.5)}))
         self.prices_patch.start()
         self.trenches_patch = mock.patch.object(
             routes, "fetch_trenches_scan",
@@ -133,6 +145,23 @@ class WiringBase(unittest.TestCase):
         self.mint_id_patch = mock.patch.object(
             routes, "fetch_mint_identities", return_value={})
         self.mint_id_patch.start()
+        # Naming/logo lookups must never reach the live network in
+        # these tests: no stored meta, no DexScreener image, unless
+        # a test's own enrichment patches say otherwise.
+        self.meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.meta_patch.start()
+        self.hh_meta_patch = mock.patch.object(
+            home_holdings, "ensure_coin_meta", return_value=None)
+        self.hh_meta_patch.start()
+        self.hh_get_patch = mock.patch.object(
+            home_holdings, "_default_get",
+            return_value={"pairs": []})
+        self.hh_get_patch.start()
+        self.hh_head_patch = mock.patch.object(
+            home_holdings, "_default_head",
+            return_value=(404, "text/html"))
+        self.hh_head_patch.start()
         home_holdings.clear_image_cache()
         signup(self.client, "alice")
         self.db = self.app.config["DB"]
@@ -141,6 +170,10 @@ class WiringBase(unittest.TestCase):
         ).fetchone()["id"]
 
     def tearDown(self):
+        self.hh_head_patch.stop()
+        self.hh_get_patch.stop()
+        self.hh_meta_patch.stop()
+        self.meta_patch.stop()
         self.mint_id_patch.stop()
         self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
@@ -198,7 +231,11 @@ class TestHomeRowsEnriched(WiringBase):
                         "mint sparkline should be an SVG")
         self.assertIn("holdings-spark-svg", svg)
 
-    def test_major_row_carries_image_and_sparkline(self):
+    def test_legacy_symbol_row_shows_at_cost_without_price_or_image(self):
+        # SOL is not a listed coin any more. A holding bought when
+        # the app still listed majors is a legacy symbol row: shown
+        # at cost, never hidden — but with no live price, no P&L
+        # and no image, since no feed prices it any more.
         self._hold_paper("SOL", 2.0, 5.0)
         feed = FakeFeed()
         patches = self._enrichment_patches()
@@ -212,10 +249,15 @@ class TestHomeRowsEnriched(WiringBase):
             for p in patches:
                 p.stop()
         by_id = {r["coin_id"]: r for r in rows}
-        self.assertEqual(by_id["SOL"]["image_url"], CG_IMG)
-        svg = by_id["SOL"].get("sparkline_svg") or ""
-        self.assertTrue(svg.startswith("<svg"),
-                        "major sparkline should be an SVG")
+        self.assertIn("SOL", by_id)
+        row = by_id["SOL"]
+        self.assertFalse(row["is_mint"])
+        self.assertIsNone(row["price"])
+        self.assertIsNone(row["pnl"])
+        self.assertEqual(row["avg_price"], 5.0)
+        self.assertEqual(row["held"], 2.0)
+        self.assertNotIn("image_url", row)
+        self.assertNotIn("sparkline_svg", row)
 
     def test_row_without_image_or_history_has_neither_key(self):
         self._hold_paper(MINT, 100.0, 0.01)
@@ -334,7 +376,7 @@ class TestGateReconciliation(WiringBase):
 
 
 class TestCspImageHosts(WiringBase):
-    def test_img_src_allows_dexscreener_and_coingecko(self):
+    def test_img_src_allows_token_logo_hosts(self):
         resp = self.client.get("/login")
         self.assertEqual(resp.status_code, 200)
         csp = resp.headers.get("Content-Security-Policy") or ""
@@ -342,8 +384,13 @@ class TestCspImageHosts(WiringBase):
         for directive in csp.split(";"):
             if directive.strip().startswith("img-src"):
                 img_src = directive
-        self.assertIn("https://dd.dexscreener.com", img_src)
-        self.assertIn("https://assets.coingecko.com", img_src)
+        # The only places a held coin's official logo can come from.
+        for host in ("https://dd.dexscreener.com",
+                     "https://image.pump.fun", "https://ipfs.io",
+                     "https://arweave.net"):
+            self.assertIn(host, img_src)
+        # CoinGecko is gone with the majors: never an image host.
+        self.assertNotIn("coingecko", img_src)
 
     def test_no_other_directive_is_widened(self):
         resp = self.client.get("/login")
@@ -354,6 +401,9 @@ class TestCspImageHosts(WiringBase):
                         "frame-src", "font-src"):
                 self.assertNotIn("dexscreener", directive)
                 self.assertNotIn("coingecko", directive)
+                self.assertNotIn("image.pump.fun", directive)
+                self.assertNotIn("ipfs.io", directive)
+                self.assertNotIn("arweave.net", directive)
         self.assertIn("connect-src 'self'", csp)
 
 

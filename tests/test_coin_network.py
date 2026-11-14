@@ -1,10 +1,15 @@
 """Page 5 (coin detail) Send/Receive must account for the network.
 
-Every Send and Receive on the coin detail page states the network it
-will use (Solana, devnet) in plain words; a coin that is not a Solana
-asset is refused plainly — no address shown, no send form — and the
-server refuses a crafted POST for it too. The confirm step states
-the network alongside destination, amount and token.
+Every Send and Receive on the coin detail page states the network
+it will use (Solana, devnet) in plain words; a coin that is not a
+Solana asset is refused plainly — no address shown, no send form —
+and the server refuses a crafted POST for it too. The confirm step
+states the network alongside destination, amount and token.
+
+Major coins have no detail page any more (SOL, BTC, ETH, ZEC,
+USDC, … all 404): the app trades pump.fun mints only, and SOL is
+the unit of account, never a listed coin. Only a pump.fun mint
+gets Send/Receive windows.
 
 No SOL moves in these tests; the send RPC is a recording mock.
 """
@@ -20,7 +25,7 @@ from tradingbot.networks import (
     coin_network, network_label, send_refusal)
 
 DEST = "11111111111111111111111111111111"
-# Wrapped SOL mint: a real, valid Solana address (decodes to 32 bytes).
+# A real, valid Solana address (decodes to 32 bytes).
 MINT = "So11111111111111111111111111111111111111112"
 
 
@@ -50,7 +55,7 @@ def make_prices(changes):
     return {
         "prices": {c: {"price": p, "change_24h": ch}
                    for c, (p, ch) in changes.items()},
-        "source": "snapshot", "as_of": "test",
+        "source": "live", "as_of": "test",
     }
 
 
@@ -63,11 +68,7 @@ class CoinNetworkBase(unittest.TestCase):
         FakeRpc.instances.clear()
         self.prices_patch = mock.patch.object(
             routes, "get_prices",
-            return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25), "USDC": (1.0, 0.0),
-                "DOGE": (0.07, 3.0), "PEPE": (0.000005, -1.0),
-                "BONK": (0.000003, 8.0), "JUP": (0.23, -0.5)}))
+            return_value=make_prices({"SOL": (10.0, 5.25)}))
         self.prices_patch.start()
         self.chart_patch = mock.patch.object(
             routes, "fetch_market_chart",
@@ -82,6 +83,11 @@ class CoinNetworkBase(unittest.TestCase):
                           "source": "dexscreener", "as_of": "test",
                           "error": None})
         self.trenches_patch.start()
+        # No live metadata lookups in these tests: the mint under
+        # test has no stored name, so it renders "Unknown coin".
+        self.meta_patch = mock.patch.object(
+            routes, "ensure_coin_meta", return_value=None)
+        self.meta_patch.start()
         signup(self.client, "alice")
         resp = self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "paper"})
@@ -89,6 +95,7 @@ class CoinNetworkBase(unittest.TestCase):
         self.db = self.app.config["DB"]
 
     def tearDown(self):
+        self.meta_patch.stop()
         self.trenches_patch.stop()
         self.flow_patch.stop()
         self.chart_patch.stop()
@@ -119,85 +126,53 @@ class TestCoinNetworkUnit(unittest.TestCase):
         self.assertEqual(network_label("devnet"), "Solana (devnet)")
         self.assertEqual(network_label("mainnet"), "Solana (mainnet)")
 
-    def test_sol_is_solana(self):
+    def test_mint_is_solana(self):
+        info = coin_network(MINT)
+        self.assertEqual(info["network"], "Solana")
+        self.assertTrue(info["is_solana"])
+        self.assertFalse(info["multi_chain"])
+        self.assertTrue(info["known"])
+        self.assertIsNone(send_refusal(MINT))
+
+    def test_sol_is_native_solana(self):
+        # SOL is the network's native currency: a SOL send IS a
+        # Solana send, so there is no refusal.
         info = coin_network("SOL")
         self.assertEqual(info["network"], "Solana")
         self.assertTrue(info["is_solana"])
         self.assertIsNone(send_refusal("SOL"))
 
-    def test_mint_is_solana(self):
-        info = coin_network("So11111111111111111111111111111111111111112")
-        self.assertEqual(info["network"], "Solana")
-        self.assertTrue(info["is_solana"])
-        self.assertIsNone(
-            send_refusal("So11111111111111111111111111111111111111112"))
-
-    def test_bitcoin_is_not_solana(self):
-        info = coin_network("BTC")
-        self.assertEqual(info["network"], "Bitcoin")
-        self.assertFalse(info["is_solana"])
-        refusal = send_refusal("BTC")
-        self.assertIn("Bitcoin", refusal)
-        self.assertIn("Solana (devnet)", refusal)
-        self.assertIn("Nothing was sent", refusal)
-
-    def test_usdc_is_multi_chain(self):
-        info = coin_network("USDC")
-        self.assertTrue(info["multi_chain"])
-        self.assertFalse(info["is_solana"])
-        refusal = send_refusal("USDC")
-        self.assertIn("many networks", refusal)
-        self.assertIn("Solana (devnet)", refusal)
+    def test_major_symbol_is_not_a_coin(self):
+        # A major symbol is not a mint address: it is not a coin in
+        # this app at all, never guessed onto a chain.
+        for symbol in ("BTC", "ETH", "ZEC", "USDC", "ADA"):
+            info = coin_network(symbol)
+            self.assertFalse(info["known"], symbol)
+            self.assertFalse(info["is_solana"], symbol)
+            refusal = send_refusal(symbol)
+            self.assertIn("not a Solana token", refusal)
+            self.assertIn("Solana (devnet)", refusal)
+            self.assertIn("Nothing was sent", refusal)
 
     def test_unknown_coin_is_refused_never_guessed(self):
         info = coin_network("NOPE")
         self.assertFalse(info["known"])
         self.assertFalse(info["is_solana"])
-        self.assertIn("could not be determined", send_refusal("NOPE"))
+        refusal = send_refusal("NOPE")
+        self.assertIn("not a Solana token", refusal)
+        self.assertIn("Nothing was sent", refusal)
 
 
 class TestCoinDetailNetwork(CoinNetworkBase):
-    def test_sol_send_window_shows_network_and_sends_sol(self):
-        html = self._html("/coins/SOL/detail")
-        send = self._overlay(html, "coin-send-overlay")
-        self.assertIn("Solana (devnet)", send)
-        self.assertIn("Review send", send)
-        self.assertIn('name="return_to" value="coin:SOL"', send)
+    def test_major_detail_pages_are_gone(self):
+        # SOL, BTC, ETH, ZEC, USDC: no detail page any more. The
+        # app trades pump.fun mints only; SOL is the unit of
+        # account, never a listed coin.
+        for coin_id in ("SOL", "BTC", "ETH", "ZEC", "USDC", "ADA"):
+            resp = self.client.get(f"/coins/{coin_id}/detail")
+            self.assertEqual(resp.status_code, 404, coin_id)
 
-    def test_sol_receive_window_shows_network_and_address(self):
-        html = self._html("/coins/SOL/detail")
-        receive = self._overlay(html, "coin-receive-overlay")
-        self.assertIn("Solana (devnet)", receive)
-        self.assertIn("Only send on the Solana network", receive)
-        self.assertIn("Copy address", receive)
-
-    def test_btc_send_window_refuses_plainly_no_form(self):
-        html = self._html("/coins/BTC/detail")
-        send = self._overlay(html, "coin-send-overlay")
-        self.assertIn("Can't send Bitcoin from here", send)
-        self.assertIn("Bitcoin lives on the Bitcoin network", send)
-        self.assertIn("Solana (devnet)", send)
-        self.assertNotIn("Review send", send)
-        self.assertNotIn("<form", send)
-
-    def test_btc_receive_window_refuses_plainly_no_address(self):
-        html = self._html("/coins/BTC/detail")
-        receive = self._overlay(html, "coin-receive-overlay")
-        self.assertIn("Can't receive Bitcoin here", receive)
-        self.assertIn("Bitcoin lives on the Bitcoin network", receive)
-        self.assertNotIn("Copy address", receive)
-        self.assertNotIn('class="addr"', receive)
-
-    def test_usdc_windows_refuse_multi_chain(self):
-        html = self._html("/coins/USDC/detail")
-        send = self._overlay(html, "coin-send-overlay")
-        self.assertIn("many networks", send)
-        self.assertNotIn("Review send", send)
-        receive = self._overlay(html, "coin-receive-overlay")
-        self.assertIn("many networks", receive)
-        self.assertNotIn("Copy address", receive)
-
-    def test_mint_windows_show_solana_network(self):
+    def test_mint_send_window_shows_network_and_sends_token(self):
         with mock.patch.object(
                 routes, "fetch_prices_for_mints",
                 return_value={MINT: 0.002}):
@@ -207,21 +182,36 @@ class TestCoinDetailNetwork(CoinNetworkBase):
         self.assertIn("Review send", send)
         # The send is the mint token now, not SOL — the window
         # says so, and the form posts the mint as the token.
-        self.assertIn("this sends So11…", send)
         self.assertIn(f'name="token" value="{MINT}"', send)
         self.assertNotIn("SolEntry sends SOL only", send)
 
-    def test_server_refuses_btc_send_post(self):
+    def test_mint_receive_window_shows_network_and_address(self):
+        with mock.patch.object(
+                routes, "fetch_prices_for_mints",
+                return_value={MINT: 0.002}):
+            html = self._html(f"/coins/{MINT}/detail")
+        receive = self._overlay(html, "coin-receive-overlay")
+        self.assertIn("Solana (devnet)", receive)
+        self.assertIn("Only send on the Solana network", receive)
+        self.assertIn("Copy address", receive)
+
+    def test_stale_major_return_to_falls_back_to_wallet_send(self):
+        # return_to=coin:BTC names a page that no longer exists, so
+        # it is not a coin page any more and the send falls back to
+        # the plain wallet send: the token here IS SOL (a Solana
+        # send to a valid destination), so the send itself goes
+        # ahead — there is no non-Solana coin left to refuse.
         before = self._intent_count()
         resp = self.client.post("/wallet/send", data={
             "csrf_token": csrf(self.client, "/wallet/send"),
             "destination": DEST, "amount": "0.5", "token": "SOL",
-            "return_to": "coin:BTC"}, follow_redirects=True)
-        self.assertEqual(resp.status_code, 200)
-        html = resp.get_data(as_text=True)
-        self.assertIn("Bitcoin lives on the Bitcoin network", html)
-        self.assertIn("Nothing was sent", html)
-        self.assertEqual(self._intent_count(), before)
+            "return_to": "coin:BTC"}, follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._intent_count(), before + 1)
+        intent = self.db.execute(
+            "SELECT * FROM send_intents ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(intent["status"], "pending")
 
     def test_sol_send_creates_intent_and_confirm_states_network(self):
         resp = self.client.post("/wallet/send", data={
