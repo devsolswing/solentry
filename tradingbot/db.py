@@ -149,20 +149,6 @@ CREATE TABLE IF NOT EXISTS send_intents (
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
--- Per-platform wallets: one wallet per trading platform, per user
--- (pump.fun, Phantom, pumpSwap). The secret is AES-256-GCM
--- encrypted, like the app wallet. UNIQUE(user_id, platform) means
--- asking again returns the wallet that already exists.
-CREATE TABLE IF NOT EXISTS platform_wallets (
-    user_id INTEGER NOT NULL,
-    platform TEXT NOT NULL,
-    pubkey TEXT NOT NULL,
-    encrypted_secret TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (user_id, platform),
-    FOREIGN KEY (user_id) REFERENCES users (id)
-);
-
 -- Real holdings from manual (popup) real trades: pump.fun mints the
 -- user bought by hand on devnet. Bot-managed real positions live in
 -- bot_positions (mode='real'); these are the manual ones, so the two
@@ -175,6 +161,21 @@ CREATE TABLE IF NOT EXISTS real_holdings (
     avg_price REAL NOT NULL,
     UNIQUE (user_id, coin_id),
     FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Coin identity + logos, one row per mint (pump.fun-only app): the
+-- coin's real official name + ticker and its official logo URL,
+-- fetched once (on purchase, or lazily on render of a held row) from
+-- the on-chain Metaplex metadata and/or DexScreener — only for coins
+-- the user holds, never bulk-loaded. A row with source 'none' means
+-- nothing was found; it is retried at most once an hour.
+CREATE TABLE IF NOT EXISTS coin_meta (
+    mint TEXT PRIMARY KEY,
+    name TEXT,
+    symbol TEXT,
+    image_url TEXT,
+    source TEXT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS activity (
@@ -518,10 +519,10 @@ _MIGRATIONS = (
     # or 'devnet' (app wallet's on-chain SOL). Flipped by the header
     # switch; the buy form defaults to it.
     ("users", "active_mode", "TEXT NOT NULL DEFAULT 'paper'"),
-    # Which platform a bot trades on: 'pump.fun', 'phantom' or
-    # 'pumpswap'. '' is a bot from before platforms existed — it is
-    # treated as pump.fun (the only venue real execution is built
-    # against) wherever the platform matters.
+    # Which platform a bot trades on: always 'pump.fun' now —
+    # the app trades pump.fun coins only. '' is a bot from before
+    # platforms existed — it is treated as pump.fun wherever the
+    # platform matters.
     ("bots", "platform", "TEXT NOT NULL DEFAULT ''"),
     # Which mode an activity row belongs to: 'paper', 'real', or ''
     # for account events (signup, recovery, passkey) that belong to

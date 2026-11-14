@@ -91,17 +91,18 @@ from .config import Config
 from .executor import (FEE_RESERVE_LAMPORTS, _load_wallet,
                        _send_and_confirm, _skip)
 from .jupiter import (JUPITER_PROGRAM_ID, SOL_MINT, JupiterError,
-                      fetch_swap_transaction, no_liquid_route_message,
-                      quote_buy, quote_sell, request_real_swap,
-                      resolve_mint)
+                      fetch_swap_transaction, mint_decimals,
+                      no_liquid_route_message, quote_buy_mint,
+                      quote_sell_mint, request_real_swap)
 from .security import wipe_secret
 from .signing_bot import ensure_signing_bot
 from .solana import (ASSOCIATED_TOKEN_PROGRAM, SYSTEM_PROGRAM,
                      TOKEN_2022_PROGRAM, TOKEN_PROGRAM, base58_decode,
                      base58_encode, compact_u16_encode,
                      ed25519_publickey_from_seed, ed25519_sign,
-                     find_associated_token_address, lamports_to_sol,
-                     sol_to_lamports, SolanaRpcClient)
+                     find_associated_token_address, is_valid_address,
+                     lamports_to_sol, sol_to_lamports,
+                     SolanaRpcClient)
 
 # A quote that moves the price more than this refuses plainly —
 # a swap with that much impact is a bad trade, never a fill.
@@ -572,24 +573,24 @@ def _token_balance_or_zero(rpc, ata: str) -> int:
         return 0
 
 
-def execute_jupiter_swap(bot, user_id: int, symbol: str, side: str,
+def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
                          amount: float, db, cfg: Config,
-                         rpc_client=None, quote: dict | None = None,
-                         coin_name: str | None = None) -> dict:
+                         rpc_client=None, quote: dict | None = None) -> dict:
     """Execute one real Jupiter swap for a bot, signed by the
     user's dedicated signing bot. Same (bot, user_id, coin, side,
     amount, db, cfg) protocol as the pump.fun executor's
     execute_real_trade, so the manual coin-page trades and the
     silent loop can both call it.
 
-    `symbol` is a listed coin (BTC/ETH/XRP/ZEC/...); `amount` is
-    SOL for buys and whole tokens for sells. `quote` is a test
-    injection (a fresh quote dict); in production the quote is
-    always fetched here. Returns {"status": "executed",
-    "signature", "coin_amount", "signing_bot": ...} or {"status":
-    "skipped", "reason": ...}. There is NO trading fee (removed
-    2026-11-12): the whole trade amount is swapped. Never raises
-    for a refused trade."""
+    `mint` is a graduated pump.fun coin's mint address — the only
+    coins Jupiter ever trades for this app. `amount` is SOL for
+    buys and whole tokens for sells. `quote` is a test injection
+    (a fresh quote dict); in production the quote is always fetched
+    here. Returns {"status": "executed", "signature",
+    "coin_amount", "signing_bot": ...} or {"status": "skipped",
+    "reason": ...}. There is NO trading fee (removed 2026-11-12):
+    the whole trade amount is swapped. Never raises for a refused
+    trade."""
     # The gate: James's explicit go-ahead AND mainnet. Either
     # missing refuses plainly — nothing is built, signed or sent.
     try:
@@ -613,24 +614,22 @@ def execute_jupiter_swap(bot, user_id: int, symbol: str, side: str,
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
+    if not is_valid_address(mint):
+        return _skip("Not a valid token address")
     try:
         try:
-            resolved = resolve_mint(symbol, coin_name=coin_name)
-        except Exception:
+            decimals = mint_decimals(cfg.rpc_url, mint)
+        except JupiterError:
             return _skip("No Jupiter route for this coin")
-        if resolved is None:
-            return _skip("No Jupiter route for this coin")
-        mint = resolved["mint"]
-        decimals = resolved["decimals"]
         wsol_ata = find_associated_token_address(wallet_pubkey,
                                                  SOL_MINT)
         if side == "buy":
             return _execute_jupiter_buy(
-                bot, user_id, symbol, mint, decimals, float(amount),
+                bot, user_id, mint, decimals, float(amount),
                 db, cfg, rpc, signing_bot, wallet_pubkey, seed,
                 wsol_ata, quote)
         return _execute_jupiter_sell(
-            bot, user_id, symbol, mint, decimals, float(amount),
+            bot, user_id, mint, decimals, float(amount),
             db, cfg, rpc, signing_bot, wallet_pubkey, seed,
             wsol_ata, quote)
     except Exception as exc:
@@ -644,11 +643,11 @@ def execute_jupiter_swap(bot, user_id: int, symbol: str, side: str,
             wipe_secret(seed)
 
 
-def _execute_jupiter_buy(bot, user_id, symbol, mint, decimals,
+def _execute_jupiter_buy(bot, user_id, mint, decimals,
                          amount_sol, db, cfg, rpc, signing_bot,
                          wallet_pubkey, seed, wsol_ata, quote):
     """One real Jupiter BUY: `amount_sol` SOL, all of it swapped
-    for the wrapped token (no fee — removed 2026-11-12)."""
+    for the coin at `mint` (no fee — removed 2026-11-12)."""
     amount_lamports = sol_to_lamports(amount_sol)
     try:
         balance = rpc.get_balance_lamports(wallet_pubkey)
@@ -665,7 +664,7 @@ def _execute_jupiter_buy(bot, user_id, symbol, mint, decimals,
     swap_sol = lamports_to_sol(swap_lamports)
     if quote is None:
         try:
-            quote = quote_buy(symbol, swap_sol)
+            quote = quote_buy_mint(mint, swap_sol, decimals=decimals)
         except JupiterError as exc:
             # No liquid route says so plainly; anything else
             # (Jupiter unreachable) is reported as itself.
@@ -716,10 +715,10 @@ def _execute_jupiter_buy(bot, user_id, symbol, mint, decimals,
     return result
 
 
-def _execute_jupiter_sell(bot, user_id, symbol, mint, decimals,
+def _execute_jupiter_sell(bot, user_id, mint, decimals,
                           amount_tokens, db, cfg, rpc, signing_bot,
                           wallet_pubkey, seed, wsol_ata, quote):
-    """One real Jupiter SELL: `amount_tokens` of the wrapped token
+    """One real Jupiter SELL: `amount_tokens` of the coin at `mint`
     -> SOL. All proceeds go to the seller's wallet (no fee —
     removed 2026-11-12)."""
     token_base = int(round(amount_tokens * (10 ** decimals)))
@@ -734,7 +733,8 @@ def _execute_jupiter_sell(bot, user_id, symbol, mint, decimals,
         return _skip("insufficient token balance")
     if quote is None:
         try:
-            quote = quote_sell(symbol, amount_tokens)
+            quote = quote_sell_mint(mint, amount_tokens,
+                                    decimals=decimals)
         except JupiterError as exc:
             # No liquid route says so plainly; anything else
             # (Jupiter unreachable) is reported as itself.

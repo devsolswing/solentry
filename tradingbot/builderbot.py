@@ -74,7 +74,7 @@ THRESHOLD_CAP_PCT = 15.0
 BUY_SIZE_STEP_PCT = 5.0
 BUY_SIZE_FLOOR_PCT = 5.0
 
-SIGNALS_DEFAULT_COINS = ["SOL", "BTC", "ETH"]
+SIGNALS_DEFAULT_COINS = []
 
 
 def _now() -> str:
@@ -327,22 +327,6 @@ STEPS = [
             if 1 <= len(text.strip()) <= 40
             else (None, "Give the bot a name — 1 to 40 characters. "
                         "Tap a suggestion or type your own.")),
-    },
-    {
-        "key": "platform",
-        "question": "Which platform should it trade on?",
-        "why": "pump.fun is where brand-new memecoins launch — the "
-               "trenches. pumpSwap is the swap venue for coins that "
-               "already exist. Phantom means it watches coins held in "
-               "a Phantom wallet.",
-        "suggestions": ["pump.fun", "pumpSwap", "Phantom"],
-        "parse": lambda text: (
-            (_parse_choice(text, ["pump.fun", "pumpSwap", "Phantom"],
-                           "pump.fun"), None)
-            if _parse_choice(text, ["pump.fun", "pumpSwap", "Phantom"],
-                             "pump.fun") is not None
-            else (None, "Pick pump.fun, pumpSwap or Phantom — tap one "
-                        "of the suggestions.")),
     },
     {
         "key": "mode",
@@ -661,7 +645,7 @@ def _confirmation_text(answers: dict, rules: dict) -> str:
     lines = [
         "Here is the bot I would build — check it over:",
         f"• Name: {answers['name']}",
-        f"• Platform: {answers['platform']} — {mode_word}",
+        f"• Mode: {mode_word}",
         f"• Smallest coin: {mcap_word}",
         f"• Buy when a coin gains {threshold}% in "
         f"{_window_words_short(window)}",
@@ -898,7 +882,7 @@ def create_bot_from_answers(db, user_id: int, answers: dict):
         "(?, ?, ?, 'balanced', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
         (user_id, answers["name"], json.dumps(coins), category,
          float(answers["buy_size"]), float(answers["stop_loss"]),
-         int(answers["max_open"]), answers["platform"], answers["mode"],
+         int(answers["max_open"]), "pump.fun", answers["mode"],
          json.dumps(rules), hash_token(token), _now()))
     bot_id = cursor.lastrowid
     db.commit()

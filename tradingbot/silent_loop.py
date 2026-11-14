@@ -46,11 +46,10 @@ from datetime import datetime, timezone
 
 from .config import Config
 from .db import init_db
-from .executor import execute_real_trade
-from .jupiter import is_jupiter_coin
+from .coin_meta import ensure_coin_meta
+from .executor import _skip, execute_real_trade, is_curve_complete
 from .jupiter_executor import execute_jupiter_swap
 from .ledger import record_trade
-from .platforms import REAL_TRADEABLE_PLATFORMS
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
 from .pnl import portfolio_totals, record_snapshot
@@ -61,8 +60,9 @@ from .scanner import (check_top10_concentration, check_top10_rug,
                       gain_window_pct, next_ladder_rung,
                       passes_buy_filter, record_marks, top10_total)
 from .signals import signal_for_coin
-from .solana import SolanaRpcClient, lamports_to_sol
-from .trenches import fetch_trenches_scan
+from .solana import SolanaRpcClient, is_valid_address, lamports_to_sol
+from .trenches import (fetch_mint_24h_changes, fetch_prices_for_mints,
+                       fetch_trenches_scan)
 from .devnet_watchlist import enrich_scan
 
 MIN_PAPER_TRADE_USD = 1.0
@@ -125,14 +125,52 @@ def default_real_executor(bot, user_id: int, coin: str, side: str,
                          amount: float, price: float, db, cfg) -> dict:
     """Real executor: the account's dedicated signing bot executes
     pump.fun trades on devnet (see executor.py) — and Jupiter
-    swaps on mainnet for listed coins (see jupiter_executor.py,
-    gated behind James's go-ahead). Anything unverified is
-    skipped honestly — never a fake fill."""
-    if is_jupiter_coin(coin):
+    swaps on mainnet for graduated coins (see jupiter_executor.py,
+    gated behind James's go-ahead). The venue is the bonding
+    curve: complete (graduated) -> Jupiter, still bonding ->
+    pump.fun, unreadable -> refused plainly, never guessed.
+    Anything unverified is skipped honestly — never a fake fill."""
+    if not is_valid_address(coin):
+        return _skip("Not a valid token address")
+    try:
+        rpc = SolanaRpcClient(cfg.rpc_url)
+        complete = is_curve_complete(rpc, coin)
+    except Exception:
+        complete = None
+    if complete is None:
+        return _skip("bonding curve unavailable")
+    if complete:
         return execute_jupiter_swap(bot, user_id, coin, side, amount,
                                     db, cfg)
     return execute_real_trade(bot, user_id, coin, side, amount, price,
                               db, cfg)
+
+
+def _mint_price_map(coins) -> dict:
+    """{mint: {"price", "change_24h"}} for pump.fun mints, from the
+    trenches feed (DexScreener, Raydium fallback for graduated
+    coins). Signals bots watch named coins — in this app those are
+    mint addresses, and the price list (SOL only) has no entry for
+    them. A mint with no price is left out — unpriced means no
+    trade, never a guess. A fetch failure returns {} (the caller
+    then skips, never trades blind)."""
+    mints = [c for c in (coins or []) if is_valid_address(c)]
+    if not mints:
+        return {}
+    try:
+        prices = fetch_prices_for_mints(mints)
+    except Exception:
+        prices = {}
+    try:
+        changes = fetch_mint_24h_changes(mints)
+    except Exception:
+        changes = {}
+    out = {}
+    for mint in mints:
+        if mint in prices or mint in changes:
+            out[mint] = {"price": prices.get(mint),
+                         "change_24h": changes.get(mint)}
+    return out
 
 
 def _positions(db: sqlite3.Connection, bot_id: int) -> dict:
@@ -363,6 +401,14 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                             "reason": "insufficient paper cash"})
             return
         _open_position(db, bot, coin, amount, price)
+        # First time this coin is held: fetch + store its official
+        # logo (on-chain Metaplex metadata, then DexScreener).
+        # Best-effort — never blocks the trade, and only held coins
+        # are ever fetched.
+        try:
+            ensure_coin_meta(db, coin, rpc_url=cfg.rpc_url)
+        except Exception:
+            pass
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {amount:.4f} {coin} "
              f"for ${usd:.2f} (paper).",
@@ -429,6 +475,12 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                     exec_avg = sol_spent * sol_price / coin_amount
             _open_position(db, bot, coin, coin_amount, price,
                            avg_price=exec_avg)
+            # First time this coin is held: fetch + store its
+            # official logo (see the paper-buy hook above).
+            try:
+                ensure_coin_meta(db, coin, rpc_url=cfg.rpc_url)
+            except Exception:
+                pass
             # Trade ledger (builderBot): every fill gets its own
             # 8-digit trade ID. The recorded price is the executed
             # cost when known, else the mark price.
@@ -482,8 +534,8 @@ def _rug_reason(rug: dict, kind: str, coin: str, price: float,
     so a collapse exits on the same scan that sees it.
 
     Two triggers, either one sells everything:
-      * feed 5-minute change (trenches/scanner only — CoinGecko has no
-        5m change): the feed's change_5m_pct at or below -drop_5m_pct.
+      * feed 5-minute change (trenches/scanner only): the feed's
+        change_5m_pct at or below -drop_5m_pct.
       * fast drop since the last recorded price mark: the price fell
         drop_pct or more and the mark is at most window_seconds old
         (plus 30 seconds of scheduling jitter — scans run about a
@@ -565,13 +617,15 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             return actions
         price_map = trenches_data["prices"]
     else:
-        price_map = None
+        # Signals bots watch named coins — pump.fun mints, priced
+        # from the trenches feed (see _mint_price_map).
+        price_map = _mint_price_map(json.loads(bot["coins"]))
 
     def _price_for(coin: str):
         if kind in ("trenches", "scanner"):
             entry = price_map.get(coin)
             return entry["price_usd"] if entry else None
-        entry = prices_data["prices"].get(coin)
+        entry = (price_map or {}).get(coin)
         return entry["price"] if entry else None
 
     def _change_for(coin: str):
@@ -581,7 +635,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 return None
             return entry.get(
                 _BUY_METRIC_TO_CHANGE_KEY[rules["buy"]["metric"]])
-        entry = prices_data["prices"].get(coin)
+        entry = (price_map or {}).get(coin)
         if not entry:
             return None
         return entry.get("change_24h")
@@ -913,9 +967,12 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
                                    trenches_data, rpc_factory, real_executor,
                                    feed=feed)
     actions: list = []
-    prices = prices_data["prices"]
-    prices_usd = {c: e.get("price", 0.0) for c, e in prices.items()}
     coins = json.loads(bot["coins"])
+    # The price list is SOL only; a signals bot's coins are pump.fun
+    # mints, priced from the trenches feed (see _mint_price_map).
+    prices = dict(prices_data["prices"])
+    prices.update(_mint_price_map(coins))
+    prices_usd = {c: e.get("price", 0.0) for c, e in prices.items()}
     positions = _positions(db, bot["id"])
     stop_loss_pct = float(bot["stop_loss_pct"])
 
@@ -1223,29 +1280,6 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             trenches_data = feed.sanitize_trenches(trenches_data)
     outcomes = []
     for bot in bots:
-        # Platform gate: real execution is built against the pump.fun
-        # bonding curve only. A real bot on another platform (pumpSwap,
-        # Phantom) is skipped with a plain reason — never faked.
-        # Paper bots are simulated and platform-agnostic, so they are
-        # never gated. A bot from before platforms existed has no
-        # platform set and is treated as pump.fun.
-        platform = (bot["platform"] if "platform" in bot.keys() else "") \
-            or "pump.fun"
-        if bot["mode"] == "real" \
-                and platform not in REAL_TRADEABLE_PLATFORMS:
-            _log(db, bot["user_id"], "silent_skip",
-                 f"Silent bot '{bot['name']}': real trading on "
-                 f"{platform} is not live yet — real trades run on "
-                 f"pump.fun (devnet) only. No trade was made.",
-                 bot["mode"])
-            outcomes.append({"bot_id": bot["id"], "bot_name": bot["name"],
-                             "user_id": bot["user_id"],
-                             "mode": bot["mode"],
-                             "actions": [{"action": "skip", "coin": "",
-                                          "reason": "real trading on "
-                                          f"{platform} is not live yet"}],
-                             "error": None})
-            continue
         try:
             actions = _evaluate_bot(db, cfg, bot, prices_data, rpc_factory,
                                     real_executor,
@@ -1282,7 +1316,7 @@ def _record_snapshots(db: sqlite3.Connection, cfg: Config,
                       rpc_factory, user_ids: set) -> None:
     """One P&L snapshot per user evaluated this iteration.
 
-    Prices merge the CoinGecko list with the trenches feed so held
+    Prices merge the SOL price with the trenches feed so held
     memecoin mints are valued at the price the loop just saw. A price
     of 0 or less is dropped from the map — missing, never zero — so a
     snapshot can never value a holding at $0 and poison the 24h

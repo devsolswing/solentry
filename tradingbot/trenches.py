@@ -31,6 +31,13 @@ PROFILES_URL = DEXSCREENER_BASE + "/token-profiles/latest/v1"
 TOKENS_URL = DEXSCREENER_BASE + "/latest/dex/tokens/{}"
 
 TRENCH_DEX_IDS = ("pumpfun", "pumpswap")
+# A coin that graduates from its bonding curve migrates to Raydium:
+# its pump.fun pair goes quiet and the Raydium pair becomes the live
+# one. The trenches SCAN never reads Raydium (it only watches fresh
+# pump.fun coins), but a HELD coin that graduated keeps its price,
+# name and 1h change from its Raydium pair — otherwise a graduation
+# would silently unprice a holding.
+GRADUATED_DEX_IDS = ("raydium",)
 MAX_PROFILES = 30
 _CHUNK = 30
 
@@ -51,14 +58,14 @@ def _default_get(url: str):
         raise
 
 
-def _best_pair(pairs: list) -> dict | None:
-    """The highest-liquidity pump.fun / PumpSwap pair for a mint."""
+def _best_pair(pairs: list, dex_ids=TRENCH_DEX_IDS) -> dict | None:
+    """The highest-liquidity pair for a mint among `dex_ids`."""
     best = None
     best_liq = -1.0
     for pair in pairs or []:
         if pair.get("chainId") != "solana":
             continue
-        if pair.get("dexId") not in TRENCH_DEX_IDS:
+        if pair.get("dexId") not in dex_ids:
             continue
         price = pair.get("priceUsd")
         if price is None:
@@ -75,6 +82,17 @@ def _best_pair(pairs: list) -> dict | None:
         if liq >= best_liq:
             best, best_liq = pair, liq
     return best
+
+
+def _best_pair_incl_graduated(pairs: list) -> dict | None:
+    """The highest-liquidity pump.fun / PumpSwap pair for a mint —
+    or, when the coin has graduated and its pump.fun pair is quiet,
+    the best Raydium pair. Held-coin pricing/identity only; the
+    trenches scan uses `_best_pair` and never reads Raydium."""
+    best = _best_pair(pairs)
+    if best is not None:
+        return best
+    return _best_pair(pairs, dex_ids=GRADUATED_DEX_IDS)
 
 
 def _entry(mint: str, pair: dict) -> dict:
@@ -144,44 +162,9 @@ def _entry(mint: str, pair: dict) -> dict:
 def fetch_prices_for_mints(mints, http_get=None) -> dict:
     """Current USD prices for specific mints (held positions).
 
-    Used by the P&L page to price coins the CoinGecko list does not
-    cover. Returns {mint: price_usd} for pump.fun / PumpSwap pairs
-    only; a mint with no usable pair is left out (the caller values
-    it at cost and says so), and any fetch failure returns {}.
-    """
-    http_get = http_get or _default_get
-    wanted = [m for m in dict.fromkeys(mints or []) if m]
-    if not wanted:
-        return {}
-    try:
-        out = {}
-        for i in range(0, len(wanted), _CHUNK):
-            chunk = wanted[i:i + _CHUNK]
-            data = http_get(TOKENS_URL.format(",".join(chunk)))
-            by_mint: dict = {}
-            for pair in data.get("pairs") or []:
-                base = pair.get("baseToken") or {}
-                addr = base.get("address")
-                if addr:
-                    by_mint.setdefault(addr, []).append(pair)
-            for mint, pairs in by_mint.items():
-                best = _best_pair(pairs)
-                if best is not None:
-                    out[mint] = float(best["priceUsd"])
-        return out
-    except Exception:
-        return {}
-
-
-def fetch_mint_identities(mints, http_get=None) -> dict:
-    """Real name + ticker for specific mints (held positions), from
-    the same DexScreener pairs `fetch_prices_for_mints` reads: the
-    best (highest-liquidity) pump.fun / PumpSwap pair's base token.
-
-    Returns {mint: {"name": str|None, "symbol": str|None}}. A mint
-    with no usable pair, or a pair whose token carries no name or
-    symbol, is left OUT — the caller keeps its honest "Pump.fun
-    token …" label and short mint ticker instead of guessing — and
+    Returns {mint: price_usd} for pump.fun / PumpSwap pairs — or, for
+    a coin that graduated, its Raydium pair. A mint with no usable
+    pair is left out (the caller values it at cost and says so), and
     any fetch failure returns {}.
     """
     http_get = http_get or _default_get
@@ -200,7 +183,43 @@ def fetch_mint_identities(mints, http_get=None) -> dict:
                 if addr:
                     by_mint.setdefault(addr, []).append(pair)
             for mint, pairs in by_mint.items():
-                best = _best_pair(pairs)
+                best = _best_pair_incl_graduated(pairs)
+                if best is not None:
+                    out[mint] = float(best["priceUsd"])
+        return out
+    except Exception:
+        return {}
+
+
+def fetch_mint_identities(mints, http_get=None) -> dict:
+    """Real name + ticker for specific mints (held positions), from
+    the same DexScreener pairs `fetch_prices_for_mints` reads: the
+    best (highest-liquidity) pump.fun / PumpSwap pair's base token —
+    or its Raydium pair when the coin graduated.
+
+    Returns {mint: {"name": str|None, "symbol": str|None}}. A mint
+    with no usable pair, or a pair whose token carries no name or
+    symbol, is left OUT — the caller shows "Unknown coin" with an
+    empty ticker instead of guessing — and any fetch failure
+    returns {}.
+    """
+    http_get = http_get or _default_get
+    wanted = [m for m in dict.fromkeys(mints or []) if m]
+    if not wanted:
+        return {}
+    try:
+        out = {}
+        for i in range(0, len(wanted), _CHUNK):
+            chunk = wanted[i:i + _CHUNK]
+            data = http_get(TOKENS_URL.format(",".join(chunk)))
+            by_mint: dict = {}
+            for pair in data.get("pairs") or []:
+                base = pair.get("baseToken") or {}
+                addr = base.get("address")
+                if addr:
+                    by_mint.setdefault(addr, []).append(pair)
+            for mint, pairs in by_mint.items():
+                best = _best_pair_incl_graduated(pairs)
                 if best is None:
                     continue
                 base = best.get("baseToken") or {}
@@ -217,7 +236,8 @@ def fetch_mint_identities(mints, http_get=None) -> dict:
 def fetch_mint_1h_changes(mints, http_get=None) -> dict:
     """1-hour % change for specific mints (held positions), from the
     same DexScreener pairs `fetch_prices_for_mints` reads: the best
-    (highest-liquidity) pump.fun / PumpSwap pair's priceChange.h1.
+    (highest-liquidity) pump.fun / PumpSwap pair's priceChange.h1 —
+    or its Raydium pair when the coin graduated.
 
     Returns {mint: change_1h_pct}. A mint with no usable pair, or a
     pair with no 1h figure, is left OUT (the caller shows "—") — a
@@ -239,10 +259,49 @@ def fetch_mint_1h_changes(mints, http_get=None) -> dict:
                 if addr:
                     by_mint.setdefault(addr, []).append(pair)
             for mint, pairs in by_mint.items():
-                best = _best_pair(pairs)
+                best = _best_pair_incl_graduated(pairs)
                 if best is None:
                     continue
                 change = (best.get("priceChange") or {}).get("h1")
+                if change is None:
+                    continue
+                try:
+                    out[mint] = float(change)
+                except (TypeError, ValueError):
+                    continue
+        return out
+    except Exception:
+        return {}
+
+
+def fetch_mint_24h_changes(mints, http_get=None) -> dict:
+    """24-hour % change for specific mints (signals bots), from the
+    same DexScreener pairs `fetch_prices_for_mints` reads: the best
+    (highest-liquidity) pump.fun / PumpSwap pair's priceChange.h24
+    — or its Raydium pair when the coin graduated. Same contract
+    as `fetch_mint_1h_changes`: a mint with no usable pair, or a
+    pair with no 24h figure, is left OUT — a change is never
+    guessed — and any fetch failure returns {}."""
+    http_get = http_get or _default_get
+    wanted = [m for m in dict.fromkeys(mints or []) if m]
+    if not wanted:
+        return {}
+    try:
+        out = {}
+        for i in range(0, len(wanted), _CHUNK):
+            chunk = wanted[i:i + _CHUNK]
+            data = http_get(TOKENS_URL.format(",".join(chunk)))
+            by_mint: dict = {}
+            for pair in data.get("pairs") or []:
+                base = pair.get("baseToken") or {}
+                addr = base.get("address")
+                if addr:
+                    by_mint.setdefault(addr, []).append(pair)
+            for mint, pairs in by_mint.items():
+                best = _best_pair_incl_graduated(pairs)
+                if best is None:
+                    continue
+                change = (best.get("priceChange") or {}).get("h24")
                 if change is None:
                     continue
                 try:

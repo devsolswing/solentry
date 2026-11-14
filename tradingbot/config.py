@@ -92,10 +92,11 @@ class Config:
         # refused too. No real money moves unless both hold.
         self.jupiter_real_swaps: bool = env.get(
             "JUPITER_REAL_SWAPS", "0") == "1"
-        # Live price feed: Kraken WebSocket for majors, DexScreener
-        # poll for pump.fun mints, Jupiter cross-check for SOL. Runs
-        # as daemon threads inside the web process (started from
-        # run.py, never from create_app). ON by default — set
+        # Live price feed: DexScreener poll for pump.fun mints
+        # (Raydium pairs for graduated coins, bonding-curve prices
+        # for devnet watchlist mints), Jupiter for the SOL price.
+        # Runs as daemon threads inside the web process (started
+        # from run.py, never from create_app). ON by default — set
         # LIVE_FEED_ENABLED=0 to kill it; the app keeps serving from
         # the existing REST feeds.
         self.live_feed_enabled: bool = env.get(

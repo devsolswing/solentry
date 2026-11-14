@@ -2,9 +2,8 @@
 rendering them as SVG.
 
 One module serves both charts in the app:
-  * the coin detail chart (Page 5) — candles from CoinGecko's OHLC
-    endpoint for known coins, or from the live feed's recorded ticks
-    for pump.fun mints;
+  * the coin detail chart (Page 5) — candles from the live feed's
+    recorded ticks for the mint;
   * the homepage portfolio chart (Page 3) — candles from the recorded
     portfolio snapshots only.
 

@@ -519,6 +519,27 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
             wipe_secret(seed)
 
 
+def is_curve_complete(rpc, mint: str) -> bool | None:
+    """True when the mint's bonding curve exists and is complete —
+    the coin graduated (migrated to Raydium) and trades through
+    Jupiter, not this executor. False when the curve exists and is
+    still bonding. None when the curve cannot be read (no curve
+    account, an unreadable account, an RPC failure) — the caller
+    refuses plainly rather than guessing the venue. A coin with no
+    bonding curve at all (never a pump.fun coin) is None too."""
+    try:
+        info = rpc.get_account_info(pumpfun.bonding_curve_pda(mint)[0])
+    except Exception:
+        return None
+    if not info:
+        return None
+    try:
+        curve = pumpfun.parse_bonding_curve(info["data"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return bool(curve["complete"])
+
+
 def execute_real_trade(bot, user_id: int, coin: str, side: str,
                        amount: float, price: float, db, cfg: Config,
                        rpc_client=None) -> dict:

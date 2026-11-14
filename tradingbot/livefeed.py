@@ -1,26 +1,25 @@
 """Live price feed: one service that subscribes to upstream live sources,
 validates every tick, and serves the app's own WebSocket.
 
-Upstream sources (all free, no key):
-- Kraken public WebSocket (wss://ws.kraken.com) — ticker for every
-  coin in prices.COINS in USD (36 pairs, ZEC/USD included). The
-  live tick source for the whole coin list, not just the majors.
-  Verified live 2026-11-11: all 36 pairs subscribe and tick.
+Pump.fun-only. Upstream sources (all free, no key):
 - DexScreener REST (api.dexscreener.com) — polled every 5s for the
   pump.fun mints the app is watching (held coins + coins a browser
-  subscribed to). DexScreener has no public price stream, so polling
-  at its fastest sensible rate is the only option there; 5s polling
-  of at most a few dozen mints is far inside its 300 req/min limit.
-- Jupiter lite-api v3 (lite-api.jup.ag, no key) — SOL cross-check every
-  60s. If Kraken's SOL goes stale it becomes the SOL source; if both
-  are fresh and disagree by >5% the disagreement is logged, never
-  silently resolved.
-- Devnet watchlist bonding curves (devnet only) — Gate/AuditTest have
-  no DEX pool, so DexScreener can never price them; the poller prices
-  them from their curve reserves x the feed's own fresh SOL tick,
-  labelled source "curve". Inert on any other network.
-- CoinGecko REST stays as the fallback behind get_prices() (60s cache,
-  rate-limited — that is why it cannot be the live feed).
+  subscribed to), plus graduated coins' Raydium pairs. DexScreener
+  has no public price stream, so polling at its fastest sensible
+  rate is the only option there; 5s polling of at most a few dozen
+  mints is far inside its 300 req/min limit.
+- Bonding curves (devnet watchlist only) — a bonding-curve mint has
+  no DexScreener pair at all, so the feed also ingests its price
+  straight from its curve (virtual SOL / virtual token reserves x
+  the live SOL price), via tradingbot.devnet_watchlist. Same hard
+  devnet gate as the silent loop's watchlist: inert on any other
+  network. This is what puts Gate and AuditTest on every display
+  stream — the trenches feed alone can never price them.
+- Jupiter lite-api v3 (lite-api.jup.ag, no key) — the SOL price every
+  60s. SOL is the unit of account only (base currency for curve
+  quotes, gas, balances) — never a listed or buyable coin.
+- CoinGecko is gone, and so is the Kraken WebSocket: the app no
+  longer lists major coins, so there is nothing for either to price.
 
 Left OUT, deliberately:
 - Binance: its REST and WebSocket both return HTTP 451 from US IPs
@@ -82,76 +81,14 @@ REBASE_TOLERANCE = 0.05
 STALE_AFTER_SECONDS = 30.0
 
 # --- upstream sources -----------------------------------------------------
-KRAKEN_WS_URL = "wss://ws.kraken.com"
-# Every symbol in prices.COINS, keyed by Kraken's own pair name —
-# the WebSocket subscription sends these keys, and ticker messages
-# echo the same name back, so parse_kraken_ticker maps it to the
-# app's symbol. Two Kraken quirks live here: BTC is "XBT/USD" and
-# DOGE is "XDG/USD" on Kraken (a DOGE/USD subscription is accepted
-# but echoed as XDG/USD, so the key must be XDG/USD). Verified
-# live 2026-11-11: all 36 pairs subscribe and tick (ZEC/USD ticks
-# every few seconds at the real CEX price, ~$1,000 — not the
-# $268–$1,650 thin Solana wrapped copies DexScreener shows).
-KRAKEN_PAIRS = {
-    "XBT/USD": "BTC", "ETH/USD": "ETH", "SOL/USD": "SOL",
-    "USDC/USD": "USDC", "XDG/USD": "DOGE",
-    "PEPE/USD": "PEPE", "BONK/USD": "BONK", "JUP/USD": "JUP",
-    "ZEC/USD": "ZEC", "XRP/USD": "XRP", "ADA/USD": "ADA",
-    "LTC/USD": "LTC", "DOT/USD": "DOT", "LINK/USD": "LINK",
-    "AVAX/USD": "AVAX", "ATOM/USD": "ATOM", "XLM/USD": "XLM",
-    "ALGO/USD": "ALGO", "NEAR/USD": "NEAR", "UNI/USD": "UNI",
-    "AAVE/USD": "AAVE", "XTZ/USD": "XTZ", "ETC/USD": "ETC",
-    "BCH/USD": "BCH", "FIL/USD": "FIL", "HBAR/USD": "HBAR",
-    "SUI/USD": "SUI", "APT/USD": "APT", "SEI/USD": "SEI",
-    "INJ/USD": "INJ", "TIA/USD": "TIA", "ONDO/USD": "ONDO",
-    "RENDER/USD": "RENDER", "TAO/USD": "TAO", "WIF/USD": "WIF",
-    "POPCAT/USD": "POPCAT",
-}
+# DexScreener (pump.fun mints) + bonding curves (devnet watchlist
+# mints, which have no DexScreener pair) + Jupiter (SOL, the unit of
+# account). No Kraken, no CoinGecko — the app lists no major coins.
 DEXSCREENER_POLL_SECONDS = 5.0
 HELD_MINTS_REFRESH_SECONDS = 60.0
 JUPITER_CHECK_SECONDS = 60.0
 JUPITER_SOL_MINT = "So11111111111111111111111111111111111111112"
 JUPITER_PRICE_URL = "https://lite-api.jup.ag/price/v3?ids={}"
-JUPITER_DISAGREE_PCT = 0.05
-
-
-def parse_kraken_ticker(raw: str):
-    """(coin, last_price, change_24h_pct) from one Kraken ticker message,
-    or None when the message is not a ticker for a pair we watch.
-
-    Kraken ticker frames look like:
-    [channel_id, {"c": ["last", "lot vol"],
-                  "o": ["open today", "open 24h"], ...},
-     "ticker", "XBT/USD"]. 24h change is last vs the 24h open
-    ("o"[1]). NOTE: "o" is a two-element LIST in every real Kraken
-    message — the old code did float(data["o"]) on the list, which
-    raised TypeError on every single tick, so the Kraken feed
-    silently delivered nothing (found live 2026-11-11: 115 real
-    frames parsed, 0 accepted). A plain string/number "o" is still
-    accepted, so older recorded frames keep parsing.
-    """
-    try:
-        msg = json.loads(raw)
-    except Exception:
-        return None
-    if not isinstance(msg, list) or len(msg) < 4 or msg[2] != "ticker":
-        return None
-    coin = KRAKEN_PAIRS.get(msg[3])
-    if coin is None:
-        return None
-    data = msg[1] or {}
-    try:
-        last = float((data.get("c") or [None])[0])
-        open24 = data.get("o")
-        if isinstance(open24, (list, tuple)):
-            open24 = open24[1] if len(open24) > 1 else open24[0]
-        open24 = float(open24)
-    except (TypeError, ValueError, IndexError):
-        return None
-    if not math.isfinite(last) or last <= 0 or not math.isfinite(open24) \
-            or open24 <= 0:
-        return None
-    return coin, last, (last / open24 - 1.0) * 100.0
 
 
 class LiveFeed:
@@ -375,67 +312,27 @@ class LiveFeed:
 
     # --- upstream threads -------------------------------------------------
     def start(self) -> None:
-        """Start the Kraken WebSocket, DexScreener poller and Jupiter
-        cross-check as daemon threads. Idempotent. A thread that dies
-        logs and reconnects on its own schedule; a dead upstream never
-        stops the app — the last good ticks stand, marked stale."""
+        """Start the DexScreener poller and Jupiter SOL check as daemon
+        threads. Idempotent. A thread that dies logs and reconnects on
+        its own schedule; a dead upstream never stops the app — the
+        last good ticks stand, marked stale."""
         if self._started:
             return
         self._started = True
         self._stop.clear()
         for name, target in (
-                ("livefeed-kraken", self._kraken_loop),
                 ("livefeed-dexscreener", self._dexscreener_loop),
                 ("livefeed-jupiter", self._jupiter_loop)):
             thread = threading.Thread(target=target, daemon=True,
                                       name=name)
             thread.start()
             self._threads.append(thread)
-        log.info("[live-feed] started (kraken ws + dexscreener poll + "
-                 "jupiter check)")
+        log.info("[live-feed] started (dexscreener poll + jupiter "
+                 "check)")
 
     def stop(self) -> None:
         self._stop.set()
         self._started = False
-
-    def _on_kraken_open(self, ws) -> None:
-        ws.send(json.dumps({
-            "event": "subscribe",
-            "pair": list(KRAKEN_PAIRS),
-            "subscription": {"name": "ticker"}}))
-        log.info("[live-feed] kraken subscribed: %s",
-                 ", ".join(KRAKEN_PAIRS))
-
-    def _on_kraken_message(self, ws, raw: str) -> None:
-        parsed = parse_kraken_ticker(raw)
-        if parsed is None:
-            return
-        coin, last, change_24h = parsed
-        self.ingest(coin, last, "kraken", change_24h=change_24h)
-
-    def _kraken_loop(self) -> None:
-        import websocket
-
-        backoff = 5.0
-        while not self._stop.is_set():
-            try:
-                ws = websocket.WebSocketApp(
-                    KRAKEN_WS_URL,
-                    on_message=self._on_kraken_message,
-                    on_error=lambda w, e: log.warning(
-                        "[live-feed] kraken error: %s", e),
-                    on_close=lambda w, c, m: log.warning(
-                        "[live-feed] kraken closed: %s %s", c, m),
-                    on_open=self._on_kraken_open)
-                ws.run_forever(ping_interval=20, ping_timeout=10)
-            except Exception as exc:  # never kill the feed thread
-                log.warning("[live-feed] kraken loop error: %s", exc)
-            if self._stop.is_set():
-                break
-            log.warning("[live-feed] kraken reconnecting in %.0fs",
-                        backoff)
-            self._stop.wait(backoff)
-            backoff = min(backoff * 2, 60.0)
 
     def _held_mints_from_db(self) -> set:
         """Mints the app already holds (bot positions + paper
@@ -465,7 +362,8 @@ class LiveFeed:
 
     def _poll_dexscreener(self, mints) -> None:
         from .trenches import (
-            _CHUNK, TOKENS_URL, _best_pair, _default_get, _entry)
+            _CHUNK, TOKENS_URL, _best_pair_incl_graduated, _default_get,
+            _entry)
         for i in range(0, len(mints), _CHUNK):
             chunk = mints[i:i + _CHUNK]
             try:
@@ -481,7 +379,7 @@ class LiveFeed:
                 if addr:
                     by_mint.setdefault(addr, []).append(pair)
             for mint, pairs in by_mint.items():
-                best = _best_pair(pairs)
+                best = _best_pair_incl_graduated(pairs)
                 if best is None:
                     continue
                 entry = _entry(mint, best)
@@ -551,6 +449,7 @@ class LiveFeed:
                 log.warning("[live-feed] dexscreener poll error: %s", exc)
             self._stop.wait(DEXSCREENER_POLL_SECONDS)
 
+
     def _jupiter_check(self) -> None:
         try:
             req = urllib.request.Request(
@@ -568,15 +467,10 @@ class LiveFeed:
             return
         if not math.isfinite(price) or price <= 0:
             return
-        sol = self.snapshot(["SOL"]).get("SOL")
-        if sol is None or sol["stale"]:
-            # Kraken has no fresh SOL — Jupiter becomes the source.
-            change = entry.get("priceChange24h")
-            self.ingest("SOL", price, "jupiter", change_24h=change)
-            return
-        if abs(price / sol["price"] - 1.0) > JUPITER_DISAGREE_PCT:
-            log.warning("[live-feed] SOL cross-check disagrees: kraken "
-                        "%.4f vs jupiter %.4f", sol["price"], price)
+        # Jupiter IS the SOL source now (the unit of account) — there
+        # is no Kraken feed left to cross-check against.
+        change = entry.get("priceChange24h")
+        self.ingest("SOL", price, "jupiter", change_24h=change)
 
     def _jupiter_loop(self) -> None:
         while not self._stop.is_set():

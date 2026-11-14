@@ -46,7 +46,8 @@ Schema (version 1):
 
   * kind "trenches": scan pump.fun / PumpSwap new tokens through the
     DexScreener feed (trenches.py). kind "signals": the bot's own coin
-    list, evaluated on CoinGecko 24h moves. kind "scanner": the
+    list — pump.fun mint addresses, evaluated on the trenches feed's
+    24h moves. kind "scanner": the
     ∆scanner∆ sniper — scan pump.fun / PumpSwap every 30 seconds for
     gainers, buy a coin gaining 5% in 3 minutes (strongest gainer
     wins), tracked from price marks the loop records itself

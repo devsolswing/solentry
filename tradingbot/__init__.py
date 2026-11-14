@@ -65,9 +65,10 @@ def create_app(config: Config | None = None) -> Flask:
         # event handlers, no other origins, no framing of this app.
         # style-src allows 'unsafe-inline' for one inline style in
         # settings.html; img-src allows data: for the hero image
-        # plus the two token-image hosts (DexScreener + CoinGecko)
-        # so home-page coin images can load — images only, nothing
-        # else is widened.
+        # plus the token-logo hosts (DexScreener, pump.fun's image
+        # host, IPFS and Arweave — the only places a held coin's
+        # official logo can come from) so home-page coin images can
+        # load — images only, nothing else is widened.
         nonce = getattr(g, "csp_nonce", "")
         csp = (
             "default-src 'self'; "
@@ -75,7 +76,8 @@ def create_app(config: Config | None = None) -> Flask:
             "https://challenges.cloudflare.com; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: https://dd.dexscreener.com "
-            "https://assets.coingecko.com; font-src 'self'; "
+            "https://image.pump.fun https://ipfs.io "
+            "https://arweave.net; font-src 'self'; "
             "connect-src 'self'; "
             "frame-src https://challenges.cloudflare.com; "
             "object-src 'none'; base-uri 'self'; "

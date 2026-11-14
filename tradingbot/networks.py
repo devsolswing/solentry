@@ -1,87 +1,24 @@
 """Networks: which chain a coin lives on, and the network this app sends on.
 
 The app is Solana-only (devnet by default, mainnet only on explicit
-config). The coin detail page covers two kinds of coins: price-list
-symbols (SOL, BTC, ...) that can live on many different chains, and
-pump.fun mints, which are Solana tokens by construction. A Send or
-Receive that does not say which network it uses invites the user to
-send a coin on the wrong chain — funds sent to a Solana address on
-another network do not arrive. So every Send and Receive on the coin
-detail page states the network in plain words, and a coin that is not
-a Solana asset is refused plainly instead of being sent as SOL on the
-wrong network. Nothing here guesses: a coin with no known network is
-refused, never silently defaulted.
+config) and trades pump.fun coins only. Every coin in this app is a
+pump.fun mint — a Solana token by construction, its address existing
+only on Solana. There is no major-coin list any more, so there is no
+per-coin native-chain table: anything that is not a Solana mint
+address is not a coin in this app at all.
+
+A Send or Receive that does not say which network it uses invites
+the user to send a coin on the wrong chain — funds sent to a Solana
+address on another network do not arrive. So every Send and Receive
+on the coin detail page states the network in plain words, and a
+coin that is not a Solana asset is refused plainly instead of being
+sent as SOL on the wrong network. Nothing here guesses: a coin with
+no known network is refused, never silently defaulted.
 """
 
 from __future__ import annotations
 
-from .prices import COINS
 from .solana import is_valid_address
-
-# Native chain of each known price-list coin. USDC is deliberately
-# absent: it exists on many chains (Solana, Ethereum, and others),
-# so no single network can be named for it — it is refused with the
-# multi-network reason instead (see MULTI_CHAIN_COINS below).
-#
-# Chains verified 2026-11-11: the native L1s are the coin itself,
-# the ERC-20s are Ethereum tokens (PEPE, LINK, UNI, AAVE, ONDO),
-# the Solana natives are Solana tokens (BONK, JUP, WIF, POPCAT),
-# and RENDER is Ethereum — its CoinGecko asset_platform_id is
-# "ethereum" (checked live; WIF/POPCAT returned "solana").
-COIN_NETWORKS = {
-    "BTC": "Bitcoin",
-    "ETH": "Ethereum",
-    "SOL": "Solana",
-    "DOGE": "Dogecoin",
-    "PEPE": "Ethereum",
-    "BONK": "Solana",
-    "JUP": "Solana",
-    "ZEC": "Zcash",
-    "XRP": "XRP Ledger",
-    "ADA": "Cardano",
-    "LTC": "Litecoin",
-    "DOT": "Polkadot",
-    "LINK": "Ethereum",
-    "AVAX": "Avalanche",
-    "ATOM": "Cosmos",
-    "XLM": "Stellar",
-    "ALGO": "Algorand",
-    "NEAR": "NEAR Protocol",
-    "UNI": "Ethereum",
-    "AAVE": "Ethereum",
-    "XTZ": "Tezos",
-    "ETC": "Ethereum Classic",
-    "BCH": "Bitcoin Cash",
-    "FIL": "Filecoin",
-    "HBAR": "Hedera",
-    "SUI": "Sui",
-    "APT": "Aptos",
-    "SEI": "Sei",
-    "INJ": "Injective",
-    "TIA": "Celestia",
-    "ONDO": "Ethereum",
-    "RENDER": "Ethereum",
-    "TAO": "Bittensor",
-    "WIF": "Solana",
-    "POPCAT": "Solana",
-}
-
-MULTI_CHAIN_COINS = {"USDC"}
-
-
-# Coins with a genuine Solana presence, used by search only.
-# SolEntry is powered by Solana alone, so search shows no other
-# chain: a coin gets the Solana tag only when it really exists on
-# Solana — a native Solana token (SOL, BONK, JUP, WIF, POPCAT) or
-# a wrapped version with a live liquid Jupiter route (verified
-# 2026-11-11, 0.1 SOL buys: AAVE, BTC, DOGE, ETH, INJ, LINK,
-# ONDO, PEPE, RENDER, SUI, TAO, UNI, USDC, XRP, ZEC). Every other
-# known coin has no Solana presence and gets no tag at all.
-SOLANA_PRESENT = {
-    "AAVE", "BONK", "BTC", "DOGE", "ETH", "INJ", "JUP", "LINK",
-    "ONDO", "PEPE", "POPCAT", "RENDER", "SOL", "SUI", "TAO",
-    "UNI", "USDC", "WIF", "XRP", "ZEC",
-}
 
 
 def network_label(network: str) -> str:
@@ -94,19 +31,17 @@ def coin_network(coin_id: str) -> dict:
 
     Returns {"network", "is_solana", "multi_chain", "known"}. A
     pump.fun mint is a Solana token by construction (its address
-    only exists on Solana). A known symbol maps to its native
-    chain. Anything else is unknown — never guessed.
+    only exists on Solana), and SOL is the network's native
+    currency. Anything else is unknown — never guessed, never
+    defaulted to a chain. (SOL is Solana-native but NOT a listed
+    coin: the app never lists or trades it, it is only the unit of
+    account and the currency a send moves.)
     """
     if not coin_id:
         return {"network": None, "is_solana": False,
                 "multi_chain": False, "known": False}
-    upper = coin_id.upper()
-    if upper in MULTI_CHAIN_COINS:
-        return {"network": None, "is_solana": False,
-                "multi_chain": True, "known": True}
-    if upper in COIN_NETWORKS:
-        net = COIN_NETWORKS[upper]
-        return {"network": net, "is_solana": net == "Solana",
+    if coin_id == "SOL":
+        return {"network": "Solana", "is_solana": True,
                 "multi_chain": False, "known": True}
     if is_valid_address(coin_id):
         return {"network": "Solana", "is_solana": True,
@@ -115,65 +50,9 @@ def coin_network(coin_id: str) -> dict:
             "multi_chain": False, "known": False}
 
 
-def search_result_network(coin_id: str, is_mint: bool,
-                          symbol: str | None = None) -> dict:
-    """Network info for one search result row — Solana only.
-
-    Returns {"networks": [...], "wrapped": bool}. The app is
-    powered by Solana alone, so the only network ever shown is
-    Solana: a mint lists it (a mint is a Solana token by
-    construction), and a known coin lists it only when it really
-    has a Solana presence (see SOLANA_PRESENT). A coin with no
-    Solana presence lists nothing — no tag at all, never another
-    chain, never a guess. A mint is marked wrapped when its
-    symbol names a coin whose native chain is elsewhere (a Solana
-    stand-in for that coin, never the native coin).
-    """
-    if is_mint:
-        return {"networks": ["Solana"],
-                "wrapped": _symbol_names_foreign_coin(symbol)}
-    if (coin_id or "").upper() in SOLANA_PRESENT:
-        return {"networks": ["Solana"], "wrapped": False}
-    return {"networks": [], "wrapped": False}
-
-
-# Common wrapped-token symbol prefixes on Solana: wBTC, wETH, wZEC,
-# wXRP (Portal/Wormhole style) and soBTC / soETH (old Wormhole
-# style). A "$" prefix (e.g. "$WIF") is stripped first.
-_WRAPPED_SYMBOL_PREFIXES = ("W", "SO")
-
-
-def _symbol_names_foreign_coin(symbol: str | None) -> bool:
-    """True when a Solana token's symbol names a coin whose native
-    chain is NOT Solana — the bare symbol or with a wrapped prefix.
-
-    Such a token is a stand-in for that coin on Solana, never the
-    native coin itself, so search labels it Wrapped. A symbol
-    naming a Solana-native coin (BONK, WIF, SOL, ...) is not
-    foreign and returns False; an unknown symbol returns False —
-    the token is shown as a plain Solana token, not mislabeled.
-    """
-    if not symbol:
-        return False
-    s = symbol.upper().strip()
-    if s.startswith("$"):
-        s = s[1:]
-    candidates = {s}
-    for prefix in _WRAPPED_SYMBOL_PREFIXES:
-        if s.startswith(prefix) and len(s) > len(prefix):
-            candidates.add(s[len(prefix):])
-    for cand in candidates:
-        net = COIN_NETWORKS.get(cand)
-        if net is not None and net != "Solana":
-            return True
-    return False
-
-
 def coin_display_name(coin_id: str) -> str:
-    """Name for messages: the known name, else the id itself."""
-    upper = (coin_id or "").upper()
-    if upper in COINS:
-        return COINS[upper]["name"]
+    """Name for messages: the id itself, or "Unknown coin" when
+    there is nothing to show. Never a guessed name."""
     return coin_id or "Unknown coin"
 
 
@@ -191,16 +70,6 @@ def send_refusal(coin_id: str, app_network: str = "devnet") -> str | None:
         return None
     name = coin_display_name(coin_id)
     label = network_label(app_network)
-    if info["multi_chain"]:
-        return (
-            f"{name} exists on many networks (Solana, Ethereum, and "
-            f"others). SolEntry only sends on the {label} network, "
-            f"so {name} can't be sent from here. Nothing was sent.")
-    if info["known"]:
-        return (
-            f"{name} lives on the {info['network']} network. SolEntry "
-            f"only sends on the {label} network, so {name} can't "
-            "be sent from here. Nothing was sent.")
-    return ("Unknown coin — the network could not be determined, so "
-            "the send was refused rather than guessed. Nothing was "
-            "sent.")
+    return (f"{name} is not a Solana token, so it can't be sent "
+            f"from SolEntry — this app only sends on the {label} "
+            f"network. Nothing was sent.")

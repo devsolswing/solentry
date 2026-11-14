@@ -1,28 +1,21 @@
 """Home-page holdings helpers (Page 3): real token images, sparklines,
-and on-chain holdings reconciliation.
+and on-chain holdings reconciliation — pump.fun coins only.
 
-NOT wired into the home route yet — routes.py is owned by the Android
-PWA build right now. The wallet template already renders
-`row.image_url` and `row.sparkline_svg` when present, so once the
-route attaches them the images/sparklines appear with no template
-change. Wiring needed (follow-up, after the PWA lands):
-  1. In `_dashboard_data` (or `_coin_rows`): for each coin row, call
-     `enrich_row(row, feed=app.config.get("LIVE_FEED"))` to attach
-     `image_url` and `sparkline_svg`.
-  2. In `_coin_rows` (real/devnet mode): merge on-chain balances via
-     `reconcile_holdings(_real_holdings_view(db, user_id),
-     fetch_chain_token_balances(rpc, wallet_pubkey))` so coins the
-     wallet holds on-chain but the DB never recorded (e.g. Gate, whose
-     six buys were recorded as failed) show on home.
-  3. Widen the CSP `img-src` in `create_app` to allow the two image
-     hosts (`https://dd.dexscreener.com` and
-     `https://assets.coingecko.com`), OR proxy the images through a
-     same-origin route — the CSP currently allows only 'self' + data:,
-     so external image URLs would be blocked by the browser.
+The wallet template renders `row.image_url` and `row.sparkline_svg`
+when present. `_coin_rows` in routes.py attaches them via
+`enrich_row(row, feed=..., db=..., rpc_url=...)`. Token images come
+from the stored `coin_meta` row for the mint (fetched on purchase, or
+lazily on render of a held row) — the coin's official logo from its
+metadata image URI or its DexScreener pair — and never from a
+bulk load: only coins the user holds are ever fetched. A held coin
+with no logo shows no image. Sparklines come from the live feed's
+recorded ticks only; there is no CoinGecko fallback any more.
 Everything here fails closed: any fetch failure returns None / [] /
 "", never an exception and never invented data. Token images are
 only returned after a HEAD check proves the URL serves an image,
-so a row can never render a broken image.
+so a row can never render a broken image. The CSP `img-src` in
+`create_app` allows the logo hosts (dd.dexscreener.com,
+image.pump.fun, ipfs.io, arweave.net).
 """
 
 from __future__ import annotations
@@ -34,18 +27,14 @@ import time
 import urllib.request
 
 from .charts import fetch_market_chart
-from .prices import COINS
-from .trenches import TOKENS_URL, _best_pair, _default_get
+from .coin_meta import ensure_coin_meta
+from .solana import is_valid_address
+from .trenches import TOKENS_URL, _best_pair_incl_graduated, _default_get
 
 # Legacy SPL Token program + Token-2022 program (both can hold a
 # user's tokens; Gate is legacy SPL).
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-
-COINGECKO_COIN_URL = (
-    "https://api.coingecko.com/api/v3/coins/{}"
-    "?localization=false&tickers=false&market_data=false"
-    "&community_data=false&developer_data=false&sparkline=false")
 
 # Token images change rarely; cache resolutions for an hour so the
 # home page does not re-fetch them on every render.
@@ -84,18 +73,22 @@ def _verified_image_url(url, http_head=None):
 
 
 def resolve_token_image(coin_id: str, is_mint: bool = False,
-                        coingecko_id: str | None = None,
-                        http_get=None, http_head=None) -> str | None:
+                        http_get=None, http_head=None, db=None,
+                        rpc_url: str | None = None) -> str | None:
     """The real token image URL for a held coin, or None.
 
-    Mints: DexScreener's token pairs for the mint — the best
-    (highest-liquidity) pair's `info.imageUrl`. Majors: CoinGecko's
-    coin page image (`large`, else `small`, else `thumb`) for the
-    coin's CoinGecko id (from the app's price list when not passed).
-    The URL is HEAD-verified before it is returned. Any failure —
-    no pair, no image, a dead URL, a fetch error — returns None,
-    and the page falls back to the ticker-initial coin icon. The
-    result is cached for an hour per coin.
+    First the stored `coin_meta` row for the mint (fetched on
+    purchase, or lazily here when the row is missing — only for a
+    coin the user holds, never bulk-loaded): the coin's official
+    logo from its metadata image URI or its DexScreener pair. Then,
+    when no stored logo exists, DexScreener's token pairs for the
+    mint directly — the best (highest-liquidity) pump.fun /
+    PumpSwap pair's `info.imageUrl`, or its Raydium pair when the
+    coin graduated. The URL is HEAD-verified before it is returned.
+    Any failure — no meta, no pair, no image, a dead URL, a fetch
+    error — returns None, and the page falls back to the
+    ticker-initial coin icon. The result is cached for an hour per
+    coin.
     """
     coin_id = (coin_id or "").strip()
     if not coin_id:
@@ -104,22 +97,20 @@ def resolve_token_image(coin_id: str, is_mint: bool = False,
     now = time.time()
     if cached and now - cached[0] < _IMAGE_CACHE_TTL_SECONDS:
         return cached[1]
-    get = http_get or _default_get
     url = None
     try:
-        if is_mint:
+        if db is not None and is_valid_address(coin_id):
+            stored = ensure_coin_meta(
+                db, coin_id, rpc_url=rpc_url, http_get=http_get,
+                http_head=http_head)
+            if stored:
+                url = stored.get("image_url") or None
+        if url is None and is_mint:
+            get = http_get or _default_get
             data = get(TOKENS_URL.format(coin_id))
-            best = _best_pair(data.get("pairs") or [])
+            best = _best_pair_incl_graduated(data.get("pairs") or [])
             if best is not None:
                 url = (best.get("info") or {}).get("imageUrl") or None
-        else:
-            cid = coingecko_id or COINS.get(
-                coin_id.upper(), {}).get("coingecko")
-            if cid:
-                data = get(COINGECKO_COIN_URL.format(cid))
-                image = data.get("image") or {}
-                url = (image.get("large") or image.get("small")
-                       or image.get("thumb") or None)
     except Exception:
         url = None
     url = _verified_image_url(url, http_head=http_head)
@@ -190,40 +181,28 @@ def _last_hour(pairs) -> list:
 def sparkline_points_1h(coin_id: str, is_mint: bool = False,
                         feed=None, http_get=None) -> list:
     """Real prices from the last hour for a coin's 1hr sparkline,
-    oldest first. Prefers the live feed's recorded ticks; majors
-    fall back to CoinGecko's 1-day chart filtered to the last
-    hour. Fewer than 2 points in the hour returns [] — the page
-    omits the sparkline (chart building) instead of faking one.
-    Any failure returns []."""
+    oldest first, from the live feed's recorded ticks (via the
+    feed-based market chart — the same ticks the candles are built
+    from). There is no CoinGecko fallback any more: the app lists
+    no major coins. Fewer than 2 points in the hour returns [] —
+    the page omits the sparkline (chart building) instead of
+    faking one. Any failure returns []."""
     coin_id = (coin_id or "").strip()
     if not coin_id:
         return []
     try:
-        feed_pairs = []
-        if feed is not None:
-            for ts, price in (feed.history(coin_id) or []):
-                try:
-                    feed_pairs.append((float(ts), float(price)))
-                except (TypeError, ValueError):
-                    continue
-        points = _last_hour(feed_pairs)
-        if len(points) >= 2:
-            return points
-        if not is_mint:
-            cg_pairs = []
-            result = fetch_market_chart(coin_id, 1, http_get=http_get)
-            for p in (result.get("points") or []):
-                try:
-                    cg_pairs.append((float(p.get("ts") or 0) / 1000.0,
-                                     float(p["price"])))
-                except (TypeError, ValueError, AttributeError):
-                    continue
-            points = _last_hour(cg_pairs)
-            if len(points) >= 2:
-                return points
+        result = fetch_market_chart(coin_id, 1, feed=feed,
+                                    http_get=http_get)
+        pairs = []
+        for p in (result.get("points") or []):
+            try:
+                pairs.append((float(p.get("ts") or 0) / 1000.0,
+                              float(p["price"])))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return _last_hour(pairs)
     except Exception:
-        pass
-    return []
+        return []
 
 
 def sparkline_svg_1h(coin_id: str, is_mint: bool = False,
@@ -236,27 +215,19 @@ def sparkline_svg_1h(coin_id: str, is_mint: bool = False,
 
 def sparkline_points_for_coin(coin_id: str, is_mint: bool = False,
                               feed=None, http_get=None) -> list:
-    """Real recent prices for a coin's sparkline, oldest first.
-
-    Majors: CoinGecko market_chart (1 day) via the app's own chart
-    fetcher. Mints: the live feed's recorded ticks
-    (`feed.history`). A coin with no history returns [] and the
-    page omits its sparkline — history is never invented. Any
-    failure returns [].
-    """
+    """Real recent prices for a coin's sparkline, oldest first,
+    from the live feed's recorded ticks (via the feed-based market
+    chart). A coin with no history returns [] and the page omits
+    its sparkline — history is never invented. Any failure
+    returns []."""
     coin_id = (coin_id or "").strip()
     if not coin_id:
         return []
     try:
-        if is_mint:
-            if feed is None:
-                return []
-            ticks = feed.history(coin_id) or []
-            return [float(price) for _ts, price in ticks
-                    if price is not None]
-        result = fetch_market_chart(coin_id, 1, http_get=http_get)
-        points = result.get("points") or []
-        return [float(p["price"]) for p in points
+        result = fetch_market_chart(coin_id, 1, feed=feed,
+                                    http_get=http_get)
+        return [float(p["price"])
+                for p in (result.get("points") or [])
                 if p.get("price") is not None]
     except Exception:
         return []
@@ -353,28 +324,27 @@ def reconcile_holdings(db_rows, chain_balances) -> list:
 
 
 def enrich_row(row: dict, feed=None, http_get=None,
-               http_head=None) -> dict:
+               http_head=None, db=None,
+               rpc_url: str | None = None) -> dict:
     """Attach a coin row's real image URL and 1hr sparkline SVG.
 
     Sets `row["image_url"]` (only when a verified real image URL
-    resolves) and `row["sparkline_svg"]` (only when at least 2 real
-    prices exist in the last hour). A row with no image or no
-    recent history is left without those keys, and the template
-    falls back to the ticker-initial icon / no sparkline. Never
-    raises; the row is returned unchanged on any failure.
+    resolves — from the stored `coin_meta` row for the mint, fetched
+    on purchase or lazily here when `db` is given) and
+    `row["sparkline_svg"]` (only when at least 2 real prices exist
+    in the last hour). A row with no image or no recent history is
+    left without those keys, and the template falls back to the
+    ticker-initial icon / no sparkline. Never raises; the row is
+    returned unchanged on any failure.
     """
     if not isinstance(row, dict):
         return row
     coin_id = row.get("coin_id") or ""
     is_mint = bool(row.get("is_mint"))
     try:
-        coingecko_id = None
-        if not is_mint:
-            coingecko_id = COINS.get(
-                str(coin_id).upper(), {}).get("coingecko")
         image = resolve_token_image(
-            coin_id, is_mint=is_mint, coingecko_id=coingecko_id,
-            http_get=http_get, http_head=http_head)
+            coin_id, is_mint=is_mint, http_get=http_get,
+            http_head=http_head, db=db, rpc_url=rpc_url)
         if image:
             row["image_url"] = image
         points = sparkline_points_1h(

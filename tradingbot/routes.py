@@ -43,7 +43,6 @@ from . import donations as donations_mod
 from . import jupiter as jupiter_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
-from . import platforms as platforms_mod
 from . import pnl as pnl_mod
 from . import security_bot as security_bot_mod
 from . import wallet_keys as wallet_keys_mod
@@ -51,15 +50,16 @@ from .page_numbers import page_list, page_number_for
 from . import rate_limit as rate_limit_mod
 from . import signing_bot as signing_bot_mod
 from . import token_send as token_send_mod
-from .charts import (CHART_RANGES, fetch_market_chart, fetch_ohlc,
+from .charts import (CHART_RANGES, fetch_market_chart,
                      fetch_trade_flow, high_low_24h,
                      mint_candles_from_feed, search_coins)
+from .coin_meta import ensure_coin_meta, stored_display
 from .config import Config
-from .executor import execute_real_trade, send_and_confirm
+from .executor import execute_real_trade, is_curve_complete, send_and_confirm
 from .jupiter_executor import execute_jupiter_swap
 from .paper import (InsufficientCash, InsufficientHolding,
                     paper_buy as ledger_buy, paper_sell as ledger_sell)
-from .prices import COINS, clear_price_cache, get_prices
+from .prices import clear_price_cache, get_prices
 from .builderbot import list_adjustments
 from .home_holdings import (enrich_row, fetch_chain_token_balances,
                             reconcile_holdings, sparkline_svg_1h)
@@ -81,8 +81,9 @@ from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
                      lamports_to_sol, sol_to_lamports)
-from .trenches import (fetch_mint_1h_changes, fetch_mint_identities,
-                       fetch_prices_for_mints, fetch_trenches_scan)
+from .trenches import (fetch_mint_1h_changes, fetch_mint_24h_changes,
+                       fetch_mint_identities, fetch_prices_for_mints,
+                       fetch_trenches_scan)
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
@@ -554,9 +555,19 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     mode with `app`, holdings are reconciled with the wallet's
     on-chain token balances first (see _reconciled_real_holdings),
     so coins the chain holds but the DB never recorded appear.
-    Each row is enriched with its real token image and sparkline
+    Every row shows the coin's real official name + ticker only:
+    the trenches feed names it, else the stored `coin_meta` row
+    (fetched on purchase, or lazily here), else the on-chain
+    Metaplex metadata — and when nothing names it, "Unknown coin"
+    with an empty ticker. A mint address is never shown as a name
+    and the old "Pump.fun token …" label is gone. Each row is
+    enriched with its real token image and sparkline
     (home_holdings.enrich_row) — a row with no image or no history
-    keeps the ticker-initial icon / no sparkline, never a fake."""
+    keeps the ticker-initial icon / no sparkline, never a fake.
+    A legacy holding whose coin_id is not a mint address (a symbol
+    bought when the app still listed major coins) is shown at cost
+    with no live price — it has no feed any more, so it can never
+    be priced, but it is never hidden either."""
     price_map = {c: e.get("price") for c, e in prices["prices"].items()}
     if mode == "devnet":
         if app is not None:
@@ -568,7 +579,8 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
         held = {h["coin_id"]: h for h in db.execute(
             "SELECT coin_id, amount, avg_price FROM paper_holdings "
             "WHERE user_id = ?", (user_id,)).fetchall()}
-    mint_ids = [c for c in held if c not in price_map]
+    mint_ids = [c for c in held if c not in price_map
+                and is_valid_address(c)]
     changes_1h: dict = {}
     identities: dict = {}
     if mint_ids:
@@ -609,11 +621,22 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
             changes_1h = {}
         try:
             # Real name + ticker for held mints, from the same feed.
-            # A mint the feed does not name keeps its honest
-            # "Pump.fun token …" label below — never guessed.
+            # A mint the feed does not name is resolved from the
+            # stored coin_meta / on-chain metadata below — never
+            # guessed, never an address.
             identities = fetch_mint_identities(mint_ids)
         except Exception:
             identities = {}
+    # A bonding-curve mint has no DexScreener pair, so the feed
+    # above never prices it — but the live feed ingests its curve
+    # price (devnet watchlist), so take the feed's tick when the
+    # trenches fetch left the mint unpriced.
+    if feed is not None:
+        for mint in mint_ids:
+            if mint not in price_map:
+                tick = feed.snapshot([mint]).get(mint)
+                if tick is not None and not tick["stale"]:
+                    price_map[mint] = tick["price"]
     # A bad tick must never inflate a balance on render either: drop
     # any price the live feed rejects against its last good tick. No
     # reference yet (feed empty or off) means everything passes.
@@ -634,53 +657,58 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
             continue
         clean_map[c] = p if p > 0 else None
     price_map = clean_map
+    rpc_url = _cfg(app).rpc_url if app is not None else None
     rows = []
-    for symbol, info in COINS.items():
-        h = held.get(symbol)
-        if h is None:
-            continue
-        price = price_map.get(symbol)
+    for coin_id in sorted(held):
+        h = held[coin_id]
+        price = price_map.get(coin_id)
         avg = h["avg_price"]
         pnl = None
         if price is not None and avg is not None:
             pnl = (float(price) - float(avg)) * float(h["amount"])
-        rows.append({"coin_id": symbol, "name": info["name"],
-                     "ticker": symbol, "price": price,
-                     "change_24h": prices["prices"].get(symbol, {}).get(
-                         "change_24h"),
-                     "change_1h": prices["prices"].get(symbol, {}).get(
-                         "change_1h"),
-                     "held": float(h["amount"]),
-                     "avg_price": (float(avg) if avg is not None else None),
-                     "pnl": pnl, "is_mint": False,
-                     "value": (float(h["amount"]) * float(price))
-                     if price is not None else None})
-    for mint in sorted(held):
-        if mint in COINS:
+        value = (float(h["amount"]) * float(price)
+                 if price is not None else None)
+        if not is_valid_address(coin_id):
+            # Legacy symbol holding (bought when the app still
+            # listed major coins): no feed, no live price — shown
+            # at cost, never hidden, never guessed.
+            rows.append({"coin_id": coin_id, "name": coin_id,
+                         "ticker": coin_id, "price": None,
+                         "change_24h": None, "change_1h": None,
+                         "held": float(h["amount"]),
+                         "avg_price": (float(avg)
+                                       if avg is not None else None),
+                         "pnl": None, "is_mint": False,
+                         "value": value})
             continue
-        price = price_map.get(mint)
-        h = held[mint]
-        avg = h["avg_price"]
-        pnl = None
-        if price is not None and avg is not None:
-            pnl = (float(price) - float(avg)) * float(h["amount"])
-        ident = identities.get(mint) or {}
-        rows.append({"coin_id": mint,
-                     "name": ident.get("name") or (
-                         "Pump.fun token " + mint[:4] + "…" + mint[-4:]),
-                     "ticker": ident.get("symbol") or (mint[:4] + "…"),
+        ident = identities.get(coin_id) or {}
+        name = ident.get("name")
+        ticker = ident.get("symbol")
+        if name is None and ticker is None:
+            # The feed did not name it: stored coin_meta (fetched
+            # on purchase, or lazily now), then the on-chain
+            # Metaplex metadata. Nothing names it -> "Unknown coin".
+            try:
+                meta = ensure_coin_meta(db, coin_id, rpc_url=rpc_url)
+            except Exception:
+                meta = None
+            if meta:
+                name = meta.get("name")
+                ticker = meta.get("symbol")
+        rows.append({"coin_id": coin_id,
+                     "name": name or ticker or "Unknown coin",
+                     "ticker": (ticker or "").upper(),
                      "price": price, "change_24h": None,
-                     "change_1h": changes_1h.get(mint),
+                     "change_1h": changes_1h.get(coin_id),
                      "held": float(h["amount"]),
                      "avg_price": (float(avg) if avg is not None else None),
                      "pnl": pnl, "is_mint": True,
-                     "value": (float(h["amount"]) * float(price))
-                     if price is not None else None})
+                     "value": value})
     # Attach each row's real token image + sparkline. Enrichment
     # never raises and never invents data — a row with no image or
     # no history keeps the ticker-initial icon / no sparkline.
     for row in rows:
-        enrich_row(row, feed=feed)
+        enrich_row(row, feed=feed, db=db, rpc_url=rpc_url)
     return rows
 
 
@@ -850,32 +878,63 @@ def _trenches_entry(mint: str) -> dict | None:
     return next((r for r in rows if r["mint"] == mint), None)
 
 
-def _unlisted_coin_row(coin_id_resolved: str, price, prices: dict) -> dict:
-    """The coin row for a known coin that is not in the user's list
-    (no holding, no price-list entry): a trenches token shows its
-    feed name/symbol, anything else a truncated address."""
-    info = COINS.get(coin_id_resolved)
-    trench = (_trenches_entry(coin_id_resolved)
-              if coin_id_resolved not in COINS else None)
+def _unlisted_coin_row(coin_id_resolved: str, price, prices: dict,
+                       db=None, rpc_url: str | None = None) -> dict:
+    """The coin row for a coin that is not in the user's list (no
+    holding): a trenches token shows its feed name/symbol, anything
+    else its stored coin_meta / on-chain metadata name — and when
+    nothing names it, "Unknown coin" with an empty ticker. A mint
+    address is never shown as a name and the old "Pump.fun token
+    …" label is gone."""
+    trench = _trenches_entry(coin_id_resolved)
     if trench is not None:
         name, ticker = trench["name"], trench["symbol"]
-    elif info:
-        name, ticker = info["name"], coin_id_resolved
     else:
-        name = ("Pump.fun token " + coin_id_resolved[:4] + "…" +
-                coin_id_resolved[-4:])
-        ticker = coin_id_resolved[:4] + "…"
-    return {"coin_id": coin_id_resolved, "name": name, "ticker": ticker,
+        name = ticker = None
+        if db is not None and is_valid_address(coin_id_resolved):
+            try:
+                meta = ensure_coin_meta(db, coin_id_resolved,
+                                        rpc_url=rpc_url)
+            except Exception:
+                meta = None
+            if meta:
+                name = meta.get("name")
+                ticker = meta.get("symbol")
+        if name is None and ticker is None:
+            # Last resort: the live feed's identity for this mint.
+            # This matters for graduated coins — ensure_coin_meta's
+            # DexScreener fallback only reads pump.fun pairs, while
+            # fetch_mint_identities also reads the Raydium pair, so
+            # without this an unheld graduated coin showed
+            # "Unknown coin" even though the feed knows its name.
+            try:
+                identities = fetch_mint_identities(
+                    [coin_id_resolved])
+            except Exception:
+                identities = {}
+            info = identities.get(coin_id_resolved) or {}
+            name = info.get("name")
+            ticker = info.get("symbol")
+        if name is None and ticker is None:
+            name, ticker = "Unknown coin", ""
+    return {"coin_id": coin_id_resolved, "name": name,
+            "ticker": (ticker or "").upper(),
             "price": price, "held": 0.0, "avg_price": None,
             "change_24h": prices["prices"].get(
                 coin_id_resolved, {}).get("change_24h"),
-            "pnl": None, "is_mint": coin_id_resolved not in COINS}
+            "pnl": None, "is_mint": is_valid_address(coin_id_resolved)}
 
 
-def _token_ticker(mint: str) -> str:
+def _token_ticker(mint: str, db=None,
+                    rpc_url: str | None = None) -> str | None:
     """The display ticker for a mint: the feed's real symbol when
-    DexScreener names it, else a truncated address — never a
-    fabricated name."""
+    DexScreener names it, else the stored coin_meta / on-chain
+    metadata symbol — else None, never a truncated address and
+    never a fabricated name. Callers show the coin's name or
+    "this token" when this is None. SOL is the native currency:
+    its ticker is SOL by definition, never a guess."""
+    if mint == "SOL":
+        return "SOL"
     try:
         identities = fetch_mint_identities([mint])
     except Exception:
@@ -884,7 +943,20 @@ def _token_ticker(mint: str) -> str:
     symbol = info.get("symbol")
     if symbol:
         return str(symbol)
-    return mint[:4] + "…"
+    if db is not None:
+        try:
+            _name, stored_symbol, _image = stored_display(db, mint)
+        except Exception:
+            stored_symbol = None
+        if stored_symbol:
+            return str(stored_symbol)
+        try:
+            meta = ensure_coin_meta(db, mint, rpc_url=rpc_url)
+        except Exception:
+            meta = None
+        if meta and meta.get("symbol"):
+            return str(meta["symbol"])
+    return None
 
 
 def _token_send_fee_note(app, wallet_pubkey: str, intent) -> str:
@@ -1167,7 +1239,7 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         header_balance = _header_balance(app, user) if user else None
         return {"current_user": user, "csrf_token": _new_csrf(),
-                "network": _cfg(app).network, "coins": COINS,
+                "network": _cfg(app).network,
                 "header_balance": header_balance,
                 "header_mode": header_balance["mode"]
                 if header_balance else "paper",
@@ -2511,7 +2583,7 @@ def register_routes(app: Flask) -> None:
         db = _db(app)
         mode = _active_mode(db, user["id"])
         q = (request.args.get("q") or "").strip()
-        found = search_coins(q, prices_fn=get_prices)
+        found = search_coins(q)
         if mode == "devnet":
             held_rows = db.execute(
                 "SELECT coin_id, amount FROM real_holdings "
@@ -2609,7 +2681,9 @@ def register_routes(app: Flask) -> None:
         if row is None:
             # Known coin, not in the list (no holding, no price) —
             # build its row from what we know.
-            row = _unlisted_coin_row(coin_id_resolved, price, prices)
+            row = _unlisted_coin_row(coin_id_resolved, price, prices,
+                                     db=db,
+                                     rpc_url=_cfg(app).rpc_url)
         data = _dashboard_data(app, user, popup_coin=row)
         return render_template("dashboard.html", **data)
 
@@ -2619,9 +2693,10 @@ def register_routes(app: Flask) -> None:
     # sellers %, and Buy / Sell / Sell all — all in SOL. The chart
     # ranges are 24hr / 1day / 1w / 1m / 1y / all-time (24hr and 1day
     # are the same 1-day window, shown under both labels). Chart data
-    # is real (CoinGecko market_chart) or the page says "No data yet"
-    # — never invented. Buyers/sellers % comes from DexScreener 24h
-    # buy/sell txn counts; "—" when the feed has none.
+    # is real (the live feed's recorded ticks for the mint) or the
+    # page says "No data yet" — never invented. Buyers/sellers %
+    # comes from DexScreener 24h buy/sell txn counts; "—" when the
+    # feed has none.
     # ------------------------------------------------------------------
     @app.route("/coins/<coin_id>/detail")
     @login_required
@@ -2637,28 +2712,24 @@ def register_routes(app: Flask) -> None:
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
         if row is None:
-            row = _unlisted_coin_row(coin_id_resolved, price, prices)
+            row = _unlisted_coin_row(coin_id_resolved, price, prices,
+                                     db=db,
+                                     rpc_url=_cfg(app).rpc_url)
         range_key = (request.args.get("range") or "24h").strip()
         if range_key not in CHART_RANGES:
             range_key = "24h"
         _label, days = CHART_RANGES[range_key]
-        chart = fetch_market_chart(coin_id_resolved, days)
-        # The chart is a real candlestick chart now: CoinGecko OHLC
-        # for known coins, live-feed tick history for mints. The
-        # line ("regular") view is drawn from the same candles, so
-        # the two views can never disagree. market_chart is still
-        # fetched — the 24h high/low come from it, as before.
-        if coin_id_resolved in COINS:
-            ohlc = fetch_ohlc(coin_id_resolved, days)
-            candles = ohlc["candles"]
-            chart_interval = ohlc["interval"]
-            chart_error = ohlc["error"]
-        else:
-            chart_interval = candles_mod.interval_for_mint(range_key)
-            candles = mint_candles_from_feed(
-                coin_id_resolved, chart_interval,
-                app.config.get("LIVE_FEED"))
-            chart_error = None
+        feed = app.config.get("LIVE_FEED")
+        chart = fetch_market_chart(coin_id_resolved, days, feed=feed)
+        # The chart is a real candlestick chart: live-feed tick
+        # history for the mint. The line ("regular") view is drawn
+        # from the same candles, so the two views can never
+        # disagree. The market chart is still fetched — the 24h
+        # high/low come from it, as before.
+        chart_interval = candles_mod.interval_for_mint(range_key)
+        candles = mint_candles_from_feed(
+            coin_id_resolved, chart_interval, feed)
+        chart_error = chart.get("error") if not candles else None
         candles_svg = candles_mod.candles_svg(candles, unit="$")
         line_svg = candles_mod.line_svg(candles, unit="$")
         # 24h high/low come from the 24-hour series itself, so they
@@ -2667,7 +2738,8 @@ def register_routes(app: Flask) -> None:
         if range_key in ("24h", "1d"):
             high_24h, low_24h = high_low_24h(chart["points"])
         else:
-            chart_24h = fetch_market_chart(coin_id_resolved, 1)
+            chart_24h = fetch_market_chart(coin_id_resolved, 1,
+                                           feed=feed)
             high_24h, low_24h = high_low_24h(chart_24h["points"])
         flow = fetch_trade_flow(coin_id_resolved)
         bots = db.execute(
@@ -2676,12 +2748,6 @@ def register_routes(app: Flask) -> None:
             (user["id"], "real" if mode == "devnet" else "paper")
             ).fetchall()
         wallet = _wallet(app, user["id"])
-        # Whether the coin trades as a wrapped token on Solana.
-        # The wrapped lookup is the static map only — a page render
-        # must never wait on a token-API call.
-        jupiter_wrapped = (
-            jupiter_mod.wrapped_info(coin_id_resolved)
-            if coin_id_resolved in COINS else None)
         return render_template(
             "coin_detail.html", coin=row, range_key=range_key,
             ranges=CHART_RANGES, candles_svg=candles_svg,
@@ -2697,7 +2763,6 @@ def register_routes(app: Flask) -> None:
             receive_address=wallet["pubkey"] if wallet else "",
             prices_source=prices["source"],
             prices_as_of=prices["as_of"],
-            jupiter_wrapped=jupiter_wrapped,
             # Page 5 Send/Receive must account for the network: the
             # coin's chain, the plain refusal when it is not a Solana
             # asset, and the network this app sends on.
@@ -2706,112 +2771,6 @@ def register_routes(app: Flask) -> None:
                 coin_id_resolved, _cfg(app).network),
             network_label=networks_mod.network_label(_cfg(app).network))
 
-    @app.route("/api/coins/<coin_id>/route")
-    @login_required
-    def jupiter_route(coin_id: str):
-        """One live Jupiter route for the coin page's "Finding
-        route…" box: the pools SOL is paired with for this coin,
-        with the expected output and price impact. The quote IS the
-        scan — Jupiter routes across every DEX/pool it integrates.
-        Read-only market data: no money moves, no signing. A coin
-        with no route gets ok:false and a plain message, never a
-        made-up route. Pump.fun mints trade on pump.fun, so no
-        Jupiter route is shown for them."""
-        coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
-        if coin_id_resolved is None:
-            return jsonify({"ok": False, "coin_id": coin_id,
-                            "error": "Unknown coin — no live price."})
-        side = (request.args.get("side") or "buy").strip().lower()
-        if side not in ("buy", "sell"):
-            side = "buy"
-        if is_valid_address(coin_id_resolved):
-            return jsonify({
-                "ok": False, "coin_id": coin_id_resolved, "side": side,
-                "error": "This coin trades on pump.fun — no Jupiter "
-                         "route is shown."})
-        if coin_id_resolved == "SOL":
-            return jsonify({
-                "ok": False, "coin_id": coin_id_resolved, "side": side,
-                "error": "SOL is the coin you swap from — no route "
-                         "needed."})
-        amount_sol_raw = (request.args.get("amount_sol") or "").strip()
-        try:
-            amount_sol = (float(amount_sol_raw) if amount_sol_raw
-                          else jupiter_mod.DEFAULT_BUY_SOL)
-        except ValueError:
-            return jsonify({"ok": False, "coin_id": coin_id_resolved,
-                            "side": side,
-                            "error": "Amount must be a number."})
-        if amount_sol <= 0:
-            return jsonify({"ok": False, "coin_id": coin_id_resolved,
-                            "side": side,
-                            "error": "Amount must be more than 0."})
-        coin_name = COINS.get(coin_id_resolved, {}).get("name")
-        try:
-            if side == "buy":
-                quote = jupiter_mod.quote_buy(
-                    coin_id_resolved, amount_sol, coin_name=coin_name)
-            else:
-                # Sell: amount_sol worth of the coin, converted to
-                # tokens at the live price, then quoted back to SOL.
-                sol_price = _sol_price_usd()
-                if (price is None or price <= 0
-                        or sol_price is None):
-                    return jsonify({
-                        "ok": False, "coin_id": coin_id_resolved,
-                        "side": side,
-                        "error": "Price unavailable right now — the "
-                                 "sell route needs a current price."})
-                tokens = amount_sol * sol_price / price
-                quote = jupiter_mod.quote_sell(
-                    coin_id_resolved, tokens, coin_name=coin_name)
-        except jupiter_mod.JupiterError as exc:
-            # No liquid route (no route, not tradable, dead pool)
-            # says so plainly — never a dead route, never the raw
-            # API wording. Anything else (Jupiter unreachable) is
-            # reported as itself.
-            error = (jupiter_mod.no_liquid_route_message(exc)
-                     or str(exc))
-            return jsonify({"ok": False, "coin_id": coin_id_resolved,
-                            "side": side, "error": error})
-        return jsonify({
-            "ok": True, "coin_id": coin_id_resolved, "side": side,
-            "wrapped": quote["wrapped"],
-            "display_name": quote["display_name"],
-            "in_amount": quote["in_amount"],
-            "out_amount": quote["out_amount"],
-            "in_amount_ui": quote["in_amount_ui"],
-            "out_amount_ui": quote["out_amount_ui"],
-            "route_labels": quote["route_labels"],
-            "price_impact_pct": quote["price_impact_pct"],
-            "fetched_at": quote["fetched_at"], "source": "jupiter",
-            "lines": jupiter_mod.summarize_route(quote)})
-
-    @app.route("/api/wrapped-majors")
-    @login_required
-    def wrapped_majors():
-        """The buy page's wrapped-majors picker: every wrapped
-        major with a LIVE liquid Jupiter pool right now. The list
-        is live-checked on every call — a wrapped major whose pool
-        went dead is gone from the answer, and a new liquid one
-        appears. Read-only market data: no money moves, no
-        signing. When Jupiter cannot be reached at all the answer
-        is ok:false (unavailable), never an empty list dressed up
-        as "no liquid majors"; when every pool is genuinely dry
-        the answer is ok:true with an empty list."""
-        majors, any_unverifiable = jupiter_mod.liquid_wrapped_majors()
-        if not majors and any_unverifiable:
-            return jsonify({
-                "ok": False, "majors": [],
-                "error": "Wrapped majors unavailable right now — "
-                         "Jupiter could not be reached to check "
-                         "the pools."})
-        fetched_at = max((m["fetched_at"] for m in majors),
-                         default=None)
-        return jsonify({"ok": True, "majors": majors,
-                        "fetched_at": fetched_at,
-                        "source": "jupiter"})
-
     @app.route("/api/coins/<coin_id>/tick")
     @login_required
     def coin_tick(coin_id: str):
@@ -2819,40 +2778,27 @@ def register_routes(app: Flask) -> None:
 
         The page polls this once a second while it is open (and
         pauses while the tab is hidden). Prices are never invented.
-        The live feed goes FIRST: a fresh validated tick (Kraken
-        for every listed coin — ZEC included — DexScreener poll
-        for watched mints) is the most current price the app has,
-        fresher than the 60s-cached CoinGecko price. A stale feed
-        tick (older than 30s) is never served as fresh — it falls
-        through to the per-source fetch below, which carries its
-        own honest as_of. A known coin with no feed tick comes
-        from the CoinGecko feed — cached up to 60 seconds
-        server-side, so the returned as_of says when that price
-        was actually fetched — and a mint comes fresh from the
-        DexScreener trenches feed on each tick. When no price is
-        available the response says so (ok false) and the page
-        keeps showing the last real price and its time. This is a
-        read of the same feeds the coins list already uses — no
-        trade, no signing, nothing moves."""
-        upper = (coin_id or "").upper()
+        The live feed goes FIRST: a fresh validated tick (DexScreener
+        poll for watched mints, bonding-curve price for devnet
+        watchlist mints, Jupiter for SOL) is the most current price
+        the app has. A stale feed tick (older than 30s) is never
+        served as fresh — it falls through to the per-source fetch
+        below, which carries its own honest as_of. A mint with no
+        feed tick comes fresh from the DexScreener trenches feed on
+        each tick. When no price is available the response says so
+        (ok false) and the page keeps showing the last real price
+        and its time. This is a read of the same feeds the coins
+        list already uses — no trade, no signing, nothing moves."""
         feed = app.config.get("LIVE_FEED")
         if feed is not None:
-            key = upper if upper in COINS else coin_id
+            key = (coin_id or "").upper() if (coin_id or "").upper() == "SOL" \
+                else coin_id
             tick = feed.snapshot([key]).get(key)
             if tick is not None and not tick["stale"]:
                 return jsonify({"ok": True, "coin_id": key,
                                 "price": tick["price"],
                                 "source": tick["source"],
                                 "as_of": tick["as_of"]})
-        if upper in COINS:
-            price, source, as_of = _paper_price(upper)
-            if price is None:
-                return jsonify({"ok": False, "coin_id": upper,
-                                "price": None, "source": source,
-                                "as_of": as_of,
-                                "error": "Price unavailable right now."})
-            return jsonify({"ok": True, "coin_id": upper, "price": price,
-                            "source": source, "as_of": as_of})
         if is_valid_address(coin_id):
             try:
                 prices = fetch_prices_for_mints([coin_id])
@@ -2874,12 +2820,12 @@ def register_routes(app: Flask) -> None:
     @login_required
     def coin_candles(coin_id: str):
         """Fresh candle SVGs for the coin detail chart's live
-        re-render. Same data as the page load: CoinGecko OHLC for
-        known coins, live-feed tick history for mints. The chart
-        re-renders from this at most once per candle interval — the
-        page never redraws every second. Login required; a coin
-        with no candles yet reports count 0 and the page says the
-        candles are still building, never a made-up chart."""
+        re-render. Same data as the page load: live-feed tick
+        history for the mint. The chart re-renders from this at
+        most once per candle interval — the page never redraws
+        every second. Login required; a coin with no candles yet
+        reports count 0 and the page says the candles are still
+        building, never a made-up chart."""
         range_key = (request.args.get("range") or "24h").strip()
         if range_key not in CHART_RANGES:
             range_key = "24h"
@@ -2887,14 +2833,9 @@ def register_routes(app: Flask) -> None:
         if resolved is None:
             abort(404)
         _label, days = CHART_RANGES[range_key]
-        if resolved in COINS:
-            ohlc = fetch_ohlc(resolved, days)
-            candles = ohlc["candles"]
-            interval = ohlc["interval"]
-        else:
-            interval = candles_mod.interval_for_mint(range_key)
-            candles = mint_candles_from_feed(
-                resolved, interval, app.config.get("LIVE_FEED"))
+        interval = candles_mod.interval_for_mint(range_key)
+        candles = mint_candles_from_feed(
+            resolved, interval, app.config.get("LIVE_FEED"))
         return jsonify({"ok": True, "coin_id": resolved,
                         "candles_svg": candles_mod.candles_svg(
                             candles, unit="$"),
@@ -2938,7 +2879,7 @@ def register_routes(app: Flask) -> None:
         feed = app.config["LIVE_FEED"]
         out = {}
         for coin_id in coins:
-            is_mint = coin_id.upper() not in COINS
+            is_mint = is_valid_address(coin_id)
             svg = sparkline_svg_1h(coin_id, is_mint=is_mint, feed=feed)
             out[coin_id] = svg or None
         return jsonify({"ok": True, "sparklines": out, "as_of": _now()})
@@ -2985,26 +2926,24 @@ def register_routes(app: Flask) -> None:
                             data = {}
                         want = data.get("subscribe")
                         if isinstance(want, list):
-                            # Only real coins: known symbols or valid
-                            # mint addresses, at most 100 per
-                            # connection.
+                            # Only real coins: pump.fun mint
+                            # addresses, plus SOL (the unit of
+                            # account) — at most 100 per connection.
                             new_subs = []
                             for coin in want:
                                 if not isinstance(coin, str):
                                     continue
-                                if coin.upper() in COINS:
-                                    new_subs.append(coin.upper())
+                                if coin.upper() == "SOL":
+                                    new_subs.append("SOL")
                                 elif is_valid_address(coin):
                                     new_subs.append(coin)
                                 if len(new_subs) >= 100:
                                     break
                             for coin in subscribed:
-                                if coin not in new_subs \
-                                        and coin not in COINS:
+                                if coin not in new_subs and coin != "SOL":
                                     feed.unsubscribe_mint(coin)
                             for coin in new_subs:
-                                if coin not in subscribed \
-                                        and coin not in COINS:
+                                if coin not in subscribed and coin != "SOL":
                                     feed.subscribe_mint(coin)
                             subscribed = new_subs
                             snap = feed.snapshot(subscribed)
@@ -3017,7 +2956,7 @@ def register_routes(app: Flask) -> None:
                     break  # send failed — the connection is gone
         finally:
             for coin in subscribed:
-                if coin not in COINS:
+                if coin != "SOL":
                     feed.unsubscribe_mint(coin)
 
     def _coin_result(heading: str, lines: list, ok: bool,
@@ -3052,11 +2991,6 @@ def register_routes(app: Flask) -> None:
         if bot["mode"] != "real":
             return None, (f"Bot '{bot['name']}' is a paper bot — pick a "
                           f"real bot for a real trade.")
-        platform = (bot["platform"] or "pump.fun")
-        if platform not in platforms_mod.REAL_TRADEABLE_PLATFORMS:
-            return None, (f"Bot '{bot['name']}' is on {platform} — real "
-                          f"trading on {platform} is not live yet. "
-                          f"No trade was placed.")
         return bot, None
 
     @app.route("/coins/<coin_id>/buy", methods=["POST"])
@@ -3207,11 +3141,26 @@ def register_routes(app: Flask) -> None:
         if error:
             return _coin_result("Nothing was bought", [error], False,
                                 coin_id_resolved, label)
-        if jupiter_mod.is_jupiter_coin(coin_id_resolved):
+        # The venue is the bonding curve: a graduated coin trades
+        # through Jupiter (mainnet, gated behind James's go-ahead);
+        # anything still bonding trades through the pump.fun
+        # executor (devnet). An unreadable curve refuses plainly —
+        # the venue is never guessed.
+        try:
+            rpc = SolanaRpcClient(_cfg(app).rpc_url)
+            complete = is_curve_complete(rpc, coin_id_resolved)
+        except Exception:
+            complete = None
+        if complete is None:
+            return _coin_result(
+                "Nothing was bought",
+                ["Bonding curve unavailable — the trade venue could "
+                 "not be determined."],
+                False, coin_id_resolved, label)
+        if complete:
             result = execute_jupiter_swap(
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
-                db, _cfg(app),
-                coin_name=COINS.get(coin_id_resolved, {}).get("name"))
+                db, _cfg(app))
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
@@ -3241,6 +3190,14 @@ def register_routes(app: Flask) -> None:
         if coin_amount > 0:
             _record_real_holding(db, user["id"], coin_id_resolved,
                                  coin_amount, avg_price)
+            # First time this coin is held: fetch + store its
+            # official logo (see the paper-buy hook above). Best
+            # effort — never blocks the trade.
+            try:
+                ensure_coin_meta(db, coin_id_resolved,
+                                 rpc_url=_cfg(app).rpc_url)
+            except Exception:
+                pass
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)
@@ -3416,11 +3373,24 @@ def register_routes(app: Flask) -> None:
         if error:
             return _coin_result("Nothing was sold", [error], False,
                                 coin_id_resolved, label)
-        if jupiter_mod.is_jupiter_coin(coin_id_resolved):
+        # The venue is the bonding curve (see the buy path
+        # above): graduated -> Jupiter, still bonding -> pump.fun,
+        # unreadable -> refused plainly.
+        try:
+            rpc = SolanaRpcClient(_cfg(app).rpc_url)
+            complete = is_curve_complete(rpc, coin_id_resolved)
+        except Exception:
+            complete = None
+        if complete is None:
+            return _coin_result(
+                "Nothing was sold",
+                ["Bonding curve unavailable — the trade venue could "
+                 "not be determined."],
+                False, coin_id_resolved, label)
+        if complete:
             result = execute_jupiter_swap(
                 bot, user["id"], coin_id_resolved, "sell", amount,
-                db, _cfg(app),
-                coin_name=COINS.get(coin_id_resolved, {}).get("name"))
+                db, _cfg(app))
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
@@ -3518,7 +3488,7 @@ def register_routes(app: Flask) -> None:
             # — switch mode in the HUD to see them.
             return render_template(
                 "wallet_detail.html", **data, intents=[],
-                pumpfun_wallet="", platform_wallets={})
+                pumpfun_wallet="")
         pumpfun_wallet = db.execute(
             "SELECT pumpfun_wallet FROM users WHERE id = ?",
             (user["id"],)).fetchone()["pumpfun_wallet"]
@@ -3540,9 +3510,7 @@ def register_routes(app: Flask) -> None:
                     item["amount_lamports"])
         return render_template(
             "wallet_detail.html", **data, intents=intents,
-            pumpfun_wallet=pumpfun_wallet,
-            platform_wallets=platforms_mod.get_platform_wallets(
-                db, user["id"]))
+            pumpfun_wallet=pumpfun_wallet)
 
     @app.route("/trenches")
     @login_required
@@ -3621,8 +3589,15 @@ def register_routes(app: Flask) -> None:
                     coin_id, _cfg(app).network)
                 if refusal:
                     flash(refusal)
-                    return redirect(url_for("coin_detail",
-                                            coin_id=coin_id))
+                    # A pump.fun mint has a detail page to return
+                    # to; anything else (a major symbol, a crafted
+                    # coin id) has no page any more, so the flash
+                    # is shown on the wallet send page instead of
+                    # being lost to a 404.
+                    if is_valid_address(coin_id):
+                        return redirect(url_for("coin_detail",
+                                                coin_id=coin_id))
+                    return redirect(url_for("wallet_send"))
             db = _db(app)
             # Anti-bot / wallet protection: at most 10 sends an hour
             # — a compromised session cannot drain a wallet in one
@@ -3659,16 +3634,22 @@ def register_routes(app: Flask) -> None:
                     flash(str(exc))
                     return redirect(url_for("wallet_send"))
                 if amount_base_units > inspection["balance"]:
+                    ticker = (_token_ticker(token, db=db,
+                                           rpc_url=_cfg(app).rpc_url)
+                            or "this token")
                     flash("Amount is more than you hold of this token "
                           f"({token_send_mod.format_token_amount(inspection['balance'], inspection['decimals'])} "
-                          f"{_token_ticker(token)}).")
+                          f"{ticker}).")
                     return redirect(url_for("wallet_send"))
                 cur = db.execute(
                     "INSERT INTO send_intents (user_id, destination, "
                     "amount_lamports, token, status, created_at, mint, "
                     "amount_base_units, decimals) "
                     "VALUES (?, ?, 0, ?, 'pending', ?, ?, ?, ?)",
-                    (user["id"], destination, _token_ticker(token),
+                    (user["id"], destination,
+                     _token_ticker(token, db=db,
+                                   rpc_url=_cfg(app).rpc_url)
+                     or "Unknown coin",
                      _now(), token, amount_base_units,
                      inspection["decimals"]))
                 db.commit()
@@ -3848,130 +3829,84 @@ def register_routes(app: Flask) -> None:
                                    _cfg(app).network))
 
     # ------------------------------------------------------------------
-    # Platform wallets: one wallet per trading platform, per user.
-    # The Create Wallet button on the bot form posts here. Creating
-    # is idempotent — asking again returns the wallet that already
-    # exists, it never makes a second one. The Phantom wallet's
-    # private key is shown exactly once, at creation, on its own
-    # page — never again, and never in a log.
-    # ------------------------------------------------------------------
-    @app.route("/platforms/<platform>/create", methods=["POST"])
-    @login_required
-    def platform_wallet_create(platform: str):
-        _csrf_check()
-        user = _current_user(app)
-        if not platforms_mod.is_valid_platform(platform):
-            flash("That platform is not valid.")
-            return redirect(url_for("bots"))
-        return_to = (request.form.get("return_to") or "").strip()
-        if not return_to.startswith("/"):
-            return_to = url_for("bots")
-        db = _db(app)
-        if platform == "phantom":
-            pubkey, key_b58 = platforms_mod.create_phantom_wallet_with_key(
-                db, user["id"], _cfg(app).encryption_key)
-            if key_b58:
-                _log(app, user["id"], "platform_wallet",
-                     f"Created your Phantom wallet {pubkey[:8]}... "
-                     f"(private key shown once at creation).")
-                return render_template(
-                    "platform_wallet_created.html",
-                    platform=platform, pubkey=pubkey, key_b58=key_b58,
-                    return_to=return_to)
-            flash("You already have a Phantom wallet: " + pubkey)
-            return redirect(return_to)
-        pubkey, created = platforms_mod.create_platform_wallet(
-            db, user["id"], platform, _cfg(app).encryption_key)
-        if created:
-            _log(app, user["id"], "platform_wallet",
-                 f"Created your {platforms_mod.PLATFORM_LABELS[platform]} "
-                 f"wallet {pubkey[:8]}....")
-            flash("Created your "
-                  f"{platforms_mod.PLATFORM_LABELS[platform]} wallet: "
-                  + pubkey)
-        else:
-            flash("You already have a "
-                  f"{platforms_mod.PLATFORM_LABELS[platform]} wallet: "
-                  + pubkey)
-        return redirect(return_to)
-    # ------------------------------------------------------------------
     # Paper trading (shared by the coin popup and the coin detail
     # page). Helpers return result dicts; the callers decide how to
-    # present them (the confirmation page). A coin is either a
-    # price-list symbol (SOL, BTC, ...) or a pump.fun mint address
-    # (a trenches token the user holds). Symbols are uppercased;
-    # mints are NEVER uppercased — base58 addresses are case-sensitive.
+    # present them (the confirmation page). A coin is a pump.fun
+    # mint address — base58 addresses are case-sensitive and are
+    # NEVER uppercased.
     # The old /paper/buy and /paper/sell endpoints (the dashboard's
     # removed Quick buy card) are gone — buys and sells now live
     # only in the coin popup and the coin detail page.
     # ------------------------------------------------------------------
     def _resolve_coin_price(coin: str):
-        """(coin_id, price, source) for a symbol or a mint, or
-        (None, None, None) when the coin is unknown / unpriced."""
+        """(coin_id, price, source) for a pump.fun mint, or
+        (None, None, None) when the coin is unknown / unpriced.
+        A mint the trenches feed has not priced still resolves —
+        with price None — so its detail page loads and says the
+        price is unavailable instead of 404ing. The live feed's
+        tick (bonding-curve price for devnet watchlist mints) is
+        consulted when the trenches feed has no price."""
         if not coin:
             return None, None, None
-        upper = coin.upper()
-        if upper in COINS:
-            price, source, _as_of = _paper_price(upper)
-            return upper, price, source
-        if is_valid_address(coin):
-            # The live feed first: a fresh validated tick — the
-            # bonding-curve price for a devnet mint with no DEX pool
-            # (Gate/AuditTest have no trenches-feed price at all).
-            # Only a mint the feed has no fresh tick for falls
-            # through to DexScreener; a stale tick is never live.
-            feed = app.config.get("LIVE_FEED")
-            if feed is not None:
-                try:
-                    tick = feed.snapshot([coin]).get(coin)
-                except Exception:
-                    tick = None
-                if tick is not None and not tick.get("stale"):
-                    try:
-                        price = float(tick["price"])
-                    except (TypeError, ValueError):
-                        price = None
-                    if price is not None and price > 0:
-                        return coin, price, tick.get("source") or "feed"
+        if not is_valid_address(coin):
+            return None, None, None
+        # The live feed first: a fresh validated tick — the
+        # bonding-curve price for a devnet mint with no DEX pool
+        # (Gate/AuditTest have no trenches-feed price at all).
+        # Only a mint the feed has no fresh tick for falls
+        # through to DexScreener; a stale tick is never live.
+        feed = app.config.get("LIVE_FEED")
+        if feed is not None:
             try:
-                prices = fetch_prices_for_mints([coin])
+                tick = feed.snapshot([coin]).get(coin)
             except Exception:
-                prices = {}
-            if coin in prices:
+                tick = None
+            if tick is not None and not tick.get("stale"):
                 try:
-                    price = float(prices[coin])
+                    price = float(tick["price"])
                 except (TypeError, ValueError):
                     price = None
                 if price is not None and price > 0:
-                    return coin, price, "trenches feed"
-            return coin, None, "trenches feed"
-        return None, None, None
+                    return coin, price, tick.get("source") or "feed"
+        try:
+            prices = fetch_prices_for_mints([coin])
+        except Exception:
+            prices = {}
+        if coin in prices:
+            try:
+                price = float(prices[coin])
+            except (TypeError, ValueError):
+                price = None
+            if price is not None and price > 0:
+                return coin, price, "trenches feed"
+        return coin, None, "trenches feed"
 
     def _jupiter_buy_price_usd(coin: str, amount_sol: float) -> float | None:
         """Implied USD price for a paper BUY of `amount_sol` SOL
         worth, from a live Jupiter quote — None when Jupiter cannot
         quote (the caller falls back to the live price and never
-        blocks the trade on a quote). Only listed coins have Jupiter
-        routes; pump.fun mints price from the trenches feed."""
-        if coin.upper() not in COINS:
+        blocks the trade on a quote). Only graduated pump.fun coins
+        have Jupiter routes; a coin still on its bonding curve has
+        no route and this returns None, so the buy prices from the
+        trenches feed."""
+        if not is_valid_address(coin):
             return None
-        return jupiter_mod.jupiter_usd_price(
-            coin.upper(), _sol_price_usd(), amount_sol=amount_sol)
+        return jupiter_mod.jupiter_usd_price_mint(
+            coin, _sol_price_usd(), amount_sol=amount_sol)
 
     def _jupiter_sell_price_usd(coin: str,
                                 amount_tokens: float) -> float | None:
         """Implied USD price for a paper SELL of `amount_tokens`,
         from a live Jupiter sell quote — None when Jupiter cannot
-        quote (caller falls back to the live price)."""
-        if coin.upper() not in COINS:
+        quote (caller falls back to the live price). Only graduated
+        pump.fun coins have Jupiter routes."""
+        if not is_valid_address(coin):
             return None
         sol_price = _sol_price_usd()
         if sol_price is None or amount_tokens <= 0:
             return None
         try:
-            quote = jupiter_mod.quote_sell(
-                coin.upper(), amount_tokens,
-                coin_name=COINS[coin.upper()]["name"])
+            quote = jupiter_mod.quote_sell_mint(coin, amount_tokens)
         except jupiter_mod.JupiterError:
             return None
         if quote["out_amount_ui"] <= 0:
@@ -4029,6 +3964,15 @@ def register_routes(app: Flask) -> None:
                                      bot_id=bot["id"] if bot else None)
         except InsufficientCash:
             return {"ok": False, "message": "Not enough paper cash."}
+        # First time this coin is held: fetch its official logo
+        # (on-chain Metaplex metadata, then DexScreener) and store
+        # it so the held coin renders with its image. Best-effort —
+        # a missing logo never blocks the trade, and only held coins
+        # are ever fetched.
+        try:
+            ensure_coin_meta(db, coin_id, rpc_url=_cfg(app).rpc_url)
+        except Exception:
+            pass
         if bot is not None:
             # Record the position under the managing bot so the silent
             # loop's rule evaluation (stop loss, sell ladder, trailing
@@ -4187,18 +4131,15 @@ def register_routes(app: Flask) -> None:
             mode = (request.form.get("mode") or "paper").lower()
             if mode not in ("paper", "real"):
                 mode = "paper"
-            # Platform the bot trades on: pump.fun, Phantom or
-            # pumpSwap. An unknown value is not stored — the form is
-            # sent back with a plain message.
-            platform = (request.form.get("platform") or "pump.fun").strip()
-            if not platforms_mod.is_valid_platform(platform):
-                flash("That platform is not valid — pick pump.fun, "
-                      "Phantom, or pumpSwap.")
-                return redirect(url_for("bot_create"))
+            # Every bot trades on pump.fun — there is no other
+            # platform to pick. The bot's coins are pump.fun mint
+            # addresses (a signals bot starts with none — the user
+            # adds mints on the bot's page).
+            platform = "pump.fun"
             category = ""
-            coins = [c.strip().upper() for c in
-                     (request.form.get("coins") or "SOL").split(",")]
-            coins = [c for c in coins if c in COINS] or ["SOL"]
+            coins = [c.strip() for c in
+                     (request.form.get("coins") or "").split(",")]
+            coins = [c for c in coins if is_valid_address(c)]
             try:
                 buy_size = float(request.form.get("buy_size_pct") or 20)
                 stop_loss = float(request.form.get("stop_loss_pct") or 7)
@@ -4449,17 +4390,13 @@ def register_routes(app: Flask) -> None:
             mode = (request.form.get("mode") or bot["mode"]).lower()
             if mode not in ("paper", "real"):
                 mode = bot["mode"]
-            platform = (request.form.get("platform")
-                        or bot["platform"] or "pump.fun").strip()
-            if not platforms_mod.is_valid_platform(platform):
-                flash("That platform is not valid — pick pump.fun, "
-                      "Phantom, or pumpSwap.")
-                return redirect(url_for("bot_edit", bot_id=bot_id))
+            platform = bot["platform"] or "pump.fun"
             category = bot["category"] or ""
             rules_json = bot["rules_json"]
-            coins = [c.strip().upper() for c in
+            coins = [c.strip() for c in
                      (request.form.get("coins") or "").split(",")]
-            coins = [c for c in coins if c in COINS] or json.loads(bot["coins"])
+            coins = ([c for c in coins if is_valid_address(c)]
+                     or json.loads(bot["coins"]))
             try:
                 buy_size = float(request.form.get("buy_size_pct")
                                  or bot["buy_size_pct"])
@@ -4501,13 +4438,7 @@ def register_routes(app: Flask) -> None:
                                         to=want_silent))
             flash("Bot updated.")
             return redirect(url_for("bot_detail", bot_id=bot_id))
-        return render_template(
-            "bot_form.html", bot=bot,
-            platforms=platforms_mod.PLATFORMS,
-            platform_labels=platforms_mod.PLATFORM_LABELS,
-            platform_notes=platforms_mod.PLATFORM_NOTES,
-            platform_wallets=platforms_mod.get_platform_wallets(
-                db, user["id"]))
+        return render_template("bot_form.html", bot=bot)
 
     @app.route("/bots/<int:bot_id>/silent", methods=["GET", "POST"])
     @login_required
@@ -4672,15 +4603,30 @@ def register_routes(app: Flask) -> None:
             (bot_id, user["id"])).fetchone()
         if not bot:
             abort(404)
-        prices = get_prices()
         coins = json.loads(bot["coins"])
+        # Signals bots watch pump.fun mints: price + 24h change
+        # from the trenches feed (DexScreener, Raydium fallback
+        # for graduated coins). The price list is SOL only and has
+        # no entry for a mint. A mint with no price is skipped —
+        # no signal is ever built on a missing price.
+        mints = [c for c in coins if is_valid_address(c)]
+        mint_prices: dict = {}
+        mint_changes: dict = {}
+        if mints:
+            try:
+                mint_prices = fetch_prices_for_mints(mints)
+            except Exception:
+                mint_prices = {}
+            try:
+                mint_changes = fetch_mint_24h_changes(mints)
+            except Exception:
+                mint_changes = {}
         made = 0
         for coin in coins:
-            entry = prices["prices"].get(coin)
-            if not entry:
+            if coin not in mint_prices:
                 continue
             side, detail = signal_for_coin(
-                coin, entry.get("change_24h"), bot["strategy"])
+                coin, mint_changes.get(coin), bot["strategy"])
             if side is None:
                 continue
             db.execute(

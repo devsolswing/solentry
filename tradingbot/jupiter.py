@@ -1,5 +1,13 @@
-"""Jupiter DEX aggregation for Solana coins: route discovery ("Finding
-route…") and pricing, plus the gated real-swap path.
+"""Jupiter DEX aggregation for GRADUATED pump.fun coins: quotes and
+the gated real-swap path — by mint address, never by symbol.
+
+The app trades pump.fun coins only. A coin still on its bonding
+curve trades through the pump.fun executor (tradingbot/executor.py).
+A coin that GRADUATED (bonding curve complete, migrated to Raydium)
+trades through Jupiter: this module quotes SOL <-> the coin's mint
+and (behind the mainnet gate) builds the swap transaction. There is
+no majors quoting any more: no wrapped-majors picker, no
+"Finding route…" box, no symbol resolution, no 36-coin list.
 
 API SURFACE — READ FIRST (the old v6 host is dead):
 Jupiter retired the old Swap API v6 host (`quote-api.jup.ag`) and the
@@ -12,23 +20,21 @@ resolve). The live surface, verified against the real API on
   (x-api-key header, key format `jup_...`). Optional: set
   JUPITER_API_KEY to use it for higher rate limits. The key is
   never logged.
-- Token API:          https://api.jup.ag/tokens/v2
-  (GET /search — resolves a symbol or mint to its metadata,
-  verification status and decimals; answers without a key for
-  testing).
 Do NOT "fix" these URLs back to quote-api.jup.ag — that host is
 retired and every call to it fails.
 
 WHAT THIS DOES:
-- `quote_buy` / `quote_sell`: fetch a live Jupiter quote. The quote
-  IS the scan of the pools SOL is paired with: Jupiter routes across
-  every DEX/pool it integrates and returns the route plan (which
-  pools, in which order, with what output). The coin page shows
-  "Finding route…" while this runs, then the route found — or an
-  honest "No route found" when there is none. A quote is never
-  cached and never presented as fresh after the fact: every quote
-  carries `fetched_at` (the time it was fetched).
-- Paper trades price from the quote (see `jupiter_usd_price`):
+- `quote_buy_mint` / `quote_sell_mint`: fetch a live Jupiter quote
+  for a mint address. The quote IS the scan of the pools SOL is
+  paired with: Jupiter routes across every DEX/pool it integrates
+  and returns the route plan (which pools, in which order, with
+  what output). A quote is never cached and never presented as
+  fresh after the fact: every quote carries `fetched_at` (the time
+  it was fetched). Pump.fun mints are 6 decimals by construction
+  (see tradingbot/pumpfun.py TOKEN_DECIMALS), so quotes default to
+  6 — `mint_decimals` reads the real decimals from the chain when
+  the caller needs them verified.
+- Paper trades price from the quote (see `jupiter_usd_price_mint`):
   the fill rate comes from Jupiter, only the USD denomination comes
   from the app's own SOL price. When Jupiter is unreachable the
   caller falls back to the existing live price — a paper trade is
@@ -37,20 +43,8 @@ WHAT THIS DOES:
   devnet liquidity, so a real Jupiter swap is mainnet real money.
   The gate stays closed until James gives an explicit mainnet
   go-ahead. Until then any real-swap request refuses plainly and
-  nothing is built, signed or sent.
-
-WRAPPED vs NATIVE — the honesty rule:
-On Solana, BTC / ETH / XRP / ZEC exist as WRAPPED tokens. Jupiter
-swaps SOL for the wrapped mint — NOT the native coin on its own
-chain. The UI must label wrapped coins as wrapped (e.g. "Wrapped
-ZEC (Solana)") and NEVER present a wrapped token as the native
-coin. Native ZEC / BTC / ETH is the THORChain cross-chain route —
-separate, NOT part of this build. Wrapped mints are resolved via
-Jupiter's token list API; the four below were verified live against
-it on 2026-11-11 (all `isVerified: true`) and are the only mints
-ever hardcoded here. Any other symbol is resolved live through
-`resolve_mint` (verified + exact-symbol match, highest liquidity
-wins) — never from a guessed address.
+  nothing is built, signed or sent. There is no trading fee on any
+  swap (fees were removed entirely 2026-11-13).
 
 FUTURE SIGNING — BUILT (2026-11-11, jupiter_executor.py):
 The real swap path is complete but GATED OFF by default
@@ -60,17 +54,11 @@ an allowlist check (Jupiter aggregator program + the swap
 instruction only, plus the Token/ATA/System/Compute-Budget
 instructions a swap needs — each validated, never arbitrary
 instructions), within the bot's limits and only when the rules
-engine allows it. The 1.9% mainnet fee (fees.py — ALL to the
-Treasury dev wallet, NO burn on mainnet) travels as its own
-System transfer right after the swap confirms, from the
-unspent fee portion, recorded once by swap signature: Jupiter
-builds the swap transaction as a versioned (v0) transaction
-with address lookup tables, and the lite API rejects
-`asLegacyTransaction` (verified live 2026-11-11: HTTP 400 /
-timeout), so appending the fee into the same transaction would
-mean rewriting a v0 message — the highest-risk byte surgery in
-the app, unprovable until mainnet. The separate fee transaction
-keeps the swap bytes exactly as Jupiter built them.
+engine allows it. Jupiter builds the swap transaction as a
+versioned (v0) transaction with address lookup tables, and the
+lite API rejects `asLegacyTransaction` (verified live 2026-11-11:
+HTTP 400 / timeout), so the swap bytes are used exactly as
+Jupiter built them.
 """
 
 from __future__ import annotations
@@ -82,8 +70,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .prices import COINS
-from .solana import is_valid_address
+from .solana import SolanaRpcClient, is_valid_address
 
 log = __import__("logging").getLogger("tradingbot.jupiter")
 
@@ -104,34 +91,6 @@ DEFAULT_BUY_SOL = 0.1
 _HTTP_TIMEOUT_SECONDS = 10
 _MINT_CACHE_TTL_SECONDS = 3600
 _MINT_NEGATIVE_TTL_SECONDS = 600
-
-# Wrapped mints, VERIFIED LIVE 2026-11-11 via
-# GET api.jup.ag/tokens/v2/search?query=<symbol> (all isVerified:
-# true). Quotes for all four were fetched live the same day
-# (SOL -> wBTC / wXRP / wZEC and wZEC -> SOL all returned routes).
-# Do NOT add a mint here without the same live verification.
-WRAPPED_MINTS = {
-    "BTC": {"mint": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
-            "name": "Wrapped BTC (Portal)", "decimals": 8},
-    "ETH": {"mint": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
-            "name": "Ether (Portal)", "decimals": 8},
-    "XRP": {"mint": "6UpQcMAb5xMzxc7ZfPaVMgx3KqsvKZdT5U718BzD5We2",
-            "name": "Wrapped XRP", "decimals": 6},
-    "ZEC": {"mint": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
-            "name": "Zcash", "decimals": 8},
-}
-
-# Coins that live natively on Solana (not wrapped): their mint is the
-# coin itself. USDC verified live 2026-11-11 (quoted SOL -> USDC).
-NATIVE_SOLANA_MINTS = {
-    "USDC": {"mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-             "name": "USD Coin", "decimals": 6},
-}
-
-# In-memory cache for dynamic (token-API) mint resolutions:
-# symbol -> (resolved dict | None, expires_at).
-_mint_cache: dict = {}
-
 
 class JupiterError(Exception):
     """Anything that stops a Jupiter lookup: no route, bad mint,
@@ -202,120 +161,6 @@ def _http_post_json(url: str, payload: dict,
         raise JupiterError(str(message)) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise JupiterError("Jupiter is unreachable right now.") from exc
-
-
-def _clear_mint_cache() -> None:
-    """Tests only: drop the dynamic mint-resolution cache."""
-    _mint_cache.clear()
-
-
-def wrapped_info(symbol: str) -> dict | None:
-    """Static-map wrapped info for a symbol — NO network call:
-    {mint, name, decimals} when the coin is one of the verified
-    wrapped coins, else None. Used for the coin page's wrapped
-    label (the full `resolve_mint` may hit the token API, which a
-    page render must not do)."""
-    entry = WRAPPED_MINTS.get((symbol or "").upper())
-    if entry is None:
-        return None
-    return {"mint": entry["mint"], "name": entry["name"],
-            "decimals": entry["decimals"]}
-
-
-def _search_token(symbol: str, coin_name: str | None = None) -> dict | None:
-    """One verified Solana token for `symbol` from Jupiter's token
-    API, or None. Only `isVerified: true` tokens with an exact
-    symbol match count — the search also returns junk tokens that
-    share a symbol (e.g. several fake "ZEC"s), and those must never
-    be picked. When the coin's full name is given, the token's name
-    must also contain "wrapped" or that full name (case-insensitive):
-    a same-symbol memecoin (e.g. a Solana token just called "ADA")
-    is not the native coin and must never be routed to. Highest
-    liquidity wins among the survivors."""
-    url = (TOKEN_API_BASE + "/search?query="
-           + urllib.parse.quote(symbol))
-    try:
-        raw = _http_get_json(url)
-    except JupiterError:
-        return None
-    tokens = raw if isinstance(raw, list) else raw.get("tokens", [])
-    candidates = []
-    for token in tokens:
-        if not isinstance(token, dict):
-            continue
-        if not token.get("isVerified"):
-            continue
-        if str(token.get("symbol", "")).upper() != symbol.upper():
-            continue
-        mint = token.get("id")
-        decimals = token.get("decimals")
-        if not mint or decimals is None:
-            continue
-        name = str(token.get("name") or "")
-        if coin_name:
-            name_lower = name.lower()
-            if ("wrapped" not in name_lower
-                    and coin_name.lower() not in name_lower):
-                continue
-        try:
-            decimals = int(decimals)
-        except (TypeError, ValueError):
-            continue
-        candidates.append({
-            "mint": mint,
-            "name": name or symbol,
-            "decimals": decimals,
-            "liquidity": float(token.get("liquidity") or 0.0),
-        })
-    if not candidates:
-        return None
-    candidates.sort(key=lambda c: c["liquidity"], reverse=True)
-    best = candidates[0]
-    return {"mint": best["mint"], "name": best["name"],
-            "decimals": best["decimals"]}
-
-
-def resolve_mint(symbol: str, coin_name: str | None = None) -> dict | None:
-    """{mint, name, decimals, wrapped} for a coin symbol, or None
-    when Jupiter has no Solana token for it. SOL is the input asset
-    itself (never wrapped). The four wrapped coins come from the
-    verified-live static map; anything else is resolved live through
-    Jupiter's token API (cached 1h; a miss caches 10 minutes so a
-    bad symbol does not hammer the API on every page load).
-    `coin_name` is the coin's full name (e.g. "Cardano") — it keeps
-    same-symbol memecoins out of the resolution (see
-    `_search_token`)."""
-    if not symbol:
-        return None
-    upper = symbol.upper()
-    if upper == "SOL":
-        return {"mint": SOL_MINT, "name": "Solana",
-                "decimals": SOL_DECIMALS, "wrapped": False}
-    if upper in WRAPPED_MINTS:
-        entry = WRAPPED_MINTS[upper]
-        return {"mint": entry["mint"], "name": entry["name"],
-                "decimals": entry["decimals"], "wrapped": True}
-    if upper in NATIVE_SOLANA_MINTS:
-        entry = NATIVE_SOLANA_MINTS[upper]
-        return {"mint": entry["mint"], "name": entry["name"],
-                "decimals": entry["decimals"], "wrapped": False}
-    now = time.time()
-    cached = _mint_cache.get(upper)
-    if cached and cached[1] > now:
-        return cached[0]
-    found = _search_token(upper, coin_name=coin_name)
-    # The cache holds the finished dict (with "wrapped"), not the
-    # raw search result: a cache hit must return exactly what a
-    # cache miss returns, or quote_buy/quote_sell crash on the
-    # missing key the second time a coin is resolved.
-    result = None
-    if found is not None:
-        result = {"mint": found["mint"], "name": found["name"],
-                  "decimals": found["decimals"], "wrapped": False}
-    ttl = (_MINT_CACHE_TTL_SECONDS if result is not None
-           else _MINT_NEGATIVE_TTL_SECONDS)
-    _mint_cache[upper] = (result, now + ttl)
-    return result
 
 
 def _to_units(amount: float, decimals: int) -> int:
@@ -415,176 +260,100 @@ def get_quote(input_mint: str, output_mint: str, amount_units: int,
                         wrapped=False, display_name="")
 
 
-def quote_buy(symbol: str, amount_sol: float,
-              slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
-              coin_name: str | None = None) -> dict:
-    """Live quote: `amount_sol` SOL -> the coin's Solana token.
-    Returns the normalised quote (with in/out amounts in both units
-    and human form, the route labels, and `fetched_at`)."""
+def mint_decimals(rpc_url: str, mint: str) -> int:
+    """A mint's decimals, read from the chain (byte 44 of the mint
+    account: mint_authority option+key (36) + supply u64 (8) +
+    decimals u8). Raises JupiterError when the mint account cannot
+    be read — the caller refuses plainly rather than quoting at a
+    guessed decimal count. Pump.fun mints are 6 by construction
+    (see tradingbot/pumpfun.py TOKEN_DECIMALS), so callers that
+    already know the coin is a pump.fun mint pass decimals=6
+    instead of paying for this read on every quote."""
+    if not is_valid_address(mint):
+        raise JupiterError("Not a valid token address.")
+    try:
+        client = SolanaRpcClient(rpc_url)
+        info = client.get_account_info(mint)
+    except Exception as exc:
+        raise JupiterError(
+            "Could not read the token's decimals from the chain."
+            ) from exc
+    if not info or not info.get("data") or len(info["data"]) < 45:
+        raise JupiterError(
+            "Could not read the token's decimals from the chain.")
+    return int(info["data"][44])
+
+
+def quote_buy_mint(mint: str, amount_sol: float,
+                   decimals: int = 6,
+                   slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> dict:
+    """Live quote: `amount_sol` SOL -> the coin at `mint` (a
+    graduated pump.fun coin). Returns the normalised quote (with
+    in/out amounts in both units and human form, the route labels,
+    and `fetched_at`). `decimals` is the mint's decimal count —
+    6 for every pump.fun mint by construction; pass
+    `mint_decimals(rpc_url, mint)` when it must be verified from
+    the chain."""
     if amount_sol is None or float(amount_sol) <= 0:
         raise JupiterError("Amount must be more than 0.")
-    resolved = resolve_mint(symbol, coin_name=coin_name)
-    if resolved is None:
-        raise NoRouteError(
-            f"No Jupiter route for {symbol} — no Solana token found.")
-    if resolved["mint"] == SOL_MINT:
+    if not is_valid_address(mint):
+        raise JupiterError("Not a valid token address.")
+    if mint == SOL_MINT:
         raise JupiterError(
             "SOL is the coin you swap from — no route needed.")
     units = _to_units(amount_sol, SOL_DECIMALS)
     base, headers = _swap_base()
     raw = _http_get_json(
         f"{base}/quote?inputMint={SOL_MINT}"
-        f"&outputMint={resolved['mint']}&amount={units}"
+        f"&outputMint={mint}&amount={units}"
         f"&slippageBps={int(slippage_bps)}", headers)
-    quote = _parse_quote(raw, side="buy", symbol=symbol,
-                         wrapped=resolved["wrapped"],
-                         display_name=resolved["name"])
+    quote = _parse_quote(raw, side="buy", symbol=mint,
+                         wrapped=False, display_name=mint)
     quote["in_amount_ui"] = float(amount_sol)
-    quote["out_amount_ui"] = _from_units(quote["out_amount"],
-                                         resolved["decimals"])
+    quote["out_amount_ui"] = _from_units(quote["out_amount"], decimals)
     return quote
 
 
-def quote_sell(symbol: str, amount_tokens: float,
-               slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
-               coin_name: str | None = None) -> dict:
-    """Live quote: `amount_tokens` of the coin's Solana token -> SOL.
-    Returns the normalised quote (out amount in SOL, human form)."""
+def quote_sell_mint(mint: str, amount_tokens: float,
+                    decimals: int = 6,
+                    slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> dict:
+    """Live quote: `amount_tokens` of the coin at `mint` (a graduated
+    pump.fun coin) -> SOL. Returns the normalised quote (out amount
+    in SOL, human form)."""
     if amount_tokens is None or float(amount_tokens) <= 0:
         raise JupiterError("Amount must be more than 0.")
-    resolved = resolve_mint(symbol, coin_name=coin_name)
-    if resolved is None:
-        raise NoRouteError(
-            f"No Jupiter route for {symbol} — no Solana token found.")
-    if resolved["mint"] == SOL_MINT:
+    if not is_valid_address(mint):
+        raise JupiterError("Not a valid token address.")
+    if mint == SOL_MINT:
         raise JupiterError(
             "SOL is the coin you swap from — no route needed.")
-    units = _to_units(amount_tokens, resolved["decimals"])
+    units = _to_units(amount_tokens, decimals)
     base, headers = _swap_base()
     raw = _http_get_json(
-        f"{base}/quote?inputMint={resolved['mint']}"
+        f"{base}/quote?inputMint={mint}"
         f"&outputMint={SOL_MINT}&amount={units}"
         f"&slippageBps={int(slippage_bps)}", headers)
-    quote = _parse_quote(raw, side="sell", symbol=symbol,
-                         wrapped=resolved["wrapped"],
-                         display_name=resolved["name"])
+    quote = _parse_quote(raw, side="sell", symbol=mint,
+                         wrapped=False, display_name=mint)
     quote["in_amount_ui"] = float(amount_tokens)
     quote["out_amount_ui"] = _from_units(quote["out_amount"],
                                          SOL_DECIMALS)
     return quote
 
 
-# Wrapped majors for the buy page's picker: the major coins whose
-# native chain is NOT Solana, so their Solana token is a wrapped /
-# bridged version. The four in WRAPPED_MINTS are the static wrapped
-# map; the other eight resolve through the token API and all quoted
-# live on 2026-11-11 (DOGE via BisonFi; LINK, AAVE, UNI, INJ,
-# ONDO, SUI and TAO all returned real routes). NOT in this list,
-# on purpose: native Solana coins (SOL, BONK, JUP, PEPE, POPCAT —
-# and RENDER, whose token is native Solana since the RNDR ->
-# RENDER migration) and USDC (a native Solana stablecoin, not a
-# wrapped major). Membership here is candidacy only: a coin
-# appears in the picker only when a live quote proves its pool is
-# liquid right now — never from this list alone.
-WRAPPED_MAJOR_SYMBOLS = [
-    "BTC", "ETH", "XRP", "ZEC", "DOGE", "LINK", "AAVE", "UNI",
-    "INJ", "ONDO", "SUI", "TAO",
-]
-
-
-def liquid_wrapped_majors(
-        amount_sol: float = DEFAULT_BUY_SOL) -> tuple:
-    """The wrapped majors with a LIVE liquid Jupiter route right
-    now, in WRAPPED_MAJOR_SYMBOLS order. Returns (majors,
-    any_unverifiable): each major is {coin_id, symbol,
-    display_name ("Wrapped BTC"), mint, route_labels,
-    price_impact_pct, fetched_at}. A coin whose quote fails with
-    NoRouteError (no liquid route / not tradable / dead pool) is
-    simply left out; a coin whose quote fails any other way
-    (Jupiter unreachable, a bad answer) is unverifiable, not
-    "illiquid" — the caller must never present an unverifiable
-    list as "no liquid majors". Quotes run in parallel (one
-    thread per candidate) so the picker answers in about one
-    quote's time instead of twelve. Read-only market data: no
-    money moves, no signing."""
-    import concurrent.futures
-
-    def _check(symbol: str) -> tuple:
-        coin_name = COINS.get(symbol, {}).get("name")
-        try:
-            quote = quote_buy(symbol, amount_sol,
-                              coin_name=coin_name)
-        except NoRouteError:
-            return (None, False)
-        except JupiterError:
-            return (None, True)
-        return ({
-            "coin_id": symbol,
-            "symbol": symbol,
-            "display_name": f"Wrapped {symbol}",
-            "mint": quote["output_mint"],
-            "route_labels": quote["route_labels"],
-            "price_impact_pct": quote["price_impact_pct"],
-            "fetched_at": quote["fetched_at"],
-        }, False)
-
-    majors = []
-    any_unverifiable = False
-    with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(WRAPPED_MAJOR_SYMBOLS)) as pool:
-        futures = {pool.submit(_check, s): s
-                   for s in WRAPPED_MAJOR_SYMBOLS}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                entry, unverifiable = future.result()
-            except Exception:
-                entry, unverifiable = None, True
-            if unverifiable:
-                any_unverifiable = True
-            if entry is not None:
-                majors.append(entry)
-    # as_completed scrambles the order: restore candidacy order.
-    order = {s: i for i, s in enumerate(WRAPPED_MAJOR_SYMBOLS)}
-    majors.sort(key=lambda m: order[m["coin_id"]])
-    return majors, any_unverifiable
-
-
-def summarize_route(quote: dict) -> list:
-    """Plain-language lines for the coin page's route box, from a
-    normalised quote. Never invents a step the quote did not take."""
-    if quote["side"] == "buy":
-        first = f"{quote['in_amount_ui']:g} SOL"
-        second = (f"~{quote['out_amount_ui']:g} "
-                  f"{quote['display_name']}")
-    else:
-        first = (f"{quote['in_amount_ui']:g} "
-                 f"{quote['display_name']}")
-        second = f"~{quote['out_amount_ui']:g} SOL"
-    path = " -> ".join(quote["route_labels"]) or "Jupiter"
-    lines = [
-        f"Route: {first} → {second} via {path}",
-        f"Price impact: {quote['price_impact_pct']:.4f}%",
-        f"Quoted {quote['fetched_at']} (Jupiter, live)",
-    ]
-    if quote.get("wrapped"):
-        lines.append(
-            f"{quote['display_name']} is the WRAPPED token on "
-            f"Solana — not the native coin on its own chain.")
-    return lines
-
-
-def jupiter_usd_price(symbol: str, sol_price_usd: float | None,
-                      amount_sol: float = DEFAULT_BUY_SOL) -> float | None:
-    """The coin's implied USD price from a live Jupiter buy quote
-    (0.1 SOL by default): USD per token. None when Jupiter cannot
-    quote or the SOL price is unknown — the caller falls back to the
-    existing live price and never blocks a trade on a quote. The
-    rate comes from Jupiter; only the USD denomination comes from
-    the app's own SOL price."""
+def jupiter_usd_price_mint(mint: str, sol_price_usd: float | None,
+                           amount_sol: float = DEFAULT_BUY_SOL,
+                           decimals: int = 6) -> float | None:
+    """The coin at `mint`'s implied USD price from a live Jupiter
+    buy quote (0.1 SOL by default): USD per token. None when
+    Jupiter cannot quote or the SOL price is unknown — the caller
+    falls back to the existing live price and never blocks a trade
+    on a quote. The rate comes from Jupiter; only the USD
+    denomination comes from the app's own SOL price."""
     if sol_price_usd is None or float(sol_price_usd) <= 0:
         return None
     try:
-        quote = quote_buy(symbol, amount_sol)
+        quote = quote_buy_mint(mint, amount_sol, decimals=decimals)
     except JupiterError:
         return None
     if quote["out_amount_ui"] <= 0:
@@ -604,27 +373,6 @@ def real_swaps_enabled(cfg=None) -> bool:
     if cfg is not None:
         return bool(getattr(cfg, "jupiter_real_swaps", False))
     return (os.environ.get("JUPITER_REAL_SWAPS") or "").strip() == "1"
-
-
-def is_jupiter_coin(coin_id: str) -> bool:
-    """True when `coin_id` is a listed coin (a symbol in the
-    app's coin list) that is a CANDIDATE for Jupiter routing —
-    i.e. a real trade of it is dispatched to the Jupiter
-    executor, not the pump.fun executor. Pump.fun mints are
-    addresses, never symbols, so they never match. SOL is the
-    coin you swap from, not a Jupiter destination. Network-free:
-    membership in the coin list only, so the trade dispatch
-    never waits on an API. This is a routing candidate only —
-    it does NOT mean the coin is tradable: tradability is proven
-    live by the quote (a real quote with actual liquidity),
-    never by this list. A candidate with no liquid route refuses
-    with "No liquid route found" inside the executor."""
-    if not coin_id or is_valid_address(coin_id):
-        return False
-    upper = coin_id.upper()
-    if upper == "SOL":
-        return False
-    return upper in COINS
 
 
 NO_LIQUID_ROUTE = "No liquid route found for this coin."
