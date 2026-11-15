@@ -325,6 +325,61 @@ CREATE TABLE IF NOT EXISTS scanner_top10 (
     FOREIGN KEY (bot_id) REFERENCES bots (id)
 );
 
+-- Tuning build 2026-11-15: 2-scan entry confirmation. One row per
+-- (bot, mint) that passed the buy threshold + buy filter + momentum
+-- gate on a scan but has not confirmed yet. A buy happens only when
+-- the signal is still passing on a LATER scan; a faded signal never
+-- buys. Rows older than twice the bot's scan interval (at least 10
+-- minutes) are pruned on every evaluation.
+CREATE TABLE IF NOT EXISTS scanner_signal_confirmations (
+    bot_id INTEGER NOT NULL,
+    mint TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    first_gain_pct REAL,
+    PRIMARY KEY (bot_id, mint),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
+
+-- Tuning build 2026-11-15: re-buy cooldown. One row per (bot,
+-- mint) that closed at a loss — the bot may not buy that coin again
+-- until blocked_until (30 minutes after the loss). A losing coin
+-- is never re-bought on the next scan.
+CREATE TABLE IF NOT EXISTS bot_buy_cooldowns (
+    bot_id INTEGER NOT NULL,
+    mint TEXT NOT NULL,
+    blocked_until TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (bot_id, mint),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
+
+-- Tuning build 2026-11-15: signal-outcome log. One row per entry
+-- the four-part signal gate (or, for signals-kind bots, the 24h
+-- signal) approved, recording the signal's features at entry; the
+-- trade's outcome is filled in when the position fully closes.
+-- LOGGING ONLY — the bot never changes its own rules from past
+-- outcomes (that is the auto-tighten doom-loop pattern). Any
+-- adaptation is a human decision from this data. Features that
+-- do not exist for a bot kind are NULL (signals bots have no
+-- volume/buyer/1h data), never guessed.
+CREATE TABLE IF NOT EXISTS bot_signal_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    mint TEXT NOT NULL,
+    entered_at TEXT NOT NULL,
+    gain_pct REAL,
+    gain_window TEXT NOT NULL DEFAULT '',
+    volume_ratio REAL,
+    buyer_ratio REAL,
+    trend_1h_pct REAL,
+    outcome_pnl_usd REAL,
+    outcome_win INTEGER,
+    outcome_at TEXT,
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
+CREATE INDEX IF NOT EXISTS idx_bot_signal_log_bot_mint
+    ON bot_signal_log (bot_id, mint, outcome_at);
+
 CREATE TABLE IF NOT EXISTS trade_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_id TEXT NOT NULL UNIQUE,

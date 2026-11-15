@@ -24,12 +24,12 @@ more buys than sells in the last 5 minutes, and a positive 1-hour
 price change. Anything else is SLOW. Missing data means SLOW
 (fail-closed: the slow ladder takes profits early rather than
 holding on a guess). A coin whose volume is ALL in the last
-5 minutes (h1 volume zero) counts as a surge — the crowd just
-arrived; that biases very fresh tokens toward TRENDING, which is
-the safe direction for a sniper (runners hold).
+5 minutes (h1 volume zero) is SLOW — a fresh coin has no trend
+to confirm, so it gets the slow ladder and its early profit
+rung, not the runner ladder (tuning build 2026-11-15).
 
 Profit ladders (scanner only, % of the original position):
-  * SLOW: sell 25% at +3%, 25% at +10%, 25% at +25%, the rest at
+  * SLOW: sell 25% at +5%, 25% at +10%, 25% at +25%, the rest at
     +50% — secure a profit early and often.
   * TRENDING (bullrunners hold): sell 10% at +26%, 10% at +50%,
     10% at +100%, 10% at +500%, 10% at +1000%, the rest at
@@ -58,7 +58,7 @@ MARK_KEEP_SECONDS = 600
 # cumulative), so a position always fully exits through the ladder
 # once its top target is reached.
 SLOW_LADDER = [
-    {"pct_of_position": 25, "profit_pct": 3},
+    {"pct_of_position": 25, "profit_pct": 5},
     {"pct_of_position": 25, "profit_pct": 10},
     {"pct_of_position": 25, "profit_pct": 25},
     {"pct_of_position": 25, "profit_pct": 50},
@@ -277,8 +277,11 @@ def detect_regime(entry, regime=None) -> str:
     5-minute volume of the last hour (volume.h1 / 12), more buys
     than sells in the last 5 minutes, and a positive 1-hour price
     change. Any missing or unusable input means SLOW — never guess.
-    A coin with volume only in the last 5 minutes (h1 volume zero)
-    counts as a surge: the crowd just arrived.
+    A coin with no 1-hour volume yet (a fresh coin whose only
+    volume is the last 5 minutes) is SLOW, not trending: a fresh
+    coin has no trend to confirm, so it gets the slow ladder and
+    its early profit rung, not the runner ladder. (Tuning build
+    2026-11-15: the old code counted zero h1 volume as a surge.)
     """
     cfg = regime or REGIME_DEFAULT
     try:
@@ -297,9 +300,8 @@ def detect_regime(entry, regime=None) -> str:
     if vol_m5 <= 0:
         return "slow"
     if vol_h1 <= 0:
-        surge = True
-    else:
-        surge = vol_m5 >= surge_x * (vol_h1 / 12.0)
+        return "slow"
+    surge = vol_m5 >= surge_x * (vol_h1 / 12.0)
     if not surge:
         return "slow"
     if cfg.get("require_buy_dominance", True):
@@ -322,6 +324,152 @@ def detect_regime(entry, regime=None) -> str:
         except (TypeError, ValueError):
             return "slow"
     return "trending"
+
+
+# --- momentum-only entry + signal persistence (tuning build 2026-11-15)
+# REMY DEFAULTS — pending James's call, not his rules. A buy counts
+# as a real signal only when four independent checks agree at entry:
+# (a) the price is gaining on the 5-minute window, (b) volume is
+# rising versus the prior window, (c) buyers outnumber sellers,
+# (d) the 1-hour trend is positive. Any one missing means no trade.
+# A price jump with no volume behind it is a manufactured spike,
+# not a signal — it fails (b) and is rejected, never bought.
+MOMENTUM_VOLUME_RATIO = 1.0  # REMY DEFAULT: 5-min volume must beat
+# the hourly average 5-min pace (h1 volume / 12) — volume rising
+# versus the prior window, not merely present.
+# Breakeven stop (profit lock): once a position's peak reaches this
+# gain over its entry price, its stop moves to the entry price, so
+# the remainder cannot lose money. REMY DEFAULT — pending his call.
+BREAKEVEN_TRIGGER_PCT = 10.0
+
+
+def _gain_5m(entry, db, bot_id, mint, price, now_ts):
+    """The 5-minute gain for a feed entry: the feed's own
+    change_5m_pct when it carries one, else the loop's price marks
+    (gain_window_pct over 300s). None when neither can say."""
+    change_5m = (entry or {}).get("change_5m_pct")
+    if change_5m is not None:
+        try:
+            return float(change_5m)
+        except (TypeError, ValueError):
+            return None
+    if db is None or bot_id is None or now_ts is None \
+            or price is None:
+        return None
+    try:
+        return gain_window_pct(db, bot_id, mint, price, now_ts, 300)
+    except Exception:
+        return None
+
+
+def passes_momentum_gate(entry, db=None, bot_id=None, now_ts=None):
+    """The four-part signal gate for a scanner entry. Returns
+    (True, "") when all four checks agree, else (False, reason)
+    naming the failing check. Fail-closed: any missing or unusable
+    input rejects the buy — a signal that cannot be verified is
+    not a signal.
+
+    Devnet watchlist entries (known test mints, no DexScreener
+    data) are checked on the 5-minute gain from the loop's marks
+    only — the volume, buyer and 1-hour checks have no data source
+    for them, so they are skipped there, never faked. The
+    curve-liquidity check in passes_buy_filter still applies.
+    """
+    if not entry:
+        return False, "no feed entry"
+    mint = entry.get("mint")
+    price = entry.get("price_usd")
+    if entry.get("devnet_watchlist"):
+        # Watchlist mints have no feed 5-minute change: the loop's
+        # own 3-minute gain from its marks is the closest measure
+        # of "gaining" (the same signal the buy threshold uses —
+        # a 300s-old mark does not exist for a coin tracked 200s).
+        gain_3m = gain_3m_pct(db, bot_id, mint, price, now_ts) \
+            if db is not None and bot_id is not None \
+            and now_ts is not None and price is not None else None
+        if gain_3m is None:
+            return False, "3-minute gain unknown (no price marks yet)"
+        if gain_3m <= 0:
+            return False, "3-minute gain not positive"
+        return True, ""
+    # (a) Price gaining on the 5-minute window.
+    gain_5m = _gain_5m(entry, db, bot_id, mint, price, now_ts)
+    if gain_5m is None:
+        return False, "5-minute gain unknown"
+    if gain_5m <= 0:
+        return False, "5-minute gain not positive"
+    # (b) Volume rising versus the prior window: this 5-minute
+    # volume above the hourly average 5-minute pace.
+    vol_m5 = entry.get("volume_m5_usd")
+    vol_h1 = entry.get("volume_h1_usd")
+    try:
+        vol_m5 = float(vol_m5) if vol_m5 is not None else None
+        vol_h1 = float(vol_h1) if vol_h1 is not None else None
+    except (TypeError, ValueError):
+        return False, "volume data unusable"
+    if vol_m5 is None or vol_h1 is None or vol_m5 <= 0 or vol_h1 <= 0:
+        return False, "volume data missing"
+    if vol_m5 <= MOMENTUM_VOLUME_RATIO * (vol_h1 / 12.0):
+        return False, ("volume not rising (5-min volume below the "
+                       "hourly pace) — spike without volume")
+    # (c) Buyers outnumbering sellers in the last 5 minutes.
+    buys = entry.get("txns_m5_buys")
+    sells = entry.get("txns_m5_sells")
+    if buys is None or sells is None:
+        return False, "buyer/seller data missing"
+    try:
+        if int(buys) <= int(sells):
+            return False, "sellers outnumber buyers"
+    except (TypeError, ValueError):
+        return False, "buyer/seller data unusable"
+    # (d) The 1-hour trend positive.
+    change_1h = entry.get("change_1h_pct")
+    if change_1h is None:
+        return False, "1-hour trend unknown"
+    try:
+        if float(change_1h) <= 0:
+            return False, "1-hour trend not positive"
+    except (TypeError, ValueError):
+        return False, "1-hour trend unusable"
+    return True, ""
+
+
+def signal_dead(entry, db, bot_id, mint, price, now_ts) -> bool:
+    """True when a held coin's signal has died: the 5-minute gain,
+    the volume edge and the buyer edge are ALL gone at once. The
+    position is held only while the signal keeps coming — when all
+    three die, the thesis is dead and the position exits rather
+    than waiting for the stop. Any check that cannot be evaluated
+    (missing data) means NOT dead — an exit needs proof, so a
+    position is never dumped on an unproven signal. Devnet
+    watchlist mints have no volume/buyer data, so the check never
+    fires for them."""
+    if not entry or entry.get("devnet_watchlist"):
+        return False
+    gain_5m = _gain_5m(entry, db, bot_id, mint, price, now_ts)
+    if gain_5m is None or gain_5m > 0:
+        return False
+    vol_m5 = entry.get("volume_m5_usd")
+    vol_h1 = entry.get("volume_h1_usd")
+    try:
+        vol_m5 = float(vol_m5) if vol_m5 is not None else None
+        vol_h1 = float(vol_h1) if vol_h1 is not None else None
+    except (TypeError, ValueError):
+        return False
+    if vol_m5 is None or vol_h1 is None or vol_h1 <= 0:
+        return False
+    if vol_m5 > MOMENTUM_VOLUME_RATIO * (vol_h1 / 12.0):
+        return False
+    buys = entry.get("txns_m5_buys")
+    sells = entry.get("txns_m5_sells")
+    if buys is None or sells is None:
+        return False
+    try:
+        if int(buys) > int(sells):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def next_ladder_rung(ladder, sold_fraction: float, profit_pct: float):

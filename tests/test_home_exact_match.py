@@ -139,21 +139,21 @@ class TestHoldingsRowExact(HomeMockupBase):
         self._buy_mint()
         html = self._html("/wallet")
         # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
-        # (removed 2026-11-12), leaves 1,000.0000 GATE worth $10.00;
+        # (removed 2026-11-12), leaves 990.0990 GATE worth $9.90 (1% buy haircut);
         # the price is $0.0100; 1h +2.50%.
-        self.assertIn("1,000.0000 GATE", html)
+        self.assertIn("990.0990 GATE", html)
         self.assertIn("$0.0100", html)
-        self.assertIn("$10.00", html)
+        self.assertIn("$9.90", html)
         self.assertIn("+2.50%", html)
         # The amount comes after the price and before the % — it is
         # under the price on the right, not under the name.
         self.assertLess(html.index("$0.0100"),
-                        html.index("1,000.0000 GATE"))
-        self.assertLess(html.index("1,000.0000 GATE"),
+                        html.index("990.0990 GATE"))
+        self.assertLess(html.index("990.0990 GATE"),
                         html.index("+2.50%"))
         # The $ value is still in the page (hidden, for the live
         # paper total) but not a visible row line.
-        self.assertIn("$10.00", html)
+        self.assertIn("$9.90", html)
         self.assertIn("holdings-value-live", html)
         self.assertIn("display: none", _rule(_css(), ".holdings-value-live"))
 

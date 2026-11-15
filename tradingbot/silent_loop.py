@@ -46,7 +46,8 @@ from datetime import datetime, timezone
 
 from .config import Config
 from .db import init_db
-from .coin_meta import ensure_coin_meta
+from .coin_meta import ensure_coin_meta, get_coin_meta
+from .devnet_watchlist import active_mints, enrich_scan
 from .executor import _skip, execute_real_trade, is_curve_complete
 from .jupiter_executor import execute_jupiter_swap
 from .ledger import record_trade
@@ -55,18 +56,52 @@ from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
 from .pnl import portfolio_totals, record_snapshot
 from .prices import get_prices
 from .rules import load_rules
-from .scanner import (check_top10_concentration, check_top10_rug,
-                      clear_watches, detect_regime, gain_3m_pct,
-                      gain_window_pct, next_ladder_rung,
-                      passes_buy_filter, record_marks, top10_total)
+from .scanner import (BREAKEVEN_TRIGGER_PCT, check_top10_concentration,
+                      check_top10_rug, clear_watches, detect_regime,
+                      gain_3m_pct, gain_window_pct, next_ladder_rung,
+                      passes_buy_filter, passes_momentum_gate, record_marks,
+                      signal_dead, top10_share, top10_total)
 from .signals import signal_for_coin
 from .solana import SolanaRpcClient, is_valid_address, lamports_to_sol
 from .trenches import (fetch_mint_24h_changes, fetch_prices_for_mints,
                        fetch_trenches_scan)
-from .devnet_watchlist import enrich_scan
 
 MIN_PAPER_TRADE_USD = 1.0
 REAL_SWAP_UNAVAILABLE = "real swap not available in v1"
+
+# --- tuning build 2026-11-15: shared-engine guards ---------------------
+# REMY DEFAULTS — pending James's call, not his rules. The loss
+# prevention thresholds (drawdown, loss streak, breakeven) are
+# defaults he can adjust before any push; the 30-minute cooldown
+# and max-hold come from the tuning report.
+DRAWDOWN_BREAKER_PCT = 10.0  # halt new buys when today's realized
+# P&L falls to -10% of the starting capital; resumes next day.
+LOSS_STREAK_COUNT = 3  # consecutive losing closed trades before
+# new buys pause.
+LOSS_STREAK_PAUSE_SECONDS = 1800  # 30-minute pause after a streak.
+REBUY_COOLDOWN_SECONDS = 1800  # 30 minutes before re-buying a coin
+# closed at a loss.
+MAX_HOLD_SECONDS = 1800  # 30 minutes: exit at market if no ladder
+# rung hit.
+# Sell-in-flight guard (tick-driven exits + loop backstop
+# idempotency): a position id claimed here is being sold right now —
+# a second sell for it (tick + loop racing) is refused, never
+# executed twice. Same process (loop + feed threads), so an
+# in-memory set is enough.
+_SELL_IN_FLIGHT: set = set()
+_SELL_IN_FLIGHT_LOCK = threading.Lock()
+# Top-10 watch skip-log throttle: once per hour per (bot, mint), so
+# an unserved mint does not flood the activity log one row per scan.
+_TOP10_SKIP_LOGGED_AT: dict = {}
+TOP10_SKIP_LOG_SECONDS = 3600
+# Tick-driven fast exits: mints dirtied by live-feed ticks, and the
+# event the fast-exit thread waits on. The feed's poller thread only
+# marks the mint dirty — it never sells inline.
+_TICK_DIRTY_MINTS: set = set()
+_TICK_DIRTY_LOCK = threading.Lock()
+_TICK_EVENT = threading.Event()
+_FAST_EXIT_STARTED = False
+_FAST_EXIT_LOCK = threading.Lock()
 
 
 def _now() -> str:
@@ -118,6 +153,472 @@ def _live_sol_price_usd(feed, prices_data):
             return None
         if price and price > 0:
             return price
+    return None
+
+
+# --- tuning build 2026-11-15: shared-engine guards ---------------------
+
+def _top10_client_for_mint(cfg, mint: str, rpc_factory, cache: dict):
+    """The RPC client that can serve a mint's top-10 data: the devnet
+    RPC for devnet watchlist mints, the MAINNET RPC for every other
+    mint. The old code read every mint through cfg.rpc_url (the
+    devnet RPC on devnet), which cannot serve mainnet mints at all
+    — the watch was dead for every mainnet coin. Clients are cached
+    per network in `cache` (one client per network per evaluation).
+    Raises when the client cannot be built — the caller treats that
+    as "watch unavailable", never as a pass."""
+    try:
+        watchlist = active_mints(cfg)
+    except Exception:
+        watchlist = []
+    if mint in watchlist:
+        key, url = "devnet", cfg.rpc_url
+    else:
+        key, url = "mainnet", cfg.mainnet_rpc_url
+    if key not in cache:
+        cache[key] = rpc_factory(url)
+    return cache[key]
+
+
+def _log_top10_skip_throttled(db, user_id: int, bot, coin: str,
+                              detail: str, mode: str, now_ts: float
+                              ) -> None:
+    """Log a top-10 "watch unavailable" line at most once per hour
+    per (bot, mint) — an unserved mint used to flood the activity
+    log one row per scan. Never raises."""
+    key = (int(bot["id"]), coin)
+    last = _TOP10_SKIP_LOGGED_AT.get(key)
+    if last is not None and now_ts - last < TOP10_SKIP_LOG_SECONDS:
+        return
+    _TOP10_SKIP_LOGGED_AT[key] = now_ts
+    try:
+        _log(db, user_id, "silent_skip", detail, mode)
+    except Exception:
+        pass
+
+
+def _claim_position_for_sell(position_id: int) -> bool:
+    """Claim a position for a sell in flight. False when another
+    thread is already selling it (tick-driven exit vs loop backstop)
+    — the caller must NOT sell then. Always paired with
+    _release_position_for_sell in a finally."""
+    with _SELL_IN_FLIGHT_LOCK:
+        if position_id in _SELL_IN_FLIGHT:
+            return False
+        _SELL_IN_FLIGHT.add(position_id)
+        return True
+
+
+def _release_position_for_sell(position_id: int) -> None:
+    with _SELL_IN_FLIGHT_LOCK:
+        _SELL_IN_FLIGHT.discard(position_id)
+
+
+def _signal_confirmed(db, bot_id: int, mint: str, gain: float,
+                      now_ts: float, scan_interval: int) -> bool:
+    """2-scan entry confirmation. A signal that passes the buy
+    threshold + filter + momentum gate is recorded on the first
+    scan and buys only when it is STILL passing on a later scan —
+    a one-scan spike never buys. Returns True when the signal was
+    already recorded (confirmed); the confirmation row is consumed
+    (deleted) on a confirm, so a buy blocked after confirming must
+    re-confirm on a later scan. Stale rows (older than twice the
+    bot's scan interval, at least 10 minutes) are pruned."""
+    try:
+        expiry = max(600.0, 2.0 * float(scan_interval))
+        cutoff = datetime.fromtimestamp(now_ts - expiry,
+                                        tz=timezone.utc).strftime(
+                                            "%Y-%m-%dT%H:%M:%SZ")
+        db.execute("DELETE FROM scanner_signal_confirmations "
+                   "WHERE bot_id = ? AND first_seen_at < ?",
+                   (bot_id, cutoff))
+        db.commit()
+        row = db.execute(
+            "SELECT 1 FROM scanner_signal_confirmations "
+            "WHERE bot_id = ? AND mint = ?",
+            (bot_id, mint)).fetchone()
+        if row:
+            db.execute("DELETE FROM scanner_signal_confirmations "
+                       "WHERE bot_id = ? AND mint = ?",
+                       (bot_id, mint))
+            db.commit()
+            return True
+        db.execute(
+            "INSERT INTO scanner_signal_confirmations "
+            "(bot_id, mint, first_seen_at, first_gain_pct) "
+            "VALUES (?, ?, ?, ?)",
+            (bot_id, mint,
+             datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime(
+                 "%Y-%m-%dT%H:%M:%SZ"),
+             float(gain)))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        # A confirmation-table failure is a fail-CLOSED buy: without
+        # a trustworthy confirmation record, the signal does not buy.
+        return False
+    return False
+
+
+def _cooldown_until(db, bot_id: int, mint: str,
+                    now_ts: float) -> float | None:
+    """The epoch second until which (bot, mint) may not be re-bought
+    (30 minutes after a losing close), or None when no cooldown
+    applies. Expired rows are pruned."""
+    try:
+        now_s = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        db.execute("DELETE FROM bot_buy_cooldowns "
+                   "WHERE bot_id = ? AND blocked_until <= ?",
+                   (bot_id, now_s))
+        db.commit()
+        row = db.execute(
+            "SELECT blocked_until FROM bot_buy_cooldowns "
+            "WHERE bot_id = ? AND mint = ?", (bot_id, mint)).fetchone()
+        if not row or not row["blocked_until"]:
+            return None
+        parsed = _parse_scan_time(row["blocked_until"])
+        if parsed is None or parsed <= now_ts:
+            return None
+        return parsed
+    except Exception:
+        return None
+
+
+def _set_cooldown(db, bot_id: int, mint: str, reason: str,
+                  now_ts: float) -> None:
+    """Block re-buying (bot, mint) for REBUY_COOLDOWN_SECONDS after
+    a losing close. Never raises — a failed write simply means no
+    cooldown is recorded."""
+    try:
+        until = datetime.fromtimestamp(
+            now_ts + REBUY_COOLDOWN_SECONDS,
+            tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        db.execute(
+            "INSERT INTO bot_buy_cooldowns "
+            "(bot_id, mint, blocked_until, reason) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(bot_id, mint) DO UPDATE SET "
+            "blocked_until = excluded.blocked_until, "
+            "reason = excluded.reason",
+            (bot_id, mint, until, reason or ""))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _day_start_capital(db, bot, feed, prices_data):
+    """The bot's starting capital for TODAY (UTC), in USD, or None
+    when it cannot be determined. Paper bots: the user's paper
+    portfolio value at the latest snapshot before midnight (the
+    paper bankroll is shared across the user's paper bots, so the
+    portfolio is the capital). Real bots: the app wallet's SOL at
+    the latest snapshot before midnight, priced at the live SOL
+    price. Fallbacks: the earliest snapshot today, then the current
+    bankroll / wallet balance. A capital that cannot be determined
+    means the drawdown breaker cannot be evaluated — it does not
+    trip, and the reason is recorded by the caller."""
+    user_id = bot["user_id"]
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        row = db.execute(
+            "SELECT total_value_usd, real_sol FROM portfolio_snapshots "
+            "WHERE user_id = ? AND substr(created_at, 1, 10) < ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id, today)).fetchone()
+        if row is None:
+            row = db.execute(
+                "SELECT total_value_usd, real_sol FROM "
+                "portfolio_snapshots WHERE user_id = ? "
+                "AND substr(created_at, 1, 10) = ? "
+                "ORDER BY created_at ASC LIMIT 1",
+                (user_id, today)).fetchone()
+        if bot["mode"] == "paper":
+            if row is not None and row["total_value_usd"] is not None:
+                return float(row["total_value_usd"])
+            return None
+        # Real mode: SOL at day start x live SOL price.
+        sol_price = _live_sol_price_usd(feed, prices_data)
+        if sol_price is None:
+            return None
+        real_sol = None
+        if row is not None and row["real_sol"] is not None:
+            real_sol = float(row["real_sol"])
+        if real_sol is None:
+            return None
+        return real_sol * sol_price
+    except Exception:
+        return None
+
+
+def _buy_halt(db, bot, now_ts: float, feed,
+              prices_data: dict | None) -> tuple[bool, str]:
+    """Loss-prevention halts on NEW BUYS for a scanner/signals bot.
+    Exits still run — a halted bot can still stop out, it just
+    cannot open anything new. Returns (halted, reason).
+
+    1. Daily drawdown circuit breaker (REMY DEFAULT -10%): today's
+       realized P&L at or below -10% of the starting capital halts
+       buys for the rest of the day; the day rolling over resumes
+       them (today's realized P&L resets to zero).
+    2. Loss-streak halt (REMY DEFAULT 3 consecutive losing closed
+       trades): new buys pause for 30 minutes from the latest loss.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        row = db.execute(
+            "SELECT COALESCE(SUM(pnl_usd), 0) FROM trade_ledger "
+            "WHERE bot_id = ? AND side = 'sell' AND pnl_usd IS NOT NULL "
+            "AND substr(created_at, 1, 10) = ?",
+            (bot["id"], today)).fetchone()
+        daily_realized = float(row[0]) if row else 0.0
+    except Exception:
+        daily_realized = 0.0
+    capital = _day_start_capital(db, bot, feed, prices_data)
+    if capital is not None and capital > 0 and daily_realized <= (
+            -DRAWDOWN_BREAKER_PCT / 100.0 * capital):
+        return True, (
+            f"daily drawdown circuit breaker: realized "
+            f"${daily_realized:.2f} today is at or below "
+            f"-{DRAWDOWN_BREAKER_PCT:.0f}% of the ${capital:.2f} "
+            f"starting capital — no new buys until tomorrow")
+    try:
+        rows = db.execute(
+            "SELECT win, created_at FROM trade_ledger "
+            "WHERE bot_id = ? AND side = 'sell' "
+            "ORDER BY id DESC LIMIT ?",
+            (bot["id"], LOSS_STREAK_COUNT)).fetchall()
+    except Exception:
+        rows = []
+    streak = 0
+    anchor = None
+    for r in rows:
+        if r["win"] == 0:
+            streak += 1
+            if anchor is None:
+                anchor = r["created_at"]
+        else:
+            break
+    if streak >= LOSS_STREAK_COUNT and anchor:
+        anchor_ts = _parse_scan_time(anchor)
+        if anchor_ts is not None and now_ts < (
+                anchor_ts + LOSS_STREAK_PAUSE_SECONDS):
+            until = datetime.fromtimestamp(
+                anchor_ts + LOSS_STREAK_PAUSE_SECONDS,
+                tz=timezone.utc).strftime("%H:%M UTC")
+            return True, (
+                f"loss-streak halt: {streak} consecutive losing "
+                f"closed trades — no new buys until {until}")
+    return False, ""
+
+
+def _breaker_logged(db, bot_id: int, marker: str,
+                    since: str | None = None) -> bool:
+    """True when a circuit-breaker activity row for this bot with
+    `marker` in its detail already exists (today, or since `since`
+    when given) — so the halt is logged once, not once per scan."""
+    try:
+        if since is None:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            row = db.execute(
+                "SELECT 1 FROM activity WHERE user_id = (SELECT user_id "
+                "FROM bots WHERE id = ?) AND kind = 'silent_breaker' "
+                "AND detail LIKE ? AND substr(created_at, 1, 10) = ? "
+                "LIMIT 1",
+                (bot_id, f"%{marker}%", today)).fetchone()
+        else:
+            row = db.execute(
+                "SELECT 1 FROM activity WHERE user_id = (SELECT user_id "
+                "FROM bots WHERE id = ?) AND kind = 'silent_breaker' "
+                "AND detail LIKE ? AND created_at >= ? LIMIT 1",
+                (bot_id, f"%{marker}%", since)).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _prebuy_scam_gate(db, cfg, bot, entry: dict, rules: dict,
+                      rpc_factory, rpc_cache: dict) -> tuple[bool, str]:
+    """Pre-buy scam gates for a coin about to be bought (scanner and
+    signals kinds). Returns (True, "") when the coin passes, else
+    (False, reason). Fail-closed at every step: a check that cannot
+    be verified rejects the buy — an unverified coin is never
+    bought on a guess. Only enforced what the app can actually
+    check with data it has:
+      1. Top-10 holder concentration at entry (the bot's own
+         concentration threshold — Clyde 12%, Scanner 21%): reject
+         at or over the threshold, via the fixed mainnet RPC client.
+      2. Mint / freeze authority via RPC getAccountInfo on the
+         mint: reject when the mint authority is still enabled
+         (supply can be inflated) or the freeze authority is still
+         enabled (holders can be frozen).
+      3. Metadata / social presence via the stored coin_meta row
+         (fetched on demand): reject when the coin has no usable
+         metadata — no name AND no symbol.
+    Devnet watchlist mints (known test coins, not discovered coins)
+    skip checks 2 and 3 — they are the operator's own test mints.
+    NOT enforced here (recorded in the MANIFEST, never faked):
+    bundler / block-zero detection, dev-history blacklists,
+    unique-wallet counts, creator-sell monitoring, and
+    placeholder-image detection — the app has no data source for
+    any of them."""
+    mint = entry.get("mint")
+    if not mint:
+        return False, "no mint to check"
+    try:
+        concentration = float(
+            (rules.get("top10_rug") or {}).get("concentration_pct",
+                                               21.0))
+    except (TypeError, ValueError):
+        concentration = 21.0
+    try:
+        client = _top10_client_for_mint(cfg, mint, rpc_factory,
+                                        rpc_cache)
+    except Exception:
+        return False, "top-10 data unavailable (no RPC client)"
+    try:
+        _top10_total, _supply, share = top10_share(client, mint)
+    except Exception:
+        share = None
+    if share is None:
+        return False, ("top-10 concentration unverifiable — the RPC "
+                       "cannot serve this mint")
+    if share >= concentration:
+        return False, (f"top-10 holders own {share:.1f}% of supply "
+                       f"(at or over the {concentration:.0f}% bar)")
+    if entry.get("devnet_watchlist"):
+        return True, ""
+    try:
+        authorities = client.get_mint_authorities(mint)
+    except Exception:
+        authorities = None
+    if authorities is None:
+        return False, "mint authority unverifiable"
+    mint_on, freeze_on = authorities
+    if mint_on:
+        return False, ("mint authority still enabled — supply can "
+                       "be inflated")
+    if freeze_on:
+        return False, ("freeze authority still enabled — holders "
+                       "can be frozen")
+    try:
+        meta = get_coin_meta(db, mint)
+        if meta is None or (meta.get("source") in (None, "none")):
+            fetched = ensure_coin_meta(
+                db, mint,
+                rpc_url=(cfg.rpc_url if mint in active_mints(cfg)
+                         else cfg.mainnet_rpc_url))
+            meta = fetched or meta
+        if meta is None or (not meta.get("name")
+                            and not meta.get("symbol")):
+            return False, "no usable metadata (no name or symbol)"
+    except Exception:
+        return False, "metadata unavailable"
+    return True, ""
+
+
+def _record_signal_entry(db, bot_id: int, mint: str, signals: dict,
+                         now: str) -> None:
+    """Log an entry signal's features with the trade it approved
+    (bot_signal_log). LOGGING ONLY — nothing here ever changes a
+    rule. Never raises."""
+    try:
+        # One open row per (bot, mint): an older open row means its
+        # position was cleared without a sell (already-sold holding)
+        # — close it as unknown rather than letting a later close
+        # fill it in with another trade's outcome.
+        db.execute(
+            "UPDATE bot_signal_log SET outcome_at = ? "
+            "WHERE bot_id = ? AND mint = ? AND outcome_at IS NULL",
+            (now, bot_id, mint))
+        db.execute(
+            "INSERT INTO bot_signal_log (bot_id, mint, entered_at, "
+            "gain_pct, gain_window, volume_ratio, buyer_ratio, "
+            "trend_1h_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (bot_id, mint, now, signals.get("gain_pct"),
+             signals.get("gain_window") or "",
+             signals.get("volume_ratio"), signals.get("buyer_ratio"),
+             signals.get("trend_1h_pct")))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _record_signal_outcome(db, bot_id: int, mint: str) -> None:
+    """Fill in the outcome of the open signal row for (bot, mint)
+    when its position fully closes: the total realized P&L of that
+    position's sells since entry, from the trade ledger (the truth).
+    A position whose sells carry no USD P&L closes with an unknown
+    outcome (NULL) — never counted a win or a loss on a guess.
+    Never raises."""
+    try:
+        row = db.execute(
+            "SELECT id, entered_at FROM bot_signal_log "
+            "WHERE bot_id = ? AND mint = ? AND outcome_at IS NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (bot_id, mint)).fetchone()
+        if not row:
+            return
+        total = db.execute(
+            "SELECT COALESCE(SUM(pnl_usd), NULL) FROM trade_ledger "
+            "WHERE bot_id = ? AND coin = ? AND side = 'sell' "
+            "AND pnl_usd IS NOT NULL AND created_at >= ?",
+            (bot_id, mint, row["entered_at"])).fetchone()
+        pnl = float(total[0]) if total and total[0] is not None else None
+        win = None
+        if pnl is not None:
+            win = 1 if pnl > 0 else (0 if pnl < 0 else None)
+        db.execute(
+            "UPDATE bot_signal_log SET outcome_pnl_usd = ?, "
+            "outcome_win = ?, outcome_at = ? WHERE id = ?",
+            (pnl, win,
+             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             row["id"]))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _hard_exit_reason(stop_loss_pct: float, trailing_pct: float,
+                      kind: str, avg_price: float, peak_price: float,
+                      price: float) -> str | None:
+    """The hard exits for an open position at `price`: stop loss,
+    breakeven stop, trailing stop. Pure — no DB, so the loop and the
+    tick-driven fast-exit thread share exactly this logic.
+
+    Breakeven stop (scanner + signals kinds, tuning build
+    2026-11-15): once the peak reaches +BREAKEVEN_TRIGGER_PCT%
+    over entry, the stop moves to the entry price — the remainder
+    cannot lose money. The trailing stop above it still ratchets
+    the floor up while the coin climbs. Returns the reason string
+    ("stop_loss", "breakeven stop", "trailing stop") or None."""
+    if avg_price <= 0 or price <= 0:
+        return None
+    peak = max(float(peak_price), price)
+    # _lte, not a bare >=: 0.01 * 1.10 is 0.011000000000000001 in
+    # binary float, so a peak stored as exactly 0.011 would miss a
+    # strict comparison and the breakeven stop would never arm.
+    breakeven = (kind in ("scanner", "signals")
+                 and _lte(avg_price * (1.0 + BREAKEVEN_TRIGGER_PCT
+                                       / 100.0), peak))
+    stop_price = avg_price if breakeven else avg_price * (
+        1.0 - float(stop_loss_pct) / 100.0)
+    if _lte(price, stop_price):
+        return "breakeven stop" if breakeven else "stop_loss"
+    trail_price = peak * (1.0 - float(trailing_pct) / 100.0)
+    if _lte(price, trail_price):
+        return "trailing stop"
     return None
 
 
@@ -242,6 +743,22 @@ def _close_position(db: sqlite3.Connection, bot, coin: str,
     db.commit()
 
 
+def _after_sell(db, bot, coin: str, sold_amount: float,
+                full_amount: float, pnl_usd: float | None) -> None:
+    """Post-sell bookkeeping (tuning build 2026-11-15): a losing
+    close sets the 30-minute re-buy cooldown for (bot, coin); a
+    full close fills in the signal-log outcome for the trade.
+    Never raises."""
+    try:
+        if pnl_usd is not None and pnl_usd < 0:
+            _set_cooldown(db, bot["id"], coin, "losing close",
+                          datetime.now(timezone.utc).timestamp())
+        if sold_amount >= full_amount:
+            _record_signal_outcome(db, bot["id"], coin)
+    except Exception:
+        pass
+
+
 def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                    price: float, reason: str, rpc_factory,
                    real_executor, actions: list, amount: float | None = None,
@@ -261,6 +778,40 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     amount = full_amount if amount is None else min(amount, full_amount)
     if amount <= 0:
         return
+    # Idempotency (tuning build 2026-11-15): the tick-driven
+    # fast-exit thread and the loop backstop can both decide to sell
+    # this position at the same moment. The first claim wins; the
+    # second sell is refused, never executed twice.
+    if not _claim_position_for_sell(int(pos["id"])):
+        actions.append({"action": "skip", "coin": coin,
+                        "reason": "sell already in flight"})
+        return
+    try:
+        _sell_position_claimed(db, cfg, bot, coin, price, reason,
+                               rpc_factory, real_executor, actions,
+                               amount=amount, ladder_stage=ladder_stage,
+                               feed=feed, prices_data=prices_data,
+                               full_amount=full_amount)
+    finally:
+        _release_position_for_sell(int(pos["id"]))
+
+
+def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
+                           coin: str, price: float, reason: str,
+                           rpc_factory, real_executor, actions: list,
+                           amount: float, ladder_stage: int | None = None,
+                           feed=None, prices_data: dict | None = None,
+                           full_amount: float | None = None) -> None:
+    """The sell itself, run only while the position is claimed (see
+    _sell_position). After a sell, two tuning-build bookkeeping
+    steps run: a losing close sets the 30-minute re-buy cooldown
+    for (bot, coin), and a FULL close fills in the outcome of the
+    open signal-log row for the trade."""
+    pos = _positions(db, bot["id"]).get(coin)
+    if not pos:
+        return
+    if full_amount is None:
+        full_amount = pos["amount"]
     if bot["mode"] == "paper":
         try:
             held_row = db.execute(
@@ -285,6 +836,8 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                            "WHERE bot_id = ? AND coin_id = ?",
                            (ladder_stage, bot["id"], coin))
                 db.commit()
+            _after_sell(db, bot, coin, sell_amount, full_amount,
+                        usd - sell_amount * float(pos["avg_price"]))
             kind = ("silent_stop_loss" if reason == "stop_loss"
                     else "silent_sell")
             _log(db, bot["user_id"], kind,
@@ -344,6 +897,7 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                        "WHERE bot_id = ? AND coin_id = ?",
                        (ladder_stage, bot["id"], coin))
             db.commit()
+        _after_sell(db, bot, coin, amount, full_amount, pnl_usd)
         sold_line = (f"Silent bot '{bot['name']}' sold {amount:.4f} "
                      f"{coin} ({reason})")
         if sol_received is not None:
@@ -400,7 +954,13 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             actions.append({"action": "skip", "coin": coin,
                             "reason": "insufficient paper cash"})
             return
-        _open_position(db, bot, coin, amount, price)
+        # Cost basis is the EXECUTED fill price (mark + the 1% paper
+        # haircut), never the mark — usd / amount is exactly that
+        # fill price. Sell P&L is measured against what was paid.
+        _open_position(db, bot, coin, amount, price,
+                       avg_price=(usd / amount if amount > 0 else price))
+        if signals and signals.get("gain_pct") is not None:
+            _record_signal_entry(db, bot["id"], coin, signals, _now())
         # First time this coin is held: fetch + store its official
         # logo (on-chain Metaplex metadata, then DexScreener).
         # Best-effort — never blocks the trade, and only held coins
@@ -489,6 +1049,8 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                          coin_amount, buy_price,
                          coin_amount * buy_price,
                          mode="real", now=_now())
+        if signals and signals.get("gain_pct") is not None:
+            _record_signal_entry(db, bot["id"], coin, signals, _now())
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {coin} for "
              f"{amount_sol:.4f} SOL. Signature: "
@@ -669,12 +1231,14 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     stop_loss_pct = float(bot["stop_loss_pct"])
     trailing_pct = float(rules["trailing_stop_pct"])
     ladder = rules["sell_ladder"]
-    # Top-10 wallets watch state (scanner only): one RPC client per
-    # evaluation, created lazily; a failed client or a failed lookup
-    # is logged once per bot per scan and the watch is skipped.
-    top10_client = None
-    top10_failed = False
-    top10_skip_logged = False
+    # Top-10 wallets watch state: one RPC client per NETWORK per
+    # evaluation, created lazily (mainnet mints read through the
+    # mainnet RPC, devnet watchlist mints through the devnet RPC —
+    # tuning build 2026-11-15). A failed client or a failed lookup
+    # is logged at most once per hour per (bot, mint) and the watch
+    # is skipped for that scan — never faked, and the other exits
+    # still apply.
+    rpc_cache: dict = {}
 
     # 1. Open positions: rug sell first, then hard stop loss,
     # trailing stop, sell ladder.
@@ -715,25 +1279,24 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         # and the other exits still apply.
         top10 = rules.get("top10_rug")
         if kind in ("scanner", "trenches") and top10:
-            if top10_client is None and not top10_failed:
-                try:
-                    top10_client = rpc_factory(cfg.rpc_url)
-                except Exception:
-                    top10_client = None
-                    top10_failed = True
-                    _log(db, bot["user_id"], "silent_skip",
-                         f"Silent bot '{bot['name']}': top-10 wallet "
-                         f"watch unavailable — no top-10 exit this "
-                         f"scan.", bot["mode"])
+            try:
+                top10_client = _top10_client_for_mint(
+                    cfg, coin, rpc_factory, rpc_cache)
+            except Exception:
+                top10_client = None
+                _log_top10_skip_throttled(
+                    db, bot["user_id"], bot, coin,
+                    f"Silent bot '{bot['name']}': top-10 wallet watch "
+                    f"unavailable — no top-10 exit this scan.",
+                    bot["mode"], now_ts)
             if top10_client is not None:
                 total = top10_total(top10_client, coin)
                 if total is None:
-                    if not top10_skip_logged:
-                        _log(db, bot["user_id"], "silent_skip",
-                             f"Silent bot '{bot['name']}': top-10 wallet "
-                             f"watch unavailable for {coin} — position "
-                             f"left alone this scan.", bot["mode"])
-                        top10_skip_logged = True
+                    _log_top10_skip_throttled(
+                        db, bot["user_id"], bot, coin,
+                        f"Silent bot '{bot['name']}': top-10 wallet "
+                        f"watch unavailable for {coin} — position left "
+                        f"alone this scan.", bot["mode"], now_ts)
                 else:
                     fired, reason = check_top10_rug(
                         db, bot["id"], coin, total,
@@ -757,19 +1320,22 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                        "WHERE bot_id = ? AND coin_id = ?",
                        (peak, bot["id"], coin))
             db.commit()
-        stop_price = avg_price * (1 - stop_loss_pct / 100.0)
-        if _lte(price, stop_price):
-            _sell_position(db, cfg, bot, coin, price, "stop_loss",
-                           rpc_factory, real_executor, actions,
-                           feed=feed, prices_data=prices_data)
-            continue
-        trail_price = peak * (1 - trailing_pct / 100.0)
-        if _lte(price, trail_price):
-            _sell_position(db, cfg, bot, coin, price, "trailing stop",
+        # Hard exits (stop / breakeven stop / trailing stop) — one
+        # shared helper, so the loop and the tick-driven fast-exit
+        # thread fire on exactly the same conditions. The stop fires
+        # on the first pass that sees the price at or below it; with
+        # the 30-second loop tick (and the 5-second tick-driven fast
+        # exits) there is no 60-second lag any more — the report's
+        # "4% stop exiting at -12.6%" came from the old 60s tick.
+        hard = _hard_exit_reason(stop_loss_pct, trailing_pct, kind,
+                                 avg_price, peak, price)
+        if hard:
+            _sell_position(db, cfg, bot, coin, price, hard,
                            rpc_factory, real_executor, actions,
                            feed=feed, prices_data=prices_data)
             continue
         stage = int(pos["ladder_stage"] or 0)
+        ladder_fired = False
         if kind == "scanner" and rules.get("trending_ladder"):
             # Regime-aware profit ladders (scanner only): the regime
             # is picked fresh from this scan's feed entry and chooses
@@ -792,6 +1358,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             nxt = next_ladder_rung(active, sold_frac, profit)
             if nxt is not None:
                 sell_frac, target = nxt
+                ladder_fired = True
                 _sell_position(
                     db, cfg, bot, coin, price,
                     f"sell ladder ({regime}): {sell_frac * 100:.0f}% at "
@@ -807,6 +1374,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 orig = float(orig) if orig is not None \
                     else float(pos["amount"])
                 amount = orig * float(rung["pct_of_position"]) / 100.0
+                ladder_fired = True
                 _sell_position(
                     db, cfg, bot, coin, price,
                     f"sell ladder: {rung['pct_of_position']:.0f}% at "
@@ -814,9 +1382,67 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     rpc_factory, real_executor, actions, amount=amount,
                     ladder_stage=stage + 1,
                     feed=feed, prices_data=prices_data)
+        # Signal-death exit (scanner only): the position is held
+        # only while the signal keeps coming. When the 5-minute
+        # gain, the volume edge and the buyer edge are ALL gone,
+        # the thesis is dead — exit at market rather than waiting
+        # for the stop. A signal that cannot be evaluated (missing
+        # data) never triggers this exit.
+        if kind == "scanner":
+            entry = (price_map or {}).get(coin) or {}
+            if signal_dead(entry, db, bot["id"], coin, price, now_ts):
+                _sell_position(
+                    db, cfg, bot, coin, price,
+                    "signal died: gain, volume and buyer edge all gone",
+                    rpc_factory, real_executor, actions,
+                    feed=feed, prices_data=prices_data)
+                continue
+        # Max hold (scanner + signals): no ladder rung within 30
+        # minutes of opening means the coin is not doing what it
+        # was bought for — exit at market instead of holding a flat
+        # coin and hoping. A rung fired this pass resets the clock
+        # (the position is working).
+        if kind in ("scanner", "signals") and not ladder_fired:
+            opened_at = (pos["opened_at"]
+                         if "opened_at" in pos.keys() else None)
+            opened_ts = _parse_scan_time(opened_at) if opened_at else None
+            if (opened_ts is not None
+                    and now_ts - opened_ts > MAX_HOLD_SECONDS
+                    and stage == 0):
+                _sell_position(
+                    db, cfg, bot, coin, price,
+                    "max hold time: no ladder rung in 30 minutes",
+                    rpc_factory, real_executor, actions,
+                    feed=feed, prices_data=prices_data)
+                continue
+
+    # Loss-prevention halts (scanner + signals — Trenches v2 owns
+    # trenches exits): a tripped drawdown breaker or loss-streak
+    # halt stops NEW BUYS for this pass. The position exits above
+    # already ran — a halted bot can still stop out, it just cannot
+    # open anything new. The halt is logged once per day, not once
+    # per scan.
+    if kind in ("scanner", "signals"):
+        halted, halt_reason = _buy_halt(db, bot, now_ts, feed,
+                                        prices_data)
+        if halted:
+            marker = ("drawdown circuit breaker"
+                      if "drawdown" in halt_reason else "loss-streak halt")
+            if not _breaker_logged(db, bot["id"], marker):
+                _log(db, bot["user_id"], "silent_breaker",
+                     f"Silent bot '{bot['name']}': {halt_reason}.",
+                     bot["mode"])
+            actions.append({"action": "skip", "coin": "",
+                            "reason": halt_reason})
+            return actions
 
     # 2. Buys: strongest qualifying gainer, at most max_new per scan.
     bought = 0
+    # Candidates blocked by the pre-buy scam gate — logged once per
+    # scan (strongest blocked coin) when nothing was bought, like
+    # the buy-filter log above.
+    blocked_gates: list = []
+    max_open_hit = False
     max_new = int(rules["max_new_positions_per_scan"])
     ranked = []
     # Candidates that passed the buy threshold but failed the
@@ -843,6 +1469,23 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 devnet_watchlist_active=(cfg.network == "devnet"))
             if not ok:
                 filtered.append((gain, entry, why))
+                continue
+            # Momentum-only entry: the four-part signal gate. A
+            # coin gaining on one short window but flat/falling on
+            # the others, or spiking without volume, is not a
+            # signal — it is never bought.
+            ok, why = passes_momentum_gate(entry, db, bot["id"],
+                                           now_ts)
+            if not ok:
+                filtered.append((gain, entry, f"momentum gate: {why}"))
+                continue
+            # 2-scan confirmation: the signal must still be passing
+            # on a later scan. A one-scan spike never buys.
+            if not _signal_confirmed(db, bot["id"], entry["mint"],
+                                     gain, now_ts, interval):
+                filtered.append(
+                    (gain, entry,
+                     "signal not yet confirmed — first seen this scan"))
                 continue
             ranked.append((gain, entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
@@ -901,7 +1544,30 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                      f"({bot['max_open_trades']}).", bot["mode"])
                 actions.append({"action": "skip", "coin": entry["mint"],
                                 "reason": "max open trades reached"})
+                max_open_hit = True
                 break
+            if kind == "scanner":
+                # Re-buy cooldown: a coin closed at a loss is not
+                # bought again for 30 minutes.
+                blocked_until = _cooldown_until(
+                    db, bot["id"], entry["mint"], now_ts)
+                if blocked_until is not None:
+                    until = datetime.fromtimestamp(
+                        blocked_until, tz=timezone.utc).strftime(
+                            "%H:%M UTC")
+                    actions.append(
+                        {"action": "skip", "coin": entry["mint"],
+                         "reason": f"re-buy cooldown until {until}"})
+                    continue
+                # Pre-buy scam gates: top-10 concentration, mint /
+                # freeze authority, metadata. A blocked coin is
+                # skipped for the next ranked candidate — the gate
+                # never buys a coin it cannot verify.
+                ok, why = _prebuy_scam_gate(
+                    db, cfg, bot, entry, rules, rpc_factory, rpc_cache)
+                if not ok:
+                    blocked_gates.append((_change, entry, why))
+                    continue
             before = len(actions)
             signals = {
                 "m5_pct": entry.get("change_5m_pct"),
@@ -910,6 +1576,34 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 "sells_5m": entry.get("txns_m5_sells"),
                 "regime": detect_regime(entry, rules.get("regime")),
             }
+            if kind == "scanner":
+                # The signal features for the signal-outcome log:
+                # the triggering 3-minute gain, the 5-minute volume
+                # ratio vs the hourly pace, the buyer ratio, and
+                # the 1-hour trend.
+                vol_m5 = entry.get("volume_m5_usd")
+                vol_h1 = entry.get("volume_h1_usd")
+                volume_ratio = None
+                try:
+                    if (vol_m5 is not None and vol_h1 is not None
+                            and float(vol_h1) > 0):
+                        volume_ratio = (float(vol_m5)
+                                        / (float(vol_h1) / 12.0))
+                except (TypeError, ValueError):
+                    volume_ratio = None
+                buyer_ratio = None
+                try:
+                    sells = entry.get("txns_m5_sells")
+                    if sells is not None and int(sells) > 0:
+                        buyer_ratio = (int(entry.get("txns_m5_buys") or 0)
+                                       / int(sells))
+                except (TypeError, ValueError):
+                    buyer_ratio = None
+                signals["gain_pct"] = float(_change)
+                signals["gain_window"] = "3m"
+                signals["volume_ratio"] = volume_ratio
+                signals["buyer_ratio"] = buyer_ratio
+                signals["trend_1h_pct"] = entry.get("change_1h_pct")
             _buy_coin(db, cfg, bot, entry["mint"], entry["price_usd"],
                       _bankroll_prices(),
                       rpc_factory, real_executor, actions,
@@ -934,14 +1628,52 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                      f"({bot['max_open_trades']}).", bot["mode"])
                 actions.append({"action": "skip", "coin": coin,
                                 "reason": "max open trades reached"})
+                max_open_hit = True
                 break
+            # 2-scan confirmation (signals kind): the 24h signal
+            # must still be passing on a later scan.
+            if not _signal_confirmed(db, bot["id"], coin, float(change),
+                                     now_ts, interval):
+                actions.append({"action": "skip", "coin": coin,
+                                "reason": "signal not yet confirmed — "
+                                          "first seen this scan"})
+                continue
+            blocked_until = _cooldown_until(db, bot["id"], coin, now_ts)
+            if blocked_until is not None:
+                until = datetime.fromtimestamp(
+                    blocked_until, tz=timezone.utc).strftime("%H:%M UTC")
+                actions.append({"action": "skip", "coin": coin,
+                                "reason": f"re-buy cooldown until {until}"})
+                continue
+            entry = {"mint": coin, "price_usd": _price_for(coin),
+                     "devnet_watchlist": coin in active_mints(cfg)}
+            ok, why = _prebuy_scam_gate(
+                db, cfg, bot, entry, rules, rpc_factory, rpc_cache)
+            if not ok:
+                blocked_gates.append((float(change), entry, why))
+                continue
             before = len(actions)
             _buy_coin(db, cfg, bot, coin, _price_for(coin),
                       _bankroll_prices(),
                       rpc_factory, real_executor, actions,
+                      signals={"gain_pct": float(change),
+                               "gain_window": "24h"},
                       feed=feed, prices_data=prices_data)
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
+    if bought == 0 and blocked_gates and not max_open_hit:
+        # Nothing bought and at least one candidate was blocked by
+        # the scam gate — say so once, naming the strongest blocked
+        # coin, like the buy-filter log above.
+        blocked_gates.sort(key=lambda item: item[0], reverse=True)
+        top = blocked_gates[0][1]
+        _log(db, bot["user_id"], "silent_skip",
+             f"Silent bot '{bot['name']}': strongest candidate "
+             f"{top.get('symbol') or top['mint']} blocked by the scam "
+             f"gate — {blocked_gates[0][2]}. No buy this scan.",
+             bot["mode"])
+        actions.append({"action": "skip", "coin": top["mint"],
+                        "reason": f"scam gate: {blocked_gates[0][2]}"})
     return actions
 
 
@@ -1122,13 +1854,12 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
         positions = _positions(db, bot["id"])
         if not positions:
             continue
-        try:
-            client = rpc_factory(cfg.rpc_url)
-        except Exception:
-            _log(db, bot["user_id"], "silent_skip",
-                 f"Silent bot '{bot['name']}': top-10 watch unavailable "
-                 f"— no top-10 check this round.", bot["mode"])
-            continue
+        # One RPC client per network for this pass (tuning build
+        # 2026-11-15): mainnet mints read through the mainnet RPC,
+        # devnet watchlist mints through the devnet RPC. The old
+        # code read every mint through cfg.rpc_url (devnet), which
+        # cannot serve mainnet mints at all.
+        rpc_cache: dict = {}
         for coin, pos in list(positions.items()):
             row = db.execute(
                 "SELECT last_checked_at FROM scanner_top10 "
@@ -1138,12 +1869,23 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
                 last_ts = _parse_scan_time(row["last_checked_at"])
                 if last_ts is not None and now_ts - last_ts < interval:
                     continue
+            try:
+                client = _top10_client_for_mint(
+                    cfg, coin, rpc_factory, rpc_cache)
+            except Exception:
+                _log_top10_skip_throttled(
+                    db, bot["user_id"], bot, coin,
+                    f"Silent bot '{bot['name']}': top-10 watch "
+                    f"unavailable — no top-10 check this round.",
+                    bot["mode"], now_ts)
+                continue
             total = top10_total(client, coin)
             if total is None:
-                _log(db, bot["user_id"], "silent_skip",
-                     f"Silent bot '{bot['name']}': top-10 watch "
-                     f"unavailable for {coin} — position left alone "
-                     f"this round.", bot["mode"])
+                _log_top10_skip_throttled(
+                    db, bot["user_id"], bot, coin,
+                    f"Silent bot '{bot['name']}': top-10 watch "
+                    f"unavailable for {coin} — position left alone "
+                    f"this round.", bot["mode"], now_ts)
                 continue
             try:
                 supply = int(client.get_token_supply(coin))
@@ -1224,6 +1966,107 @@ def top10_watch_loop(db_path: str, cfg: Config,
         finally:
             db.close()
         time.sleep(15)
+
+
+def _on_live_tick(coin_id: str, price: float, now: float) -> None:
+    """Live-feed tick listener (tuning build 2026-11-15): mark the
+    mint dirty and wake the fast-exit thread. Fast and never
+    raising — it runs on the feed's poller thread, so it never
+    sells inline and never blocks a poll."""
+    with _TICK_DIRTY_LOCK:
+        _TICK_DIRTY_MINTS.add(coin_id)
+    _TICK_EVENT.set()
+
+
+def _fast_exit_once(db, cfg, feed, rpc_factory=None,
+                    real_executor=None) -> list:
+    """One fast-exit pass over the mints dirtied by live-feed ticks
+    since the last pass: for every open position in a dirtied mint
+    (scanner + signals kinds — Trenches v2 owns trenches exits),
+    check the hard exits (rug sell, stop / breakeven stop, trailing
+    stop) at the tick price and sell at once when one fires. The
+    loop is the backstop: if this thread misses a tick, the next
+    loop pass (30s) still fires the same exit through the same
+    shared helper. Returns the actions taken."""
+    actions: list = []
+    with _TICK_DIRTY_LOCK:
+        mints = sorted(_TICK_DIRTY_MINTS)
+        _TICK_DIRTY_MINTS.clear()
+    if not mints:
+        return actions
+    now_ts = datetime.now(timezone.utc).timestamp()
+    rpc_factory = rpc_factory or SolanaRpcClient
+    real_executor = real_executor or default_real_executor
+    for mint in mints:
+        try:
+            tick = feed.snapshot([mint]).get(mint) if feed else None
+        except Exception:
+            tick = None
+        if not tick or tick.get("stale"):
+            continue
+        try:
+            price = float(tick["price"])
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        bots = db.execute(
+            "SELECT * FROM bots WHERE silent = 1").fetchall()
+        for bot in bots:
+            rules, error = load_rules(bot)
+            if rules is None or error is not None:
+                continue
+            if rules["kind"] not in ("scanner", "signals"):
+                continue
+            pos = _positions(db, bot["id"]).get(mint)
+            if not pos:
+                continue
+            rug = rules.get("rug_sell")
+            if rug:
+                reason = _rug_reason(rug, rules["kind"], mint, price,
+                                     pos, None, now_ts)
+                if reason:
+                    _sell_position(db, cfg, bot, mint, price, reason,
+                                   rpc_factory, real_executor, actions,
+                                   feed=feed)
+                    continue
+            avg_price = float(pos["avg_price"])
+            peak = pos["peak_price"]
+            peak = float(peak) if peak is not None else avg_price
+            hard = _hard_exit_reason(float(bot["stop_loss_pct"]),
+                                     float(rules["trailing_stop_pct"]),
+                                     rules["kind"], avg_price, peak,
+                                     price)
+            if hard:
+                _sell_position(db, cfg, bot, mint, price, hard,
+                               rpc_factory, real_executor, actions,
+                               feed=feed)
+    return actions
+
+
+def _fast_exit_loop(db_path: str, cfg, feed, rpc_factory=None,
+                    real_executor=None) -> None:
+    """The tick-driven fast-exit thread, forever: wake on a live-feed
+    tick (or every 5 seconds as a fallback), then check the dirtied
+    mints' open positions for hard exits. Opens a fresh DB connection
+    per wake. A failed wake is logged and the next one still runs —
+    the loop backstop covers any miss."""
+    while True:
+        _TICK_EVENT.wait(timeout=5.0)
+        _TICK_EVENT.clear()
+        db = init_db(db_path)
+        try:
+            actions = _fast_exit_once(db, cfg, feed, rpc_factory,
+                                      real_executor)
+        except Exception as exc:
+            print(f"[fast-exit] pass failed: {exc}", flush=True)
+            actions = []
+        finally:
+            db.close()
+        for action in actions:
+            print(f"[fast-exit] {action['action']}:"
+                  f"{action.get('coin', '')} "
+                  f"({action.get('reason', '')})", flush=True)
 
 
 def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
@@ -1398,6 +2241,30 @@ def loop_forever(db_path: str, cfg: Config, interval: int | None = None,
                     daemon=True, name="top10-watch").start()
                 print("[top10-watch] background watch started "
                       "(every 15s)", flush=True)
+        # Tick-driven fast exits (tuning build 2026-11-15): the live
+        # feed's ticks wake a fast-exit thread that sells a position
+        # the moment a tick crosses its stop / trailing stop / rug
+        # line, instead of waiting for the next 30-second loop pass.
+        # The loop stays as the backstop. Started once per process,
+        # only when a live feed is attached.
+        global _FAST_EXIT_STARTED
+        with _FAST_EXIT_LOCK:
+            if not _FAST_EXIT_STARTED and feed is not None:
+                listener_ok = True
+                try:
+                    feed.set_tick_listener(_on_live_tick)
+                except Exception:
+                    listener_ok = False
+                if listener_ok:
+                    _FAST_EXIT_STARTED = True
+                    threading.Thread(
+                        target=_fast_exit_loop,
+                        args=(db_path, cfg, feed),
+                        kwargs={"rpc_factory": rpc_factory,
+                                "real_executor": real_executor},
+                        daemon=True, name="fast-exit").start()
+                    print("[fast-exit] tick-driven exits started (5s)",
+                          flush=True)
     while True:
         db = init_db(db_path)
         try:

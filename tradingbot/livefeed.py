@@ -110,6 +110,14 @@ class LiveFeed:
         self._pending: dict = {}
         # mint -> subscriber count (browsers watching it).
         self._mint_subs: dict = {}
+        # Optional tick listener: set by the silent loop so a tick
+        # that crosses a stop can trigger the sell path at once
+        # (tick-driven exits, tuning build 2026-11-15). The
+        # listener is called AFTER an accepted tick is stored, OUTSIDE
+        # the store lock, and never raises into the feed — a listener
+        # failure is logged and the tick still stands. Unset by
+        # default: the feed works exactly as before without it.
+        self._tick_listener = None
         # coin_id -> deque of (epoch_seconds, price): every ACCEPTED
         # tick, oldest first, capped at the last ~2,000 per coin
         # (about 3 hours at the 5-second mint poll). Rejected ticks
@@ -203,7 +211,26 @@ class LiveFeed:
                 history = deque(maxlen=2000)
                 self._history[coin_id] = history
             history.append((now, price))
-            return True
+            accepted = True
+        listener = self._tick_listener
+        if accepted and listener is not None:
+            # Outside the lock, never raising into the feed: the
+            # listener (the silent loop's fast-exit path) gets the
+            # tick the moment it lands.
+            try:
+                listener(coin_id, price, now)
+            except Exception as exc:  # never kill the feed thread
+                log.warning("[live-feed] tick listener failed for %s: %s",
+                            coin_id, exc)
+        return accepted
+
+    def set_tick_listener(self, callback) -> None:
+        """Register (or clear, with None) the tick listener: called
+        with (coin_id, price, now_epoch) for every ACCEPTED tick.
+        Rejected ticks never reach it. The callback must be fast
+        and must never raise — it runs on the feed's poller thread,
+        so it should hand the tick to a worker, not sell inline."""
+        self._tick_listener = callback
 
     # --- reads ------------------------------------------------------------
     def _tick_dict(self, tick: dict, now: float) -> dict:

@@ -16,8 +16,9 @@ from unittest import mock
 import tradingbot.routes as routes
 from helpers import csrf, login, make_client, signup
 from tradingbot.assistant import parse_message
-from tradingbot.rules import (load_rules, scanner_ruleset, summarize_rules,
-                              trenches_ruleset, validate_ruleset)
+from tradingbot.rules import (clyde_ruleset, load_rules, scanner_ruleset,
+                              summarize_rules, trenches_ruleset,
+                              validate_ruleset)
 from tradingbot.scanner import BUY_FILTER_DEFAULT, passes_buy_filter
 from tradingbot.silent_loop import run_once
 
@@ -140,10 +141,16 @@ class TestBuyFilterUnit(unittest.TestCase):
 
 class TestBuyFilterValidation(unittest.TestCase):
     def test_presets_carry_filter_defaults(self):
-        for rules in (trenches_ruleset(), scanner_ruleset()):
+        # Trenches keeps the shared $1,000 floor; Scanner/Clyde
+        # carry the tightened $5,000 floor (tuning build 2026-11-15).
+        cleaned, err = validate_ruleset(trenches_ruleset())
+        self.assertIsNone(err)
+        self.assertEqual(cleaned["buy_filter"], BUY_FILTER_DEFAULT)
+        for rules in (scanner_ruleset(), clyde_ruleset()):
             cleaned, err = validate_ruleset(rules)
             self.assertIsNone(err)
-            self.assertEqual(cleaned["buy_filter"], BUY_FILTER_DEFAULT)
+            self.assertEqual(
+                cleaned["buy_filter"]["min_volume_5m_usd"], 5000.0)
 
     def test_old_rules_without_filter_get_defaults(self):
         rules = trenches_ruleset()

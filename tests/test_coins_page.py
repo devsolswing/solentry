@@ -320,8 +320,9 @@ class TestCoinSearch(CoinsPageBase):
             charts_mod._search_cache.clear()
             data = self._search(GATE)
         entry = data["results"][0]
-        # $10 at the mocked $0.0000005 price: 20,000,000 GATE held.
-        self.assertAlmostEqual(entry["held"], 20_000_000.0, places=3)
+        # $10 at the mocked $0.0000005 price: 20,000,000/1.01 GATE held
+        # (the 1% buy haircut).
+        self.assertAlmostEqual(entry["held"], 20_000_000.0 / 1.01, places=3)
 
     def test_search_nonsense_returns_nothing_invented(self):
         with mock.patch.object(charts_mod, "_default_get",
@@ -466,14 +467,15 @@ class TestQuickTradeAmounts(CoinsPageBase):
     def test_sell_by_usd_amount(self):
         self._choose_mode("paper")
         self._buy_gate()
-        self.assertAlmostEqual(self._holding(GATE), 20_000_000.0,
+        self.assertAlmostEqual(self._holding(GATE), 20_000_000.0 / 1.01,
                                places=3)
         resp = self.client.post(f"/coins/{GATE}/sell", data={
             "csrf_token": csrf(self.client, f"/coins/{GATE}"),
             "amount_usd": "5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertAlmostEqual(self._holding(GATE), 10_000_000.0,
+        self.assertAlmostEqual(self._holding(GATE),
+                               20_000_000.0 / 1.01 - 10_000_000.0,
                                places=3)
 
     def test_sell_by_token_amount_still_works(self):
@@ -484,8 +486,8 @@ class TestQuickTradeAmounts(CoinsPageBase):
             "amount": "0.5"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
-        self.assertAlmostEqual(self._holding(GATE), 19_999_999.5,
-                               places=3)
+        self.assertAlmostEqual(self._holding(GATE),
+                               20_000_000.0 / 1.01 - 0.5, places=3)
 
     def test_buy_tokens_without_price_refuses_plainly(self):
         self._choose_mode("paper")

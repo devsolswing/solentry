@@ -547,20 +547,22 @@ class TestAutoAdjust(BuilderBotBase):
                          110.0, pnl_usd=10.0, mode="paper",
                          now=f"2026-01-01T00:{10 + i:02d}:00Z")
 
-    def test_losing_bot_tightens_stop_loss(self):
+    def test_losing_bot_tightens_threshold_first(self):
+        # Auto-tighten order (tuning build 2026-11-15): the buy
+        # threshold rises FIRST, buy size second, stop loss last.
         bot_id = self._bot()
         self._losing_ledger(bot_id)
         bot = self.db.execute("SELECT * FROM bots WHERE id = ?",
                               (bot_id,)).fetchone()
         adj = bb.review_bot(self.db, bot, self.enc_key)
         self.assertIsNotNone(adj)
-        self.assertEqual(adj["field"], "stop_loss_pct")
-        self.assertEqual(adj["old_value"], 7.0)
-        self.assertEqual(adj["new_value"], 6.0)
+        self.assertEqual(adj["field"], "buy.threshold_pct")
+        self.assertEqual(adj["old_value"], 5.0)
+        self.assertEqual(adj["new_value"], 5.5)
         bot = self.db.execute("SELECT * FROM bots WHERE id = ?",
                               (bot_id,)).fetchone()
-        self.assertEqual(bot["stop_loss_pct"], 6.0)
-        # Buy size never widened, threshold never lowered.
+        # Stop loss and buy size untouched by this pass.
+        self.assertEqual(bot["stop_loss_pct"], 7.0)
         self.assertEqual(bot["buy_size_pct"], 20.0)
         # The reason is encrypted at rest, readable with the key.
         row = self.db.execute(
@@ -569,6 +571,43 @@ class TestAutoAdjust(BuilderBotBase):
         self.assertNotIn("losses", row["reason"])
         plain = decrypt_secret(row["reason"], self.enc_key).decode()
         self.assertIn("6 losses", plain)
+
+    def test_stop_loss_tightens_last(self):
+        # Threshold at the cap and buy size at the floor: only the
+        # stop loss is left, and it stops at the 4% floor.
+        bot_id = self._bot(stop_loss=7.0, buy_size=5.0, threshold=15.0)
+        self._losing_ledger(bot_id)
+        bot = self.db.execute("SELECT * FROM bots WHERE id = ?",
+                              (bot_id,)).fetchone()
+        adj = bb.review_bot(self.db, bot, self.enc_key)
+        self.assertIsNotNone(adj)
+        self.assertEqual(adj["field"], "stop_loss_pct")
+        self.assertEqual(adj["old_value"], 7.0)
+        self.assertEqual(adj["new_value"], 6.0)
+
+    def test_stop_loss_never_below_4pct_floor(self):
+        bot_id = self._bot(stop_loss=4.0, buy_size=5.0, threshold=15.0)
+        self._losing_ledger(bot_id)
+        bot = self.db.execute("SELECT * FROM bots WHERE id = ?",
+                              (bot_id,)).fetchone()
+        self.assertIsNone(bb.review_bot(self.db, bot, self.enc_key))
+
+    def test_net_positive_bot_not_tightened(self):
+        # Win rate 25% (2 wins / 8 trades) but net +$40: the old
+        # rule tightened this bot on win rate alone — the
+        # net-negative gate must not.
+        bot_id = self._bot()
+        for i in range(6):
+            record_trade(self.db, 1, bot_id, f"L{i}", "sell", 1.0, 90.0,
+                         90.0, pnl_usd=-10.0, mode="paper",
+                         now=f"2026-01-01T00:{i:02d}:00Z")
+        for i in range(2):
+            record_trade(self.db, 1, bot_id, f"W{i}", "sell", 1.0, 110.0,
+                         110.0, pnl_usd=50.0, mode="paper",
+                         now=f"2026-01-01T00:{10 + i:02d}:00Z")
+        bot = self.db.execute("SELECT * FROM bots WHERE id = ?",
+                              (bot_id,)).fetchone()
+        self.assertIsNone(bb.review_bot(self.db, bot, self.enc_key))
 
     def test_cooldown_blocks_second_adjustment(self):
         bot_id = self._bot()

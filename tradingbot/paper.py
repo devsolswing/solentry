@@ -24,6 +24,20 @@ class InsufficientHolding(ValueError):
     pass
 
 
+# Paper friction haircut (tuning build 2026-11-15, from the
+# report): a paper fill is charged 1% on the buy leg and 1% on the
+# sell leg, so paper predicts real trading instead of a frictionless
+# fantasy. This is a MODEL FLOOR, not the measured number — the
+# measured devnet round-trip friction was 38-77% of buy value,
+# mostly bonding-curve impact on tiny curves, and mainnet curves
+# are ~100x larger, so 1% per leg is a conservative stand-in until
+# friction is measured per coin (see friction-measurement-2026-11-14
+# and the friction-logging build). It lowers displayed paper P&L
+# by ~2% per round trip versus the old no-haircut fills.
+PAPER_BUY_HAIRCUT_PCT = 1.0
+PAPER_SELL_HAIRCUT_PCT = 1.0
+
+
 def paper_cash(db: sqlite3.Connection, user_id: int) -> float:
     row = db.execute(
         "SELECT cash_usd FROM paper_portfolio WHERE user_id = ?",
@@ -101,14 +115,19 @@ def paper_buy(db: sqlite3.Connection, user_id: int, coin: str, usd: float,
 
     No fee (removed 2026-11-12, James): the full `usd` buys coins
     — cash falls by the full usd and the coins bought are worth
-    usd at the fill price.
+    usd at the fill price. The fill price is the mark price plus
+    the 1% buy haircut (tuning build 2026-11-15): paper pays for
+    the spread/slippage a real fill pays, so a paper buy at $1.00
+    fills at $1.01 and buys fewer coins than the mark price alone
+    would give.
     """
     if usd <= 0:
         raise ValueError("Amount must be more than 0.")
     cash = paper_cash(db, user_id)
     if usd > cash:
         raise InsufficientCash("Not enough paper cash.")
-    amount = usd / price
+    fill_price = price * (1.0 + PAPER_BUY_HAIRCUT_PCT / 100.0)
+    amount = usd / fill_price
     db.execute("UPDATE paper_portfolio SET cash_usd = cash_usd - ?, "
                "updated_at = ? WHERE user_id = ?",
                (usd, now, user_id))
@@ -125,20 +144,20 @@ def paper_buy(db: sqlite3.Connection, user_id: int, coin: str, usd: float,
     else:
         db.execute("INSERT INTO paper_holdings (user_id, coin_id, amount, "
                    "avg_price) VALUES (?, ?, ?, ?)",
-                   (user_id, coin, amount, price))
+                   (user_id, coin, amount, fill_price))
     signals = signals or {}
     db.execute("INSERT INTO paper_trades (user_id, coin_id, side, amount, "
                "price, total_usd, created_at, bot_id, buy_m5_pct, "
                "buy_volume_5m_usd, buy_buys_5m, buy_sells_5m, buy_regime) "
                "VALUES (?, ?, 'buy', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-               (user_id, coin, amount, price, usd, now, bot_id,
+               (user_id, coin, amount, fill_price, usd, now, bot_id,
                 signals.get("m5_pct"), signals.get("volume_5m_usd"),
                 signals.get("buys_5m"), signals.get("sells_5m"),
                 signals.get("regime")))
     # Trade ledger (builderBot): every fill gets its own 8-digit
     # trade ID, so a bot's win/loss record can be reviewed.
     record_trade(db, user_id, bot_id, coin, "buy", amount,
-                 price, usd, mode="paper", now=now)
+                 fill_price, usd, mode="paper", now=now)
     db.commit()
     return amount, usd
 
@@ -156,7 +175,10 @@ def paper_sell(db: sqlite3.Connection, user_id: int, coin: str,
     sells and for sells that predate the recording.
 
     No fee (removed 2026-11-12, James): the cash received is the
-    gross proceeds, and the realised P&L is gross of any fee.
+    gross proceeds, and the realised P&L is gross of any fee. The
+    fill price is the mark price minus the 1% sell haircut (tuning
+    build 2026-11-15): a paper sell at $1.00 fills at $0.99, so a
+    round trip costs ~2% versus the old frictionless fills.
     """
     if amount <= 0:
         raise ValueError("Amount must be more than 0.")
@@ -167,7 +189,8 @@ def paper_sell(db: sqlite3.Connection, user_id: int, coin: str,
     if not row or row["amount"] < amount:
         raise InsufficientHolding("You don't hold that much.")
     avg_price = float(row["avg_price"]) if row["avg_price"] else 0.0
-    gross_usd = amount * price
+    fill_price = price * (1.0 - PAPER_SELL_HAIRCUT_PCT / 100.0)
+    gross_usd = amount * fill_price
     usd = gross_usd
     pnl_usd = usd - amount * avg_price
     remaining = row["amount"] - amount
@@ -184,12 +207,12 @@ def paper_sell(db: sqlite3.Connection, user_id: int, coin: str,
     db.execute("INSERT INTO paper_trades (user_id, coin_id, side, amount, "
                "price, total_usd, created_at, bot_id, exit_reason) "
                "VALUES (?, ?, 'sell', ?, ?, ?, ?, ?, ?)",
-               (user_id, coin, amount, price, gross_usd, now, bot_id,
+               (user_id, coin, amount, fill_price, gross_usd, now, bot_id,
                 exit_reason))
     # Trade ledger (builderBot): the sell's P&L vs its average cost
     # is what decides win vs loss for the bot.
     record_trade(db, user_id, bot_id, coin, "sell", amount,
-                 price, gross_usd, pnl_usd=pnl_usd,
+                 fill_price, gross_usd, pnl_usd=pnl_usd,
                  exit_reason=exit_reason, mode="paper",
                  now=now)
     db.commit()

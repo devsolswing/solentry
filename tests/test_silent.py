@@ -196,14 +196,15 @@ class TestSilentLoop(SilentBase):
         act = outcomes[0]["actions"][0]
         self.assertEqual(act["action"], "buy")
         self.assertEqual(act["usd"], 20.0)  # 20% of $100 bankroll
-        # $20 buys $20 of coins: no fee (removed 2026-11-12).
-        self.assertAlmostEqual(act["amount"], 0.2, places=9)
+        # $20 buys at the 1% paper haircut: the fill is $101, so
+        # 20/101 coins, and the cost basis is the fill price.
+        self.assertAlmostEqual(act["amount"], 20.0 / 101.0, places=9)
         pos = self.db.execute(
             "SELECT * FROM bot_positions WHERE bot_id = ?",
             (bot_id,)).fetchone()
         self.assertIsNotNone(pos)
-        self.assertAlmostEqual(pos["amount"], 0.2, places=9)
-        self.assertEqual(pos["avg_price"], 100.0)
+        self.assertAlmostEqual(pos["amount"], 20.0 / 101.0, places=9)
+        self.assertEqual(pos["avg_price"], 101.0)
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
         self.assertEqual(cash, 80.0)
@@ -252,14 +253,14 @@ class TestSilentLoop(SilentBase):
         self.assertEqual(len(acts), 1)
         self.assertEqual(acts[0]["action"], "sell")
         self.assertEqual(acts[0]["reason"], "stop_loss")
-        # 10 SOL at $90: gross $900, no fee (removed 2026-11-12).
-        self.assertAlmostEqual(acts[0]["usd"], 900.0, places=9)
+        # 10 SOL at $90: gross $900, minus the 1% paper haircut.
+        self.assertAlmostEqual(acts[0]["usd"], 891.0, places=9)
         self.assertIsNone(self.db.execute(
             "SELECT id FROM bot_positions WHERE bot_id = ?",
             (bot_id,)).fetchone())
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        self.assertAlmostEqual(cash, 9900.0, places=9)
+        self.assertAlmostEqual(cash, 9891.0, places=9)
         self.assertEqual(len(self._activity("silent_stop_loss")), 1)
 
     def test_sell_signal_sells_position(self):

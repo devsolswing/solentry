@@ -68,7 +68,9 @@ LOSING_MAX_WIN_RATE = 0.40
 ADJUST_COOLDOWN_SECONDS = 24 * 3600
 # Tightening steps (one per review, in priority order).
 STOP_LOSS_STEP_PCT = 1.0
-STOP_LOSS_FLOOR_PCT = 3.0
+# Tuning build 2026-11-15: the stop-loss floor is 4%, not 3% —
+# tightening must never push a bot's stop below 4%.
+STOP_LOSS_FLOOR_PCT = 4.0
 THRESHOLD_STEP_PCT = 0.5
 THRESHOLD_CAP_PCT = 15.0
 BUY_SIZE_STEP_PCT = 5.0
@@ -910,11 +912,18 @@ def review_bot(db, bot, enc_key: bytes):
     """Review one bot's trade ledger and tighten its rules when it is
     losing — at most one small step, at most once per 24 hours.
 
-    Losing = at least 5 closed trades and a win rate of 40% or less.
-    Tighten-only, in priority order: stop loss down 1% (floor 3%),
-    then buy-signal threshold up 0.5% (cap 15%), then buy size down
-    5% (floor 5%). Returns the adjustment dict, or None when nothing
-    changed. Never raises — a review failure must not break the loop.
+    Losing = at least 5 closed trades, a win rate of 40% or less,
+    AND a negative net P&L over those trades. The net-negative gate
+    is the 2026-11-13 lesson, proven live: the old rule tightened a
+    bot on win rate alone even when its last 5 trades netted +$5.89
+    — a losing win rate on winning money is not a losing bot.
+    Tighten-only, in priority order: buy-signal threshold up 0.5%
+    (cap 15%), then buy size down 5% (floor 5%), then stop loss
+    down 1% (floor 4%) LAST — the stop is the bot's last line of
+    defence, so it is tightened only after the entry and size
+    steps are exhausted (tuning build 2026-11-15). Returns the
+    adjustment dict, or None when nothing changed. Never raises —
+    a review failure must not break the loop.
     """
     try:
         return _review_bot(db, bot, enc_key)
@@ -929,6 +938,13 @@ def _review_bot(db, bot, enc_key: bytes):
     win_rate = summary["win_rate"]
     if win_rate is None or win_rate > LOSING_MAX_WIN_RATE:
         return None
+    # Net-negative gate (tuning build 2026-11-15): a bot that is
+    # net positive over its closed trades is NOT tightened, however
+    # low its win rate — tightening a profitable bot on win rate
+    # alone is the proven doom loop (4 losses in 5 trades that
+    # netted +$5.89 still tightened the stop 5% -> 4%).
+    if summary["net_pnl_usd"] is None or summary["net_pnl_usd"] >= 0:
+        return None
     last = db.execute(
         "SELECT created_at FROM builderbot_adjustments WHERE bot_id = ? "
         "ORDER BY id DESC LIMIT 1", (bot["id"],)).fetchone()
@@ -942,39 +958,41 @@ def _review_bot(db, bot, enc_key: bytes):
               f"{summary['trades']} closed trades (win rate "
               f"{win_rate:.0%}, net "
               f"${summary['net_pnl_usd']:.2f}) — tightening one step.")
+    rules, error = load_rules(bot)
+    threshold = None
+    if rules is not None and error is None:
+        threshold = float(rules["buy"]["threshold_pct"])
+    buy_size = float(bot["buy_size_pct"])
     stop_loss = float(bot["stop_loss_pct"])
-    if stop_loss > STOP_LOSS_FLOOR_PCT:
+    # Reordered (tuning build 2026-11-15): threshold first, buy
+    # size second, stop loss LAST. The old order tightened the stop
+    # first, which only made the next loss arrive sooner.
+    if threshold is not None and threshold < THRESHOLD_CAP_PCT:
+        new_value = min(THRESHOLD_CAP_PCT,
+                        threshold + THRESHOLD_STEP_PCT)
+        rules["buy"]["threshold_pct"] = new_value
+        cleaned, error = validate_ruleset(rules, bot=bot)
+        if error is not None:
+            return None
+        db.execute("UPDATE bots SET rules_json = ? WHERE id = ?",
+                   (json.dumps(cleaned), bot["id"]))
+        field = "buy.threshold_pct"
+        old_value = threshold
+    elif buy_size > BUY_SIZE_FLOOR_PCT:
+        new_value = max(BUY_SIZE_FLOOR_PCT,
+                        buy_size - BUY_SIZE_STEP_PCT)
+        db.execute("UPDATE bots SET buy_size_pct = ? WHERE id = ?",
+                   (new_value, bot["id"]))
+        field = "buy_size_pct"
+        old_value = buy_size
+    elif stop_loss > STOP_LOSS_FLOOR_PCT:
         new_value = max(STOP_LOSS_FLOOR_PCT, stop_loss - STOP_LOSS_STEP_PCT)
         db.execute("UPDATE bots SET stop_loss_pct = ? WHERE id = ?",
                    (new_value, bot["id"]))
         field = "stop_loss_pct"
         old_value = stop_loss
     else:
-        rules, error = load_rules(bot)
-        threshold = None
-        if rules is not None and error is None:
-            threshold = float(rules["buy"]["threshold_pct"])
-        buy_size = float(bot["buy_size_pct"])
-        if threshold is not None and threshold < THRESHOLD_CAP_PCT:
-            new_value = min(THRESHOLD_CAP_PCT,
-                            threshold + THRESHOLD_STEP_PCT)
-            rules["buy"]["threshold_pct"] = new_value
-            cleaned, error = validate_ruleset(rules, bot=bot)
-            if error is not None:
-                return None
-            db.execute("UPDATE bots SET rules_json = ? WHERE id = ?",
-                       (json.dumps(cleaned), bot["id"]))
-            field = "buy.threshold_pct"
-            old_value = threshold
-        elif buy_size > BUY_SIZE_FLOOR_PCT:
-            new_value = max(BUY_SIZE_FLOOR_PCT,
-                            buy_size - BUY_SIZE_STEP_PCT)
-            db.execute("UPDATE bots SET buy_size_pct = ? WHERE id = ?",
-                       (new_value, bot["id"]))
-            field = "buy_size_pct"
-            old_value = buy_size
-        else:
-            return None
+        return None
     db.execute(
         "INSERT INTO builderbot_adjustments (bot_id, user_id, field, "
         "old_value, new_value, reason, created_at) "

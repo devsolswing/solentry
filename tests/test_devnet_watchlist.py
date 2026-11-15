@@ -68,6 +68,17 @@ class _FakeRpc:
     def get_balance_lamports(self, pubkey):
         return self._balance
 
+    def get_token_largest_accounts(self, mint):
+        # A clean coin for the pre-buy scam gate: top-10 owns 5%.
+        return [{"address": f"acct{i}", "amount": "5000000",
+                 "decimals": 6, "uiAmount": 0.0} for i in range(10)]
+
+    def get_token_supply(self, mint):
+        return 1_000_000_000
+
+    def get_mint_authorities(self, mint):
+        return (False, False)
+
 
 class _FailingRpc:
     def __init__(self, url):
@@ -500,6 +511,12 @@ class TestWatchlistLoop(unittest.TestCase):
         bot_id = self._insert_bot(scanner_ruleset())
         # Mark 200s old at $0.003; curve now $0.00324 (+8% in 3m).
         self._seed_mark(bot_id, GATE, 0.003, 200)
+        # First scan records the signal (2-scan confirmation).
+        self._run()
+        self.assertIsNone(self._position(bot_id, GATE))
+        self.db.execute("UPDATE bots SET last_scan_at = '' WHERE id = ?",
+                        (bot_id,))
+        self.db.commit()
         outcomes = self._run()
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertIsNotNone(self._position(bot_id, GATE))

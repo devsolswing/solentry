@@ -239,10 +239,10 @@ class TestWalletIsHomepage(HomeBase):
         self.assertIn("TEST", html)
         self.assertIn("holdings-row", html)
         self.assertIn("holdings-panel", html)
-        # $10 at the mocked $0.50 mint price buys 20 tokens: no fee
-        # (removed 2026-11-12), so 20.0000 TEST worth $10.00.
-        self.assertIn("20.0000 TEST", html)
-        self.assertIn("$10.00", html)
+        # $10 at the mocked $0.50 mint price buys 19.8020 TEST
+        # (1% buy haircut), worth $9.90.
+        self.assertIn("19.8020 TEST", html)
+        self.assertIn("$9.90", html)
         # 1-hour % (mocked +2.5%) on the row.
         self.assertIn("holdings-1h", html)
         self.assertIn("+2.50%", html)
@@ -410,7 +410,7 @@ class TestDetailTradingMint(HomeBase):
             "SELECT amount FROM paper_holdings WHERE coin_id = ?",
             (MINT,)).fetchone()
         self.assertIsNotNone(holding)
-        self.assertAlmostEqual(holding["amount"], 20.0, places=9)
+        self.assertAlmostEqual(holding["amount"], 20.0 / 1.01, places=9)
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
         self.assertAlmostEqual(cash, 100.0 - 10.0)
@@ -425,8 +425,9 @@ class TestDetailTradingMint(HomeBase):
         holding = self.db.execute(
             "SELECT amount FROM paper_holdings WHERE coin_id = ?",
             (MINT,)).fetchone()
-        # 0.5 SOL = $5 = 10 tokens sold, 10 left.
-        self.assertAlmostEqual(holding["amount"], 10.0, places=9)
+        # 0.5 SOL = $5 = 10 tokens sold, 19.8020 - 10 = 9.8020 left.
+        self.assertAlmostEqual(holding["amount"], 20.0 / 1.01 - 10.0,
+                               places=9)
 
     def test_paper_sell_all_sells_whole_holding(self):
         self._buy_mint()
@@ -440,9 +441,10 @@ class TestDetailTradingMint(HomeBase):
             (MINT,)).fetchone())
         cash = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        # Sell all 20 tokens at $0.50: $10.00, no fee (removed
-        # 2026-11-12), on top of the $90 cash left after the buy.
-        self.assertAlmostEqual(cash, 100.0, places=6)
+        # Sell all 19.8020 tokens at $0.50: $9.80 (the 1% sell
+        # haircut), on top of the $90 cash left after the buy.
+        self.assertAlmostEqual(cash, 90.0 + 20.0 / 1.01 * 0.5 * 0.99,
+                               places=6)
 
     def test_sell_all_with_nothing_held_refuses_plainly(self):
         resp = self.client.post(f"/coins/{MINT}/sell", data={

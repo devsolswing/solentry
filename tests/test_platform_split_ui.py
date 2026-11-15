@@ -229,8 +229,9 @@ class TestModeChooser(SplitBase):
 class TestModeSeparation(SplitBase):
     def setUp(self):
         super().setUp()
-        # $10 of the graduated mint at $0.002 = 5,000 tokens;
-        # $90.00 paper cash remains, portfolio total $100.00.
+        # $10 of the graduated mint at $0.002 = 4,950.495 tokens
+        # (the 1% buy haircut); $90.00 paper cash remains,
+        # portfolio total $99.90.
         self._paper_buy(GRAD_MINT, "10")
         self.paper_bot = self._create_bot("Luna", mode="paper")
         self.real_bot = self._create_bot("Nova", mode="real")
@@ -240,7 +241,7 @@ class TestModeSeparation(SplitBase):
         dash = self._html("/dashboard")
         # The paper bot and the paper holding must not leak into real.
         self.assertNotIn("Luna", dash)
-        self.assertNotIn("5000.0000", dash)
+        self.assertNotIn("4950.4950", dash)
         self.assertNotIn(GRAD_MINT, dash)
         self.assertIn("Nova", self._html("/bots"))
         self.assertNotIn("Luna", self._html("/bots"))
@@ -259,7 +260,7 @@ class TestModeSeparation(SplitBase):
         # (the old /pnl page, where this was checked, is gone).
         home = self._html("/wallet")
         self.assertIn("Demo trading (paper)", home)
-        self.assertIn("$100.00 CAD", home)
+        self.assertIn("$99.90 CAD", home)
 
     def test_activity_rows_are_mode_tagged_and_filtered(self):
         rows = self.db.execute(
@@ -455,8 +456,8 @@ class TestCoinPopup(SplitBase):
             "SELECT * FROM paper_holdings WHERE coin_id = ?",
             (GRAD_MINT,)).fetchone()
         self.assertIsNotNone(row)
-        # $10 at the $0.002 feed price = 5,000 tokens.
-        self.assertAlmostEqual(row["amount"], 5000.0)
+        # $10 at the $0.002 feed price = 5,000/1.01 tokens.
+        self.assertAlmostEqual(row["amount"], 5000.0 / 1.01)
 
     def test_paper_buy_refusal_is_a_confirmation_not_a_fill(self):
         resp = self.client.post(f"/coins/{GRAD_MINT}/buy", data={

@@ -201,8 +201,8 @@ class TestHomeLiftLayout(HomeLiftBase):
         self.assertIn("(GATE)", html)
         # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
         # (removed 2026-11-12), leaves 1,000.0000 GATE worth $10.00.
-        self.assertIn("1,000.0000 GATE", html)
-        self.assertIn("$10.00", html)
+        self.assertIn("990.0990 GATE", html)
+        self.assertIn("$9.90", html)
         self.assertIn("holdings-1h", html)
         self.assertIn("+2.50%", html)
 

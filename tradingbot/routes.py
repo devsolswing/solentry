@@ -57,8 +57,9 @@ from .coin_meta import ensure_coin_meta, stored_display
 from .config import Config
 from .executor import execute_real_trade, is_curve_complete, send_and_confirm
 from .jupiter_executor import execute_jupiter_swap
-from .paper import (InsufficientCash, InsufficientHolding,
-                    paper_buy as ledger_buy, paper_sell as ledger_sell)
+from .paper import (PAPER_BUY_HAIRCUT_PCT, InsufficientCash,
+                    InsufficientHolding, paper_buy as ledger_buy,
+                    paper_sell as ledger_sell)
 from .prices import clear_price_cache, get_prices
 from .builderbot import list_adjustments
 from .home_holdings import (enrich_row, fetch_chain_token_balances,
@@ -3052,7 +3053,11 @@ def register_routes(app: Flask) -> None:
                         ["Price unavailable right now — the buy needs "
                          "a current price to convert tokens."],
                         False, coin_id_resolved, label)
-                usd = tokens * price
+                # A token-amount buy must deliver exactly the tokens
+                # asked for: the USD is grossed up by the 1% buy
+                # haircut, so the fill (mark x 1.01) returns `tokens`.
+                usd = tokens * price * (
+                    1.0 + PAPER_BUY_HAIRCUT_PCT / 100.0)
             else:
                 try:
                     usd = float(request.form.get("usd") or 0)
@@ -4096,7 +4101,7 @@ def register_routes(app: Flask) -> None:
         clyde_preset = next(p for p in presets if p["key"] == "clyde")
         clyde_preset.update({
             "strategy": "bold",
-            "buy_size_pct": 20,
+            "buy_size_pct": 15,
             "stop_loss_pct": int(CLYDE_STOP_LOSS_PCT),
             "max_open_trades": 3,
         })
@@ -4279,7 +4284,7 @@ def register_routes(app: Flask) -> None:
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform) "
-            "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', 15, 7, 'paper', 0, 3, ?, ?, ?, "
             "'pump.fun')",
             (user["id"], SCANNER_PRESET_NAME, hash_token(token),
              SCANNER_CATEGORY, json.dumps(scanner_ruleset())))
@@ -4301,7 +4306,7 @@ def register_routes(app: Flask) -> None:
         Paper mode, silent off. One per user — if a Clyde bot
         already exists, go to it instead of making a duplicate.
         Stop loss 4% (Clyde's hard number, on the bot row), buy
-        size 20% and max 3 open trades (the preset defaults).
+        size 15% and max 3 open trades (the preset defaults).
         """
         _csrf_check()
         user = _current_user(app)
@@ -4318,7 +4323,7 @@ def register_routes(app: Flask) -> None:
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform) "
-            "VALUES (?, ?, 'bold', '[]', 20, ?, 'paper', 0, 3, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', 15, ?, 'paper', 0, 3, ?, ?, ?, "
             "'pump.fun')",
             (user["id"], CLYDE_PRESET_NAME, CLYDE_STOP_LOSS_PCT,
              hash_token(token), CLYDE_CATEGORY,
@@ -4796,7 +4801,7 @@ def register_routes(app: Flask) -> None:
                     "buy_size_pct, stop_loss_pct, mode, silent, "
                     "max_open_trades, api_token_hash, category, "
                     "rules_json, platform) "
-                    "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, "
+                    "VALUES (?, ?, 'bold', '[]', 15, 7, 'paper', 0, 3, ?, "
                     "?, ?, 'pump.fun')",
                     (user["id"], SCANNER_PRESET_NAME, hash_token(token),
                      SCANNER_CATEGORY, json.dumps(cleaned)))

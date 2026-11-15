@@ -219,7 +219,7 @@ class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
             "SELECT amount FROM paper_holdings WHERE user_id = ? "
             "AND coin_id = ?", (self.user_id, MINT)
             ).fetchone()["amount"]
-        self.assertAlmostEqual(amount, 10.0 / 11.71, places=5)
+        self.assertAlmostEqual(amount, 10.0 / (11.71 * 1.01), places=5)
         self.assertNotAlmostEqual(amount, 5000.0, places=3)
 
     def test_paper_buy_falls_back_to_feed_when_quote_fails(self):
@@ -235,7 +235,7 @@ class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
             "SELECT amount FROM paper_holdings WHERE user_id = ? "
             "AND coin_id = ?", (self.user_id, MINT)
             ).fetchone()["amount"]
-        self.assertAlmostEqual(amount, 10.0 / 0.002, places=3)
+        self.assertAlmostEqual(amount, 10.0 / (0.002 * 1.01), places=3)
 
 
 class TestRealBuyDispatchByCurve(JupiterRoutesBase):

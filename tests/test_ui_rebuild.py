@@ -412,10 +412,10 @@ class TestHomePage(UiBase):
         self.assertIn("Gate", html)
         self.assertIn("(GATE)", html)
         self.assertIn("holdings-row", html)
-        # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
-        # (removed 2026-11-12), so 1,000.0000 GATE worth $10.00.
-        self.assertIn("1,000.0000 GATE", html)
-        self.assertIn("$10.00", html)
+        # $10 at the mocked $0.01 feed price buys 990.099 GATE
+        # (1% buy haircut), worth $9.90.
+        self.assertIn("990.0990 GATE", html)
+        self.assertIn("$9.90", html)
         self.assertNotIn("coin-pnl", html)
         self.assertNotIn("coin-change", html)
         self.assertIn(f"/coins/{GATE_MINT}/detail", html)

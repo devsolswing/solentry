@@ -112,8 +112,8 @@ class TestHomeCompactLayout(HomeMockupBase):
         self.assertIn("holdings-spark", html)
         self.assertIn(f'data-sparkline-coin="{GATE_MINT}"', html)
         self.assertIn("$0.0100", html)
-        self.assertIn("1,000.0000 GATE", html)
-        self.assertIn("$10.00", html)
+        self.assertIn("990.0990 GATE", html)
+        self.assertIn("$9.90", html)
         self.assertIn("holdings-1h", html)
         self.assertIn("+2.50%", html)
         # The name column takes the free space so the sparkline

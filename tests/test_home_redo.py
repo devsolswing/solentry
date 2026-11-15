@@ -240,10 +240,10 @@ class TestHoldingsHalfPanel(HomeRedoBase):
         self.assertNotIn("holdings-summary", html)
         self.assertIn("Gate", html)
         self.assertIn("(GATE)", html)
-        # 1 GATE bought at the mocked $10 price: no fee (removed 2026-11-12), leaves
-        # 1.0000 GATE worth $10.00.
-        self.assertIn("1.0000 GATE", html)
-        self.assertIn("$10.00", html)
+        # 1 GATE bought at the mocked $10 price: the 1% buy haircut
+        # leaves 0.9901 GATE worth $9.90.
+        self.assertIn("0.9901 GATE", html)
+        self.assertIn("$9.90", html)
         # Normal-size rows now carry the 1-hour % (mocked +2.5%)
         # next to the amount + value.
         self.assertIn("holdings-1h", html)

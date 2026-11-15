@@ -540,6 +540,36 @@ class TestRulesEngine(RulesEngineBase):
         # Signals bots price their mints from the trenches feed, not
         # the SOL-only price list: mock the feed's mint prices so
         # the test never hits live DexScreener.
+        #
+        # The 2-scan confirmation means the first scan only records
+        # the signal — run twice to buy. The pre-buy scam gate reads
+        # the top-10 share through the RPC, so serve Gate there (a
+        # clean coin: 5% top-10, authorities revoked) and seed its
+        # metadata so the gate never reaches live network.
+        self.db.execute(
+            "INSERT INTO coin_meta (mint, name, symbol, image_url, "
+            "source, fetched_at) VALUES (?, 'Gate', 'GATE', NULL, "
+            "'metaplex', '2026-01-01T00:00:00Z')", (GATE_MINT,))
+        self.db.commit()
+
+        class _GateRpc:
+            def __call__(self, url):
+                return self
+
+            def get_token_largest_accounts(self, mint):
+                return [{"address": f"acct{i}", "amount": "5000000",
+                         "decimals": 6, "uiAmount": 0.0}
+                        for i in range(10)]
+
+            def get_token_supply(self, mint):
+                return 1_000_000_000
+
+            def get_mint_authorities(self, mint):
+                return (False, False)
+
+            def get_balance_lamports(self, pubkey):
+                return 0
+
         with mock.patch.object(
                 silent_loop, "fetch_prices_for_mints",
                 return_value={GATE_MINT: 100.0}), \
@@ -547,7 +577,16 @@ class TestRulesEngine(RulesEngineBase):
                     silent_loop, "fetch_mint_24h_changes",
                     return_value={GATE_MINT: 2.5}):
             outcomes = run_once(self.db, self.cfg,
-                                price_fetcher=lambda: prices)
+                                price_fetcher=lambda: prices,
+                                rpc_factory=_GateRpc())
+            self.assertEqual(len(outcomes[0]["actions"]), 1)
+            self.assertEqual(outcomes[0]["actions"][0]["action"], "skip")
+            self.assertIn("signal not yet confirmed",
+                          outcomes[0]["actions"][0]["reason"])
+            self._reset_scan(bot_id)
+            outcomes = run_once(self.db, self.cfg,
+                                price_fetcher=lambda: prices,
+                                rpc_factory=_GateRpc())
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertIsNotNone(self._position(bot_id, GATE_MINT))
 

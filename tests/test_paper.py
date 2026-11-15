@@ -102,11 +102,12 @@ class TestPaper(unittest.TestCase):
         self.assertEqual(cash, 90.0)
         holding = db.execute("SELECT amount, avg_price FROM paper_holdings "
                              "WHERE coin_id = ?", (MINT,)).fetchone()
-        # $10 buys $10 of coins at $0.01: 1000 tokens. No fee
-        # (removed 2026-11-12), so cash falls by the full $10 and
-        # the cost basis stays $0.01 per token.
-        self.assertAlmostEqual(holding["amount"], 1000.0, places=9)
-        self.assertEqual(holding["avg_price"], MINT_PRICE)
+        # $10 buys at the 1% paper haircut: the fill is $0.0101, so
+        # 10/0.0101 = 990.099 tokens, and the cost basis is the fill
+        # price. Cash still falls by the full $10.
+        self.assertAlmostEqual(holding["amount"], 1000.0 / 1.01, places=9)
+        self.assertAlmostEqual(holding["avg_price"], MINT_PRICE * 1.01,
+                               places=9)
         trade = db.execute("SELECT * FROM paper_trades").fetchone()
         self.assertEqual(trade["side"], "buy")
         self.assertEqual(trade["total_usd"], 10.0)
@@ -127,13 +128,14 @@ class TestPaper(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Sold", resp.get_data(as_text=True))
         db = self.app.config["DB"]
-        # Sell 400 tokens at $0.01: gross $4.00, no fee (removed
-        # 2026-11-12), so cash is 90 + 4 = 94.0 and 600 tokens remain.
+        # Sell 400 tokens at $0.01: gross $4.00, minus the 1% paper
+        # haircut ($3.96), so cash is 90 + 3.96 = 93.96 and
+        # 990.099 - 400 = 590.099 tokens remain.
         self.assertEqual(db.execute("SELECT cash_usd FROM paper_portfolio"
-                                    ).fetchone()["cash_usd"], 94.0)
+                                    ).fetchone()["cash_usd"], 93.96)
         self.assertAlmostEqual(db.execute("SELECT amount FROM paper_holdings "
                                     "WHERE coin_id=?", (MINT,)).fetchone()["amount"],
-                         600.0, places=9)
+                         1000.0 / 1.01 - 400, places=9)
 
     def test_sell_more_than_held_rejected(self):
         self._buy(usd="10")
@@ -144,7 +146,7 @@ class TestPaper(unittest.TestCase):
         self.assertAlmostEqual(db.execute(
             "SELECT amount FROM paper_holdings "
             "WHERE coin_id=?", (MINT,)).fetchone()["amount"],
-            1000.0, places=9)
+            1000.0 / 1.01, places=9)
 
     def test_unknown_coin_rejected(self):
         resp = self.client.post("/coins/FAKE/buy", data={

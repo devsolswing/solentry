@@ -52,7 +52,7 @@ Schema (version 1):
     gainers, buy a coin gaining 5% in 3 minutes (strongest gainer
     wins), tracked from price marks the loop records itself
     (scanner.py), because the feed only provides 5-minute changes.
-    Its sell_ladder is the SLOW-market ladder (25% at +3%, +10%,
+    Its sell_ladder is the SLOW-market ladder (25% at +5%, +10%,
     +25%, the rest at +50%) and trending_ladder is the
     TRENDING-market ladder (10% at +26%, +50%, +100%, +500%,
     +1000%, the rest at +10000%) — the regime (see below) picks
@@ -197,7 +197,7 @@ SCANNER_BUY_WINDOW_SECONDS = 180
 SCANNER_MAX_NEW_PER_SCAN = 1
 SCANNER_TOP10_DROP_PCT = 10.0
 # A scanner's profit ladders (James's spec): the slow-market ladder
-# secures a profit early (25% at +3%, +10%, +25%, the rest at
+# secures a profit early (25% at +5%, +10%, +25%, the rest at
 # +50%); the trending-market ladder holds the runners (10% at
 # +26%, +50%, +100%, +500%, +1000%, the rest at +10000% or on the
 # trailing stop). The regime picks which ladder a position follows
@@ -216,7 +216,7 @@ REGIME_KEYS = ("volume_surge_x", "require_buy_dominance",
 # proceeds stay in SOL. The 3-minute gain is computed from price
 # marks the loop records itself (scanner.py) because the DexScreener
 # feed only provides 5-minute changes. Profit: slow market — 25% at
-# +3%, +10%, +25%, the rest at +50%; trending market — 10% at
+# +5%, +10%, +25%, the rest at +50%; trending market — 10% at
 # +26%, +50%, +100%, +500%, +1000%, the rest at +10000% or on the
 # 7% trailing stop. A bad coin is cut at the 7% stop loss.
 SCANNER_RULES = {
@@ -237,7 +237,14 @@ SCANNER_RULES = {
                   "check_interval_seconds": 15.0},
     "trending_ladder": [dict(r) for r in TRENDING_LADDER],
     "regime": dict(REGIME_DEFAULT),
-    "buy_filter": dict(BUY_FILTER_DEFAULT),
+    # Tuning build 2026-11-15: the 5-minute volume floor is $5,000
+    # (was $1,000) — thin coins are trash-filtered before any buy.
+    # The default filter (BUY_FILTER_DEFAULT, $1,000) is untouched,
+    # so the Trenches preset keeps its own floor.
+    "buy_filter": {"min_volume_5m_usd": 5000.0,
+                   "require_buy_dominance": True,
+                   "min_signal_pct": SCANNER_BUY_GAIN_PCT,
+                   "min_market_cap_usd": 0.0},
     "max_new_positions_per_scan": SCANNER_MAX_NEW_PER_SCAN,
 }
 
@@ -281,18 +288,25 @@ CLYDE_ZSCORE_STD = 2.5
 #     under $45,000 CAD can never pass. The CAD origin is stated in
 #     CLYDE_NOTES so the unit is never hidden.
 #   * top-10 < 12% -> top10_rug concentration_pct 12.0: the engine
-#     sells everything when a held coin's top-10 share reaches 12%.
+#     sells everything when a held coin's top-10 share reaches 12%,
+#     and pre-screens the same bar before buying (tuning build
+#     2026-11-15).
 #   * 4% stop loss -> the bot row's stop_loss_pct (a limit, never in
 #     the rule set) AND trailing_stop_pct 4.0.
 #   * take profit baseline 10-30% -> sell_ladder (25% at +10%, 25%
 #     at +20%, 50% at +30%); runners 31-1000% -> trending_ladder
 #     (10% at +31%, +100%, +500%, 70% at +1000%).
-#   * Z-score entry, velocity swap, and the pre-buy top-10
-#     blacklist have NO engine field — they are recorded in
-#     CLYDE_NOTES and shown on the preset list, never pretended to
-#     be enforced. The engine's closest available entry signal is
-#     the scanner's 5% gain in 3 minutes (buy threshold 5.0, and
-#     the buy filter's min_signal_pct 5.0).
+#   * Z-score entry and velocity swap have NO engine field —
+#     they are recorded in CLYDE_NOTES and shown on the preset
+#     list, never pretended to be enforced. The engine's closest
+#     available entry signal is the scanner's 5% gain in 3 minutes
+#     (buy threshold 5.0, and the buy filter's min_signal_pct 5.0),
+#     gated on the four-part momentum check and a second-scan
+#     confirmation. The pre-buy top-10 blacklist IS enforced now
+#     (tuning build 2026-11-15): the loop reads the top-10 share
+#     through the mainnet RPC before buying and rejects any coin
+#     at or over 12%, and rejects the buy outright when the RPC
+#     cannot serve the mint.
 CLYDE_RULES = {
     "version": 1,
     "kind": "scanner",
@@ -316,7 +330,9 @@ CLYDE_RULES = {
                         {"pct_of_position": 10, "profit_pct": 500},
                         {"pct_of_position": 70, "profit_pct": 1000}],
     "regime": dict(REGIME_DEFAULT),
-    "buy_filter": {"min_volume_5m_usd": 1000.0,
+    # Tuning build 2026-11-15: the 5-minute volume floor is $5,000
+    # (was $1,000) — thin coins are trash-filtered before any buy.
+    "buy_filter": {"min_volume_5m_usd": 5000.0,
                    "require_buy_dominance": True,
                    "min_signal_pct": CLYDE_BUY_THRESHOLD_PCT,
                    "min_market_cap_usd": CLYDE_MIN_MARKET_CAP},
@@ -338,16 +354,20 @@ CLYDE_NOTES = [
     "Z-score), with an exponential velocity shift in "
     "liquidity-pool injections. The engine has no Z-score field, "
     "so this is recorded here and the engine enforces the closest "
-    "available signal instead: a coin gaining 5% in 3 minutes.",
+    "available signal instead: a coin gaining 5% in 3 minutes that "
+    "also passes the four-part momentum gate (5-minute gain, "
+    "rising volume, buyers outnumbering sellers, positive 1-hour "
+    "trend) and confirms on a second scan.",
     "Market cap — $45,000 CAD minimum. The engine's market-cap "
     "field is in USD, so the preset stores $45,000 in that field — "
     "a stricter bar than $45,000 CAD, so a coin under $45,000 CAD "
     "can never pass.",
     "Top-10 — the top 10 wallets must hold less than 12% of "
-    "supply. The engine enforces this as a sell when a held "
-    "coin's top-10 share reaches 12%. It does not pre-screen "
-    "concentration before buying, so a coin already over 12% can "
-    "be bought and is then sold when the top-10 watch runs.",
+    "supply. The engine enforces this twice: it pre-screens "
+    "concentration before buying (a coin at or over 12% is never "
+    "bought) and it sells everything when a held coin's top-10 "
+    "share reaches 12%. A coin the RPC cannot serve is not bought "
+    "at all — unverified is rejected, never guessed.",
     "Portfolio swap — evict underperforming coins for "
     "higher-velocity trench runners, regardless of the "
     "position's current P&L. The engine has no velocity-swap "

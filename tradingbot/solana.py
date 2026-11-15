@@ -559,6 +559,16 @@ class SolanaRpcClient:
             raise RpcError("bad getTokenSupply result")
         return int(result["value"]["amount"])
 
+    def get_mint_authorities(self, mint: str) -> tuple[bool, bool] | None:
+        """(mint authority enabled, freeze authority enabled) for a
+        token mint, or None when the mint account does not exist or
+        its data cannot be read. None means "cannot verify" — the
+        caller must treat it as a failed check, never as a pass."""
+        info = self.get_account_info(mint)
+        if not info or not info.get("data"):
+            return None
+        return parse_mint_authorities(bytes(info["data"]))
+
     def get_latest_blockhash(self) -> str:
         result = self._call("getLatestBlockhash", [])
         blockhash = (result or {}).get("value", {}).get("blockhash")
@@ -648,6 +658,26 @@ class SolanaRpcClient:
                 return False
             time.sleep(delay_seconds)
         return False
+
+
+def parse_mint_authorities(data: bytes) -> tuple[bool, bool] | None:
+    """(mint authority enabled, freeze authority enabled) for an
+    SPL Token mint account's raw bytes, or None when the bytes are
+    not a mint account. Layout: mint_authority option (u32 LE at
+    0-3, 1 = enabled) + pubkey (4-35), supply (36-43), decimals
+    (44), is_initialized (45), freeze_authority option (u32 LE at
+    46-49) + pubkey (50-81). A mint whose authority is still
+    enabled can have its supply inflated; a freeze authority can
+    freeze any holder's tokens. Both are cheap on-chain facts —
+    never guessed from a listing."""
+    if not data or len(data) < 82:
+        return None
+    try:
+        mint_on = int.from_bytes(data[0:4], "little") == 1
+        freeze_on = int.from_bytes(data[46:50], "little") == 1
+    except Exception:
+        return None
+    return mint_on, freeze_on
 
 
 def sol_to_lamports(sol: float) -> int:

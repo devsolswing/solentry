@@ -174,8 +174,9 @@ class TestChange24h(ThemeBase):
         self.assertIn("+5.2% 1h", html)
         self.assertIn("-2.5% 1h", html)
         self.assertIn("coin-pnl", html)
-        # $10 at $0.01 bought 1000 tokens; at $0.012 the P&L is +$2.
-        self.assertIn("+$2.00", html)
+        # $10 at $0.01 bought 990.099 tokens (1% haircut); at
+        # $0.012 they are worth $11.88, so the P&L is +$1.88.
+        self.assertIn("+$1.88", html)
         self.assertIn('class="up"', html)
         self.assertIn('class="down"', html)
 

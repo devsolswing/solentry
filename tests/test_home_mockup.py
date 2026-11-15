@@ -517,9 +517,9 @@ class TestHomeMockupLayout(HomeMockupBase):
         # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
         # (removed 2026-11-12), leaves 1000.0000 GATE worth $10.00;
         # the price is $0.0100; 1h +2.50%.
-        self.assertIn("1,000.0000 GATE", html)
+        self.assertIn("990.0990 GATE", html)
         self.assertIn("$0.0100", html)
-        self.assertIn("$10.00", html)
+        self.assertIn("$9.90", html)
         self.assertIn("+2.50%", html)
         # The screenshot's figures are examples, never the data:
         # none of them may appear on the real page.

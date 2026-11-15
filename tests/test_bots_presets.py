@@ -194,7 +194,7 @@ class TestBotsPresets(UiBase):
         self.assertNotIn("Silent ON", window)
         self.assertNotIn("● Active", window)
         # Clyde's stats line, same format as a bot card.
-        self.assertIn("bold · Buy 20% · Stop 4% · Max 3", window)
+        self.assertIn("bold · Buy 15% · Stop 4% · Max 3", window)
         # No bot-yet lines, no description of any kind.
         self.assertNotIn("ID:", window)
         self.assertNotIn("Created:", window)

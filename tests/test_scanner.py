@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import tradingbot.routes as routes
+import tradingbot.silent_loop as silent_loop
 from helpers import csrf, login, make_client, signup
 from tradingbot.assistant import parse_message
 from tradingbot.rules import (SCANNER_DISPLAY, load_rules,
@@ -41,8 +42,11 @@ def _now(offset_seconds=0):
                 "%Y-%m-%dT%H:%M:%SZ")
 
 
-def _entry(mint, price, change_5m=None, change_1h=None,
+def _entry(mint, price, change_5m=6.0, change_1h=25.0,
            volume_m5=5000, volume_h1=12000, buys=40, sells=10):
+    """A realistic gaining feed entry: the feed provides 5-minute
+    and 1-hour changes, so the defaults are a gaining coin (all four
+    signal checks agree)."""
     return {"mint": mint, "symbol": mint[:6], "name": mint,
             "price_usd": price, "change_5m_pct": change_5m,
             "change_1h_pct": change_1h, "change_6h_pct": None,
@@ -62,6 +66,12 @@ def _trending_entry(mint, price, change_5m=None):
                   volume_m5=5000, volume_h1=12000, buys=40, sells=10)
 
 
+def _slow_entry(mint, price):
+    """An entry with no trend data: reads SLOW (no 1-hour trend to
+    call it trending). Used by the slow-ladder tests."""
+    return _entry(mint, price, change_5m=None, change_1h=None)
+
+
 class _FakeScan:
     def __init__(self, entries):
         self.entries = list(entries)
@@ -77,7 +87,11 @@ def _empty_prices():
 
 
 class _FakeRpc:
-    """Solana RPC stand-in: top-10 totals per mint, or a failure."""
+    """Solana RPC stand-in: top-10 totals per mint, or a failure.
+
+    Serves the pre-buy scam gates too: any mint in `totals` has a
+    1,000,000,000 supply and revoked mint/freeze authorities, so a
+    clean coin passes; `fail` breaks every call."""
 
     def __init__(self, totals=None, fail=False):
         self.totals = totals or {}
@@ -93,6 +107,20 @@ class _FakeRpc:
         return [{"address": f"acct{i}", "amount": str(share),
                  "decimals": 6, "uiAmount": 0.0} for i in range(10)]
 
+    def get_token_supply(self, mint):
+        if self.fail:
+            raise RuntimeError("rpc down")
+        if mint not in self.totals:
+            raise RuntimeError("mint not served")
+        return 1_000_000_000
+
+    def get_mint_authorities(self, mint):
+        if self.fail:
+            raise RuntimeError("rpc down")
+        if mint not in self.totals:
+            raise RuntimeError("mint not served")
+        return (False, False)
+
     def get_balance_lamports(self, pubkey):
         return 0
 
@@ -106,9 +134,9 @@ class TestScannerValidation(unittest.TestCase):
         self.assertEqual(rules["buy"]["metric"], "gain_3m_pct")
         self.assertEqual(rules["buy"]["window_seconds"], 180)
         self.assertEqual(rules["buy"]["threshold_pct"], 5.0)
-        # Slow ladder: 25% at +3%, +10%, +25%, the rest at +50%.
+        # Slow ladder: 25% at +5%, +10%, +25%, the rest at +50%.
         self.assertEqual(rules["sell_ladder"], [
-            {"pct_of_position": 25, "profit_pct": 3},
+            {"pct_of_position": 25, "profit_pct": 5},
             {"pct_of_position": 25, "profit_pct": 10},
             {"pct_of_position": 25, "profit_pct": 25},
             {"pct_of_position": 25, "profit_pct": 50}])
@@ -299,7 +327,7 @@ class TestScannerValidation(unittest.TestCase):
         self.assertIn("strongest gainer wins", summary)
         self.assertIn("tracked from recorded prices", summary)
         self.assertIn("Slow market", summary)
-        self.assertIn("sell 25% at +3% profit", summary)
+        self.assertIn("sell 25% at +5% profit", summary)
         self.assertIn("sell 25% at +50% profit", summary)
         self.assertIn("Trending market", summary)
         self.assertIn("hold the runners", summary)
@@ -441,11 +469,14 @@ class TestScannerRegime(unittest.TestCase):
         self.assertEqual(
             detect_regime(self._base(change_1h_pct=None)), "slow")
 
-    def test_fresh_burst_counts_as_surge(self):
+    def test_fresh_burst_is_not_a_surge(self):
         # All volume in the last 5 minutes (h1 volume zero): the
-        # crowd just arrived.
+        # crowd just arrived, but with no hourly pace to compare
+        # against the surge test cannot be evaluated — it reads
+        # SLOW, not trending (the fresh-coin bias fix: a new coin
+        # with no 1-hour history is not a runner yet).
         self.assertEqual(
-            detect_regime(self._base(volume_h1_usd=0)), "trending")
+            detect_regime(self._base(volume_h1_usd=0)), "slow")
 
     def test_no_volume_means_slow_even_with_buys(self):
         self.assertEqual(
@@ -475,7 +506,8 @@ class TestScannerRegime(unittest.TestCase):
 class TestScannerLadderSteps(unittest.TestCase):
     def test_slow_ladder_fires_in_order(self):
         slow = scanner_ruleset()["sell_ladder"]
-        self.assertEqual(next_ladder_rung(slow, 0.0, 4.0), (0.25, 3.0))
+        self.assertIsNone(next_ladder_rung(slow, 0.0, 4.0))
+        self.assertEqual(next_ladder_rung(slow, 0.0, 5.0), (0.25, 5.0))
         self.assertEqual(next_ladder_rung(slow, 0.25, 11.0), (0.25, 10.0))
         self.assertEqual(next_ladder_rung(slow, 0.5, 30.0), (0.25, 25.0))
         self.assertEqual(next_ladder_rung(slow, 0.75, 60.0), (0.25, 50.0))
@@ -503,10 +535,10 @@ class TestScannerLadderSteps(unittest.TestCase):
 
     def test_regime_flip_tops_up_to_slow_schedule(self):
         # Sold 20% on the trending ladder, then the market goes
-        # slow: the slow ladder wants 25% sold by +3% — the next
-        # rung tops the position up by 5% at the +3% rung.
+        # slow: the slow ladder wants 25% sold by +5% — the next
+        # rung tops the position up by 5% at the +5% rung.
         slow = scanner_ruleset()["sell_ladder"]
-        self.assertEqual(next_ladder_rung(slow, 0.2, 80.0), (0.05, 3.0))
+        self.assertEqual(next_ladder_rung(slow, 0.2, 80.0), (0.05, 5.0))
         # After topping up to 25%, the next slow rung is +10% (50%).
         self.assertEqual(next_ladder_rung(slow, 0.25, 80.0), (0.25, 10.0))
 
@@ -676,7 +708,19 @@ class ScannerEngineBase(unittest.TestCase):
         self.user_id = self.db.execute(
             "SELECT id FROM users WHERE username = 'alice'"
         ).fetchone()["id"]
-        self.fake_rpc = _FakeRpc()
+        self.fake_rpc = _FakeRpc(totals={"MINTA": 50_000_000,
+                                         "MINTB": 50_000_000})
+        # The top-10 skip log is throttled once/hour per (bot, mint)
+        # in module state — clear it so each test starts fresh.
+        silent_loop._TOP10_SKIP_LOGGED_AT.clear()
+        # The pre-buy scam gates read stored metadata: MINTA/MINTB
+        # are clean coins with a name and symbol on file.
+        for mint in ("MINTA", "MINTB"):
+            self.db.execute(
+                "INSERT INTO coin_meta (mint, name, symbol, image_url, "
+                "source, fetched_at) VALUES (?, ?, ?, NULL, 'metaplex', "
+                "?)", (mint, "Mint " + mint[-1], mint, _now()))
+        self.db.commit()
 
     def tearDown(self):
         self.rpc_patch.stop()
@@ -758,6 +802,11 @@ class TestScannerEngine(ScannerEngineBase):
     def test_buy_fires_on_5pct_3min_gain(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
+        # First scan records the signal (2-scan confirmation);
+        # the second scan buys.
+        self._run([_entry("MINTA", 0.0106)])
+        self.assertIsNone(self._position(bot_id, "MINTA"))
+        self._reset_scan(bot_id)
         outcomes = self._run([_entry("MINTA", 0.0106)])
         buys = [a for a in outcomes[0]["actions"] if a["action"] == "buy"]
         self.assertEqual(len(buys), 1)
@@ -783,6 +832,8 @@ class TestScannerEngine(ScannerEngineBase):
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
         self._insert_mark(bot_id, "MINTB", 0.01, _now(-200))
+        self._run([_entry("MINTA", 0.0106), _entry("MINTB", 0.0110)])
+        self._reset_scan(bot_id)
         outcomes = self._run([_entry("MINTA", 0.0106),
                               _entry("MINTB", 0.0110)])
         buys = [a for a in outcomes[0]["actions"] if a["action"] == "buy"]
@@ -793,6 +844,8 @@ class TestScannerEngine(ScannerEngineBase):
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
         self._insert_mark(bot_id, "MINTB", 0.01, _now(-200))
+        self._run([_entry("MINTA", 0.0106), _entry("MINTB", 0.0106)])
+        self._reset_scan(bot_id)
         outcomes = self._run([_entry("MINTA", 0.0106),
                               _entry("MINTB", 0.0106)])
         buys = [a for a in outcomes[0]["actions"] if a["action"] == "buy"]
@@ -806,6 +859,12 @@ class TestScannerEngine(ScannerEngineBase):
         self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
         outcomes = self._run([_entry("MINTA", 0.0103)])
         self.assertEqual(outcomes[0]["actions"], [])
+        self._reset_scan(bot_id)
+        # +6% now: the first scan with a passing signal records
+        # the confirmation; the next scan buys.
+        outcomes = self._run([_entry("MINTA", 0.0106)])
+        buys = [a for a in outcomes[0]["actions"] if a["action"] == "buy"]
+        self.assertEqual(len(buys), 0)
         self._reset_scan(bot_id)
         outcomes = self._run([_entry("MINTA", 0.0106)])
         buys = [a for a in outcomes[0]["actions"] if a["action"] == "buy"]
@@ -836,12 +895,18 @@ class TestScannerEngine(ScannerEngineBase):
         self._set_scan_at(trenches_id, _now(-31))
         outcomes = self._run([_entry("MINTB", 0.0106, change_5m=3.5)])
         by_bot = {o["bot_id"]: o["actions"] for o in outcomes}
+        # First sighting of MINTB records the confirmation, no buy.
         buys = [a for a in by_bot[scanner_id] if a["action"] == "buy"]
-        self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]["coin"], "MINTB")
+        self.assertEqual(len(buys), 0)
         self.assertEqual(by_bot[trenches_id],
                          [{"action": "skip", "coin": "",
                            "reason": "scan interval not reached"}])
+        self._reset_scan(scanner_id)
+        outcomes = self._run([_entry("MINTB", 0.0106, change_5m=3.5)])
+        by_bot = {o["bot_id"]: o["actions"] for o in outcomes}
+        buys = [a for a in by_bot[scanner_id] if a["action"] == "buy"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["coin"], "MINTB")
 
     def test_top10_baseline_then_no_fire_at_9pct(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
@@ -936,20 +1001,27 @@ class TestScannerEngine(ScannerEngineBase):
         self.assertIsNone(top10)
 
     def test_slow_ladder_sells_25pct_per_rung(self):
-        """No volume data in the entries means SLOW: 25% at +3%,
+        """No volume data in the entries means SLOW: 25% at +5%,
         another 25% at +10%, another at +25%, the rest at +50%."""
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
-        outcomes = self._run([_entry("MINTA", 0.0103)])
+        # +3% is below the first rung now: nothing sells.
+        outcomes = self._run([_slow_entry("MINTA", 0.0103)])
+        sells = [a for a in outcomes[0]["actions"]
+                 if a["action"] == "sell"]
+        self.assertEqual(len(sells), 0)
+        self.assertEqual(self._position(bot_id, "MINTA")["amount"], 100)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_slow_entry("MINTA", 0.0105)])
         sells = [a for a in outcomes[0]["actions"]
                  if a["action"] == "sell"]
         self.assertEqual(len(sells), 1)
         self.assertEqual(sells[0]["amount"], 25)
-        self.assertIn("sell ladder (slow): 25% at +3% profit",
+        self.assertIn("sell ladder (slow): 25% at +5% profit",
                       sells[0]["reason"])
         self.assertEqual(self._position(bot_id, "MINTA")["amount"], 75)
         self._reset_scan(bot_id)
-        outcomes = self._run([_entry("MINTA", 0.011)])
+        outcomes = self._run([_slow_entry("MINTA", 0.011)])
         sells = [a for a in outcomes[0]["actions"]
                  if a["action"] == "sell"]
         self.assertEqual(len(sells), 1)
@@ -958,14 +1030,14 @@ class TestScannerEngine(ScannerEngineBase):
                       sells[0]["reason"])
         self.assertEqual(self._position(bot_id, "MINTA")["amount"], 50)
         self._reset_scan(bot_id)
-        outcomes = self._run([_entry("MINTA", 0.0125)])
+        outcomes = self._run([_slow_entry("MINTA", 0.0125)])
         sells = [a for a in outcomes[0]["actions"]
                  if a["action"] == "sell"]
         self.assertEqual(len(sells), 1)
         self.assertEqual(sells[0]["amount"], 25)
         self.assertEqual(self._position(bot_id, "MINTA")["amount"], 25)
         self._reset_scan(bot_id)
-        outcomes = self._run([_entry("MINTA", 0.015)])
+        outcomes = self._run([_slow_entry("MINTA", 0.015)])
         sells = [a for a in outcomes[0]["actions"]
                  if a["action"] == "sell"]
         self.assertEqual(len(sells), 1)
@@ -1011,7 +1083,7 @@ class TestScannerEngine(ScannerEngineBase):
         30% cumulative) tops the position up by 5%."""
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
-        self._run([_entry("MINTA", 0.0103)])
+        self._run([_slow_entry("MINTA", 0.0105)])
         self.assertEqual(self._position(bot_id, "MINTA")["amount"], 75)
         self._reset_scan(bot_id)
         outcomes = self._run([_trending_entry("MINTA", 0.02)])
@@ -1255,7 +1327,7 @@ class TestScannerRoutes(unittest.TestCase):
         data = self._ask(
             "scanner take profit at 3% when the market is slow")
         self.assertIn("Slow market", data["reply"])
-        self.assertIn("sell 25% at +3% profit", data["reply"])
+        self.assertIn("sell 25% at +5% profit", data["reply"])
         self.assertIn("Trending market", data["reply"])
         self.assertIn("Reply \"yes\"", data["reply"])
         self.assertEqual(len(self._bots()), 0)

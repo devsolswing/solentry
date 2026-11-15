@@ -102,7 +102,15 @@ class Config:
         self.live_feed_enabled: bool = env.get(
             "LIVE_FEED_ENABLED", "1") == "1"
         self.silent_loop_interval_seconds: int = max(
-            10, int(env.get("SILENT_LOOP_INTERVAL_SECONDS", "60")))
+            10, int(env.get("SILENT_LOOP_INTERVAL_SECONDS", "30")))
+        # Mainnet RPC for the top-10 wallet watch and the pre-buy
+        # scam gates (tuning build 2026-11-15): the top-10 watch
+        # used to read every mint through the devnet RPC, which
+        # cannot serve mainnet mints at all. Mainnet mints are now
+        # read through this URL; devnet watchlist mints still use
+        # RPC_URL (the devnet RPC that can see them).
+        self.mainnet_rpc_url: str = env.get(
+            "MAINNET_RPC_URL", "https://api.mainnet-beta.solana.com")
         # DEVNET-TEST-ONLY watchlist for the silent loop (devnet
         # proof): pump.fun mints the loop watches as extra
         # trenches candidates, priced from their devnet bonding
