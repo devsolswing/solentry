@@ -25,8 +25,11 @@ One row per fill:
   created_at  UTC timestamp of the fill
 
 For real trades the USD figures use the USD price the loop saw at
-trade time; the on-chain SOL proceeds are in the transaction the
-signing bot logged (signature in the activity log), not here.
+trade time; the on-chain SOL actually spent/received and the full
+transaction signature are recorded here too (signature, sol_amount),
+so round-trip friction can be measured from the ledger alone. Both
+are NULL for paper trades and for rows recorded before the columns
+existed.
 """
 
 from __future__ import annotations
@@ -40,11 +43,19 @@ def record_trade(db: sqlite3.Connection, user_id: int,
                  bot_id: int | None, coin: str, side: str,
                  amount: float, price: float, total_usd: float,
                  pnl_usd: float | None = None, exit_reason: str | None = None,
-                 mode: str = "paper", now: str | None = None) -> str:
+                 mode: str = "paper", now: str | None = None,
+                 signature: str | None = None,
+                 sol_amount: float | None = None) -> str:
     """Insert one ledger row and return its 8-digit trade ID. Retries
     with a fresh ID on a (rare) collision. Never raises for a
     collision — a ledger write that fails would hide a trade, so the
-    caller keeps its own error handling for anything else."""
+    caller keeps its own error handling for anything else.
+
+    `signature` is the full on-chain transaction signature (never a
+    truncated prefix) and `sol_amount` the executed SOL — spent on a
+    buy, received on a sell — both from the executor's confirmed
+    transaction. Both are None for paper trades (no chain, no
+    signature) and for rows recorded before the columns existed."""
     from datetime import datetime, timezone
     now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # The column is NOT NULL: a buy has no exit reason, so store ''.
@@ -61,10 +72,11 @@ def record_trade(db: sqlite3.Connection, user_id: int,
             db.execute(
                 "INSERT INTO trade_ledger (trade_id, user_id, bot_id, "
                 "coin, side, amount, price, total_usd, pnl_usd, win, "
-                "exit_reason, mode, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "exit_reason, mode, created_at, signature, sol_amount) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (trade_id, user_id, bot_id, coin, side, amount, price,
-                 total_usd, pnl_usd, win, exit_reason, mode, now))
+                 total_usd, pnl_usd, win, exit_reason, mode, now,
+                 signature, sol_amount))
             db.commit()
             return trade_id
         except sqlite3.IntegrityError:

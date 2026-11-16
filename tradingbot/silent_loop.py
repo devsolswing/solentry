@@ -891,7 +891,9 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
                      (exec_price * amount if exec_price is not None
                       else amount * price),
                      pnl_usd=pnl_usd,
-                     exit_reason=reason, mode="real", now=_now())
+                     exit_reason=reason, mode="real", now=_now(),
+                     signature=result.get("signature"),
+                     sol_amount=sol_received)
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
                        "WHERE bot_id = ? AND coin_id = ?",
@@ -1048,7 +1050,9 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             record_trade(db, bot["user_id"], bot["id"], coin, "buy",
                          coin_amount, buy_price,
                          coin_amount * buy_price,
-                         mode="real", now=_now())
+                         mode="real", now=_now(),
+                         signature=result.get("signature"),
+                         sol_amount=sol_spent)
         if signals and signals.get("gain_pct") is not None:
             _record_signal_entry(db, bot["id"], coin, signals, _now())
         _log(db, bot["user_id"], "silent_buy",

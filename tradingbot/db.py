@@ -395,6 +395,13 @@ CREATE TABLE IF NOT EXISTS trade_ledger (
     exit_reason TEXT NOT NULL DEFAULT '',
     mode TEXT NOT NULL DEFAULT 'paper',
     created_at TEXT NOT NULL,
+    -- Friction logging (2026-11-15): the full on-chain signature
+    -- and the executed SOL (spent on buys, received on sells) for
+    -- real trades, so round-trip friction can be measured from the
+    -- ledger alone. NULL for paper trades and for rows recorded
+    -- before these columns existed.
+    signature TEXT,
+    sol_amount REAL,
     FOREIGN KEY (user_id) REFERENCES users (id),
     FOREIGN KEY (bot_id) REFERENCES bots (id)
 );
@@ -648,6 +655,14 @@ _MIGRATIONS = (
     ("users", "user_key_salt", "TEXT NOT NULL DEFAULT ''"),
     ("users", "wrapped_user_key", "TEXT NOT NULL DEFAULT ''"),
     ("wallets", "enc_version", "INTEGER NOT NULL DEFAULT 1"),
+    # Friction logging (2026-11-15): the full on-chain signature
+    # and the executed SOL (spent on buys, received on sells) for
+    # real trades, so round-trip friction can be measured from the
+    # ledger alone. NULL for paper trades and for rows recorded
+    # before these columns existed — the migration only adds the
+    # columns, it never touches existing rows.
+    ("trade_ledger", "signature", "TEXT"),
+    ("trade_ledger", "sol_amount", "REAL"),
 )
 
 
