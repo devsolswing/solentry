@@ -5,9 +5,12 @@ coins only: a name/symbol query matches DexScreener Solana pairs
 (real name + ticker + mint address), a pasted mint address resolves
 directly (trenches feed, then on-chain Metaplex metadata), and a
 majors query (BTC, ETH, SOL, ZEC, USDC, ADA, …) returns nothing —
-SOL is the unit of account, never a listed coin. A mint nobody can
-name reads "Unknown coin" — the address is the `coin_id`, never
-shown as the name, and the old "Pump.fun token …" label is gone.
+SOL is the unit of account, never a listed coin. DexScreener's
+search matches wrapped majors too (wBTC on Raydium / Orca, …), so
+the search filters pairs to pump.fun / PumpSwap by dexId — the
+filter is the DEX, not the name. A mint nobody can name reads
+"Unknown coin" — the address is the `coin_id`, never shown as the
+name, and the old "Pump.fun token …" label is gone.
 No `networks` / `wrapped` fields exist any more: every result is a
 Solana pump.fun coin by construction.
 """
@@ -24,6 +27,11 @@ from tradingbot.networks import coin_network, send_refusal
 MINT = "11111111111111111111111111111111"
 BFUN_MINT = "BfunMint11111111111111111111111111111111"
 GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
+# Wrapped majors on Solana (real mints): DexScreener's search
+# matches them for majors queries, so search fixtures use them to
+# prove the dex filter drops them.
+WBTC_MINT = "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh"
+WETH_MINT = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs"
 
 
 def dex_pairs(*entries):
@@ -98,14 +106,74 @@ class TestSearchCoinsPumpfunOnly(unittest.TestCase):
         self.assertNotIn("wrapped", entry)
 
     def test_majors_queries_return_nothing(self):
-        # DexScreener filters by query server-side: a majors query
-        # matches no pump.fun pair, so the feed returns no pairs.
-        payload = dex_pairs(pumpfun_pair(BFUN_MINT, "BonkFun", "BFUN"))
+        # Live-shaped feed: DexScreener's search matches the query
+        # text across every DEX, so a "btc" query returns wrapped
+        # majors (wBTC on Raydium / Orca) — the dex filter drops
+        # them, it is not the feed returning nothing. (This test
+        # used to mock an empty feed, which passed while the leak
+        # was live — the fixture is the regression.)
+        payload = dex_pairs(
+            (WBTC_MINT, "Bitcoin", "BTC", 68276.90, 9000000,
+             "raydium"),
+            (WBTC_MINT, "Bitcoin", "BTC", 68276.90, 4000000, "orca"))
         for q in ("zec", "btc", "eth", "sol", "usdc", "ada"):
             charts_mod._search_cache.clear()
             data = charts_mod.search_coins(
-                q, http_get=lambda url: {"pairs": []})
+                q, http_get=lambda url: payload)
             self.assertEqual(data["results"], [], q)
+
+    def test_mixed_raydium_and_pumpfun_returns_only_pumpfun(self):
+        # Same query matches a Raydium wrapped major AND a pump.fun
+        # memecoin: only the pump.fun one comes back.
+        payload = dex_pairs(
+            (WBTC_MINT, "Bitcoin", "BTC", 68276.90, 9000000,
+             "raydium"),
+            pumpfun_pair(BFUN_MINT, "BonkFun", "BFUN", 0.002, 50000))
+        data = charts_mod.search_coins(
+            "bfun", http_get=lambda url: payload)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["coin_id"], BFUN_MINT)
+        self.assertEqual(data["results"][0]["symbol"], "BFUN")
+
+    def test_only_raydium_orca_pairs_return_nothing(self):
+        payload = dex_pairs(
+            (WBTC_MINT, "Bitcoin", "BTC", 68276.90, 9000000,
+             "raydium"),
+            (WETH_MINT, "Ethereum", "ETH", 1924.11, 8000000, "orca"),
+            (WBTC_MINT, "Bitcoin", "BTC", 68276.90, 1000000,
+             "meteora"))
+        data = charts_mod.search_coins(
+            "btc", http_get=lambda url: payload)
+        self.assertEqual(data["results"], [])
+
+    def test_majors_query_eight_wrapped_entries_returns_nothing(self):
+        # The live leak: searching BTC returned 8 "Bitcoin (BTC)"
+        # entries (wrapped majors across Solana DEXes). Same shape
+        # here — 8 wrapped entries, zero results.
+        entries = []
+        for i, dex_id in enumerate(
+                ["raydium", "orca", "raydium", "orca", "meteora",
+                 "raydium", "orca", "lifinity"]):
+            entries.append(
+                (f"WBTCMint{i}11111111111111111111111111111111",
+                 "Bitcoin", "BTC", 68276.90, 9000000 - i * 100000,
+                 dex_id))
+        payload = dex_pairs(*entries)
+        data = charts_mod.search_coins(
+            "btc", http_get=lambda url: payload)
+        self.assertEqual(data["results"], [])
+
+    def test_memecoin_sharing_major_ticker_still_appears(self):
+        # The filter is the DEX, not the name: a pump.fun memecoin
+        # that happens to share a major's ticker is still a
+        # pump.fun coin and may appear.
+        payload = dex_pairs(
+            pumpfun_pair(BFUN_MINT, "Bitcoin Cat", "BTC"))
+        data = charts_mod.search_coins(
+            "btc", http_get=lambda url: payload)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["coin_id"], BFUN_MINT)
+        self.assertEqual(data["results"][0]["symbol"], "BTC")
 
     def test_non_solana_chain_pairs_excluded(self):
         payload = {"pairs": [{
@@ -236,12 +304,33 @@ class TestSearchEndpointPumpfunOnly(unittest.TestCase):
         self.assertEqual(data["results"][0]["symbol"], "BFUN")
 
     def test_endpoint_majors_queries_find_nothing(self):
-        # A majors query matches no pump.fun pair, so the feed
-        # returns no pairs and the endpoint returns no results.
+        # The dex filter drops wrapped majors: a majors query
+        # returns no results even when the feed returns pairs.
         for q in ("zec", "btc", "sol", "usdc"):
             charts_mod._search_cache.clear()
             data = self._search(q)
             self.assertEqual(data["results"], [], q)
+
+    def test_endpoint_majors_query_live_shaped_returns_nothing(self):
+        # Live-shaped feed: the "btc" query returns Raydium/Orca
+        # wrapped-Bitcoin pairs — the endpoint must still return
+        # no results (the unit tests cover the filter; this covers
+        # the route wiring it).
+        def live_shaped_get(url):
+            if "btc" in url.lower():
+                return dex_pairs(
+                    (WBTC_MINT, "Bitcoin", "BTC", 68276.90, 9000000,
+                     "raydium"),
+                    (WBTC_MINT, "Bitcoin", "BTC", 68276.90, 4000000,
+                     "orca"))
+            return {"pairs": []}
+
+        with mock.patch.object(
+                charts_mod, "_default_get",
+                side_effect=live_shaped_get):
+            charts_mod._search_cache.clear()
+            data = self._search("btc")
+        self.assertEqual(data["results"], [])
 
 
 if __name__ == "__main__":

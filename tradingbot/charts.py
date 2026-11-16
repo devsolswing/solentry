@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 
 from .solana import is_valid_address
-from .trenches import (DEXSCREENER_BASE, TOKENS_URL,
+from .trenches import (DEXSCREENER_BASE, TOKENS_URL, TRENCH_DEX_IDS,
                        _best_pair_incl_graduated, _default_get,
                        fetch_mint_identities, fetch_prices_for_mints)
 
@@ -140,15 +140,22 @@ def search_coins(query: str, http_get=None) -> dict:
     the user typed — or a pasted token address, which resolves
     directly to that mint instead of being matched as text (a devnet
     mint has no mainnet pair for a name search to find). Results
-    come from DexScreener's free token search (Solana pairs only,
-    best liquidity first, at most 8), each with the coin's real name
-    + ticker and its pump.fun mint address. A feed that does not
-    answer returns an error and no invented coins — the popup says
-    so instead of guessing. A query shorter than 2 characters
-    returns no results: single letters match nearly everything and
-    are not useful. A majors query (BTC, ETH, SOL, ZEC, …) returns
-    nothing — SOL is the unit of account, never a listed coin, and
-    the old 36-coin list is gone.
+    come from DexScreener's free token search, filtered to Solana
+    pairs on pump.fun / PumpSwap ONLY (the same dex filter the
+    trenches feed uses) — best liquidity first, at most 8 — each
+    with the coin's real name + ticker and its pump.fun mint
+    address. DexScreener's search does NOT filter by DEX, so a
+    query like "BTC" also matches wrapped majors (wBTC on Raydium
+    / Orca, …): those pairs are dropped here, never shown. A
+    memecoin that happens to share a major's ticker is still a
+    pump.fun coin and may appear — the filter is the DEX, not the
+    name. A feed that does not answer returns an error and no
+    invented coins — the popup says so instead of guessing. A
+    query shorter than 2 characters returns no results: single
+    letters match nearly everything and are not useful. A majors
+    query (BTC, ETH, SOL, ZEC, …) returns nothing — SOL is the
+    unit of account, never a listed coin, and the old 36-coin
+    list is gone.
     """
     q = (query or "").strip()
     if len(q) < 2:
@@ -169,8 +176,16 @@ def search_coins(query: str, http_get=None) -> dict:
     try:
         data = http_get(DEXSCREENER_SEARCH_URL.format(
             urllib.parse.quote(q)))
+        # Solana AND pump.fun / PumpSwap only. DexScreener's search
+        # matches the query text across every DEX, so without the
+        # dex filter a "BTC" query returns wrapped majors (wBTC on
+        # Raydium / Orca, …) — the pump.fun-only leak this filter
+        # closes. A graduated pump.fun coin (now on Raydium) does
+        # NOT appear in name search; it stays reachable by pasted
+        # mint address and from holdings.
         pairs = [p for p in (data.get("pairs") or [])
-                 if p.get("chainId") == "solana"]
+                 if p.get("chainId") == "solana"
+                 and p.get("dexId") in TRENCH_DEX_IDS]
         by_mint: dict = {}
         for pair in pairs:
             base = pair.get("baseToken") or {}

@@ -220,11 +220,14 @@ class TestMintDetail(LiveCoinTickBase):
 
 
 class TestMintSearch(LiveCoinTickBase):
-    def test_search_returns_solana_mint_not_symbol(self):
-        # DexScreener offers a thin Solana wrapped ZEC at $1,650:
-        # search returns that mint (real name + ticker + mint
-        # address) — and no symbol entry. There is no "real ZEC"
-        # in this app any more; the mint IS the coin.
+    def test_search_drops_wrapped_major_not_symbol(self):
+        # DexScreener offers a thin Solana wrapped ZEC at $1,650
+        # on Raydium — search drops it: a wrapped major is not a
+        # pump.fun coin, so a "zec" name search returns nothing
+        # (no symbol entry either). The mint stays reachable by
+        # pasted address (see the test below), never by name
+        # search. (This test used to assert the wrapped mint came
+        # back — that was the pump.fun-only search leak.)
         payload = {"pairs": [{
             "chainId": "solana",
             "dexId": "raydium",
@@ -238,14 +241,9 @@ class TestMintSearch(LiveCoinTickBase):
             resp = self.client.get("/api/coins/search?q=zec")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
-        ids = [r["coin_id"] for r in data["results"]]
-        self.assertEqual(ids, [WRAPPED_ZEC_MINT])
-        self.assertNotIn("ZEC", ids)
-        zec = data["results"][0]
-        self.assertEqual(zec["name"], "Zcash")
-        self.assertEqual(zec["symbol"], "ZEC")
-        self.assertEqual(zec["price_usd"], 1650.65)
-        self.assertTrue(zec["is_mint"])
+        self.assertEqual(data["results"], [])
+        self.assertNotIn(WRAPPED_ZEC_MINT,
+                         [r["coin_id"] for r in data["results"]])
 
     def test_search_by_pasted_mint_resolves_directly(self):
         # A pasted mint address resolves to that mint, with the
