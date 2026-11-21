@@ -487,7 +487,11 @@ class LiveFeed:
         except Exception as exc:
             log.warning("[live-feed] jupiter fetch failed: %s", exc)
             return
-        entry = (raw.get("data") or {}).get(JUPITER_SOL_MINT) or {}
+        # Jupiter price v3 returns a flat {mint: {...}} map — no "data"
+        # wrapper (verified live 2026-11-16: {"So11...": {"usdPrice": ...}}).
+        # Accept the wrapped shape too, so either response parses.
+        entry = raw.get(JUPITER_SOL_MINT) or \
+            (raw.get("data") or {}).get(JUPITER_SOL_MINT) or {}
         try:
             price = float(entry.get("usdPrice"))
         except (TypeError, ValueError):

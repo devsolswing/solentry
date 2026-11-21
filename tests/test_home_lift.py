@@ -282,8 +282,11 @@ class TestChange1hFeed(unittest.TestCase):
         # from Jupiter's lite-api price v3 — no CoinGecko, no
         # 36-coin list, no 1h figure anywhere (SOL's change_1h is
         # always None; mints get theirs from the trenches feed).
-        payload = {"data": {prices.SOL_MINT: {
-            "usdPrice": 10.0, "priceChange24h": 5.25}}}
+        # Jupiter price v3 returns a FLAT {mint: {...}} map — no
+        # "data" wrapper (verified live 2026-11-16). The old test
+        # mocked the wrapped shape, so it passed while live failed.
+        payload = {prices.SOL_MINT: {
+            "usdPrice": 10.0, "priceChange24h": 5.25}}
         seen = {}
 
         def fake_urlopen(req, timeout=10):

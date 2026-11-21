@@ -40,7 +40,10 @@ def _fetch_sol_price() -> tuple[float | None, float | None]:
             raw = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None, None
-    entry = (raw.get("data") or {}).get(SOL_MINT) or {}
+    # Jupiter price v3 returns a flat {mint: {...}} map — no "data"
+    # wrapper (verified live 2026-11-16: {"So11...": {"usdPrice": ...}}).
+    # Accept the wrapped shape too, so either response parses.
+    entry = raw.get(SOL_MINT) or (raw.get("data") or {}).get(SOL_MINT) or {}
     try:
         price = float(entry.get("usdPrice"))
     except (TypeError, ValueError):

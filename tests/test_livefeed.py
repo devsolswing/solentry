@@ -169,6 +169,22 @@ class TestJupiterSolCheck(unittest.TestCase):
         return FakeResp()
 
     def test_jupiter_check_ingests_sol(self):
+        # Jupiter price v3 returns a FLAT {mint: {...}} map — no
+        # "data" wrapper (verified live 2026-11-16). The old test
+        # mocked the wrapped shape, so it passed while live failed.
+        feed = LiveFeed()
+        payload = {JUPITER_SOL_MINT: {
+            "usdPrice": 78.5, "priceChange24h": 2.5}}
+        with mock.patch("urllib.request.urlopen",
+                        return_value=self._fake_urlopen(payload)):
+            feed._jupiter_check()
+        snap = feed.snapshot(["SOL"])["SOL"]
+        self.assertEqual(snap["price"], 78.5)
+        self.assertEqual(snap["source"], "jupiter")
+        self.assertEqual(snap["change_24h"], 2.5)
+
+    def test_jupiter_check_ingests_sol_data_wrapped(self):
+        # Back-compat: a "data"-wrapped response still parses.
         feed = LiveFeed()
         payload = {"data": {JUPITER_SOL_MINT: {
             "usdPrice": 78.5, "priceChange24h": 2.5}}}
@@ -178,7 +194,6 @@ class TestJupiterSolCheck(unittest.TestCase):
         snap = feed.snapshot(["SOL"])["SOL"]
         self.assertEqual(snap["price"], 78.5)
         self.assertEqual(snap["source"], "jupiter")
-        self.assertEqual(snap["change_24h"], 2.5)
 
     def test_jupiter_check_failure_leaves_no_tick(self):
         feed = LiveFeed()
@@ -189,7 +204,9 @@ class TestJupiterSolCheck(unittest.TestCase):
 
     def test_jupiter_check_bad_payload_leaves_no_tick(self):
         feed = LiveFeed()
-        for payload in ({"data": {}}, {"data": {JUPITER_SOL_MINT: {}}},
+        for payload in ({}, {JUPITER_SOL_MINT: {}},
+                        {JUPITER_SOL_MINT: {"usdPrice": -1}},
+                        {"data": {}}, {"data": {JUPITER_SOL_MINT: {}}},
                         {"data": {JUPITER_SOL_MINT: {"usdPrice": -1}}}):
             with mock.patch("urllib.request.urlopen",
                             return_value=self._fake_urlopen(payload)):
