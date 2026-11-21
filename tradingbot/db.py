@@ -549,9 +549,12 @@ _MIGRATIONS = (
     ("bots", "silent", "INTEGER NOT NULL DEFAULT 0"),
     ("bots", "max_open_trades", "INTEGER NOT NULL DEFAULT 3"),
     ("users", "recovery_question", "TEXT NOT NULL DEFAULT ''"),
-    # Email collected at signup (used by the forgot-username flow:
-    # email + security answer reveals the username). '' for accounts
-    # created before the field existed.
+    # `users.email` is KEPT on purpose (owner, 2026-11-20): no
+    # email is collected at signup any more, but older accounts
+    # had their password hash and wallet key derived from
+    # password+email, so their stored email must stay — blanking
+    # it would lock them out and make their wallets undecryptable.
+    # New accounts store ''. The column is never dropped.
     ("users", "email", "TEXT NOT NULL DEFAULT ''"),
     ("users", "recovery_answer_hash", "TEXT NOT NULL DEFAULT ''"),
     ("users", "recovery_answer_salt", "TEXT NOT NULL DEFAULT ''"),

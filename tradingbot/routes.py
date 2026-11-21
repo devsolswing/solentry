@@ -44,7 +44,6 @@ from . import jupiter as jupiter_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
 from . import pnl as pnl_mod
-from . import security_bot as security_bot_mod
 from . import wallet_keys as wallet_keys_mod
 from .page_numbers import page_list, page_number_for
 from . import rate_limit as rate_limit_mod
@@ -101,14 +100,6 @@ MAX_BOT_CREATES_PER_USER = 20        # bot creates, 1 hour, per user
 BOT_CREATE_USER_WINDOW_SECONDS = 60 * 60
 MAX_POST_BURST_PER_IP = 120          # POSTs to guarded endpoints, 1 min
 POST_BURST_WINDOW_SECONDS = 60
-# Security bot / Recover Account: code requests are rate-limited
-# per IP and per email so one address cannot be spammed with codes
-# and one IP cannot hammer the flow. The code itself allows only
-# 5 wrong tries before it is void.
-MAX_RECOVER_PER_IP = 10              # recovery code requests, 1 hour, per IP
-RECOVER_IP_WINDOW_SECONDS = 60 * 60
-MAX_RECOVER_PER_EMAIL = 5            # recovery code requests, 1 hour, per email
-RECOVER_EMAIL_WINDOW_SECONDS = 60 * 60
 # Anomaly detection: this many failed logins in 15 minutes from IPs
 # the account has never successfully logged in from locks the
 # account for 15 minutes and writes a suspicious-activity audit row.
@@ -1076,10 +1067,10 @@ def _confirm_token_send(app, user, intent, return_to, return_coin_id):
 
 
 def _create_account_from_pending(db, app, pending) -> int | None:
-    """Create a user account from a pending signup row. The email
-    is already confirmed (correct code entered) or the signup was
-    approved by the admin override. Returns the new user id, or
-    None when the username/email was taken in the meantime (the
+    """Create a user account from a pending signup row. The row is
+    staged by signup() and consumed here in the same request —
+    there is no email-code step any more. Returns the new user id,
+    or None when the username was taken in the meantime (the
     pending row is deleted either way).
 
     Creates the user (v2 password hash bound to the email), the
@@ -1217,10 +1208,9 @@ def register_routes(app: Flask) -> None:
     # endpoints (login, signup, sends, bot creation, trades). A
     # burst past the limit is a plain 429 — the action never runs.
     _BURST_ENDPOINTS = {
-        "login", "signup", "signup_verify_code", "wallet_send",
+        "login", "signup", "wallet_send",
         "wallet_send_confirm", "bot_create", "bot_preset_trenches",
-        "coin_buy", "coin_sell", "recover_account",
-        "recover_account_verify", "recover_account_reset",
+        "coin_buy", "coin_sell",
     }
 
     @app.before_request
@@ -1324,21 +1314,21 @@ def register_routes(app: Flask) -> None:
             if len(password) < 8:
                 flash("Password must be at least 8 characters.")
                 return redirect(url_for("signup"))
-            # The sign-up page collects the email (REQUIRED — the
-            # account is linked to it, and the Security bot sends
-            # the confirmation code there) and the recovery
+            # No email is collected at signup any more (owner,
+            # 2026-11-20): the emailed confirmation codes are gone,
+            # and so is the Email field. New accounts store
+            # email = '' — the v2 password hash and wallet key are
+            # still derived through the same password+email code,
+            # with the email factor empty. Existing accounts keep
+            # their stored email (it is the crypto input for their
+            # login + wallet) — never blank it. The recovery
             # question/answer/hint (same bounds as the Settings
-            # recovery form). A question without an answer (or the
-            # reverse) is refused.
-            email = (request.form.get("email") or "").strip().lower()
+            # recovery form) are the only account recovery now: a
+            # question without an answer (or the reverse) is refused.
+            email = ""
             question = (request.form.get("question") or "").strip()
             answer = (request.form.get("answer") or "").strip()
             hint = (request.form.get("hint") or "").strip()
-            if not email or ("@" not in email
-                             or "." not in email.rsplit("@", 1)[-1]
-                             or len(email) > 254):
-                flash("Enter a valid email address.")
-                return redirect(url_for("signup"))
             if question or answer:
                 if not 3 <= len(question) <= 200:
                     flash("The security question must be 3-200 "
@@ -1356,20 +1346,16 @@ def register_routes(app: Flask) -> None:
                           (username,)).fetchone():
                 flash("That username is taken.")
                 return redirect(url_for("signup"))
-            if db.execute(
-                    "SELECT id FROM users WHERE LOWER(email) = LOWER(?) "
-                    "AND email != ''", (email,)).fetchone():
-                flash("That email is already registered.")
-                return redirect(url_for("signup"))
-            # The account is NOT created yet. The signup is held as
-            # a pending row and the Security bot sends a 4-digit
-            # confirmation code to the email; only the correct code
-            # (entered in the popup) creates the account. The
-            # password hash is bound to the email (v2) and the user
-            # key (password+email) is derived now — while the
-            # plaintext password is available — and stored wrapped
-            # with the server key, so the wallet can be created at
-            # verification time without ever storing the password.
+            # The account is created directly — no email code step.
+            # The password hash is bound to the (empty) email (v2)
+            # and the user key (password+email) is derived now —
+            # while the plaintext password is available — and
+            # stored wrapped with the server key, so the wallet can
+            # be created without ever storing the password. The
+            # signup is staged as a pending row only so the shared
+            # account-creation helper can consume it in this same
+            # request (exactly the path the old admin override
+            # used); the row is deleted by that helper.
             salt, pw_hash = hash_account_password(password, email)
             ans_salt, ans_hash = ("", "")
             if question and answer:
@@ -1382,12 +1368,9 @@ def register_routes(app: Flask) -> None:
                     user_key, _cfg(app).encryption_key)
             finally:
                 wipe_secret(user_key)
-            # A re-submit starts fresh (and owns the email).
+            # A re-submit starts fresh.
             db.execute("DELETE FROM pending_signups WHERE username = ?",
                        (username,))
-            db.execute(
-                "DELETE FROM pending_signups WHERE LOWER(email) = LOWER(?)",
-                (email,))
             cur = db.execute(
                 "INSERT INTO pending_signups (username, password_hash, "
                 "salt, pw_version, email, recovery_question, "
@@ -1399,80 +1382,23 @@ def register_routes(app: Flask) -> None:
                  int(time.time())))
             pending_id = cur.lastrowid
             db.commit()
-            result = security_bot_mod.issue_code(
-                db, _cfg(app), purpose=security_bot_mod.PURPOSE_SIGNUP,
-                email=email)
-            if not result["ok"]:
-                db.execute("DELETE FROM pending_signups WHERE id = ?",
-                           (pending_id,))
-                db.commit()
-                if result["error"] == "email is not set up yet":
-                    flash("Email is not set up yet — the app cannot "
-                          "send a confirmation code right now. Please "
-                          "try again later.")
-                else:
-                    flash("Could not send the confirmation code right "
-                          "now. Please try again later.")
+            pending = db.execute(
+                "SELECT * FROM pending_signups WHERE id = ?",
+                (pending_id,)).fetchone()
+            user_id = _create_account_from_pending(db, app, pending)
+            if user_id is None:
+                flash("That username was just taken. "
+                      "Please start again.")
                 return redirect(url_for("signup"))
-            session["pending_signup_id"] = pending_id
-            session["pending_signup_email"] = email
-            return render_template(
-                "auth.html", mode="signup", show_code_popup=True,
-                pending_email=email, dev_code=result.get("dev_code"))
+            _log(app, user_id, "signup",
+                 "Account created; app wallet generated.")
+            _rotate_session(user_id)
+            # Fresh sign-in: the mode chooser shows once, then the
+            # answer is remembered (see _clear_mode_chosen).
+            _clear_mode_chosen(_db(app), user_id)
+            flash("Welcome! Your app wallet was created for you.")
+            return redirect(url_for("wallet"))
         return render_template("auth.html", mode="signup")
-
-    @app.route("/signup/verify-code", methods=["POST"])
-    def signup_verify_code():
-        """Second step of signup: the 4-digit code from the Security
-        bot's email. A correct code creates the account (user, app
-        wallet encrypted with the password+email user key, signing
-        bot, paper portfolio) and signs the user in. A wrong or
-        expired code is a plain rejection — no account is created.
-        The pending signup expires after 30 minutes."""
-        _csrf_check()
-        pending_id = session.get("pending_signup_id")
-        db = _db(app)
-        if not pending_id:
-            flash("Your signup expired. Please start again.")
-            return redirect(url_for("signup"))
-        pending = db.execute(
-            "SELECT * FROM pending_signups WHERE id = ?",
-            (pending_id,)).fetchone()
-        if not pending or int(time.time()) - int(pending["created_at"]) > 30 * 60:
-            session.pop("pending_signup_id", None)
-            session.pop("pending_signup_email", None)
-            if pending:
-                db.execute("DELETE FROM pending_signups WHERE id = ?",
-                           (pending_id,))
-                db.commit()
-            flash("Your signup expired. Please start again.")
-            return redirect(url_for("signup"))
-        code = request.form.get("code") or ""
-        ok, reason = security_bot_mod.verify_code(
-            db, purpose=security_bot_mod.PURPOSE_SIGNUP,
-            email=pending["email"], code=code)
-        if not ok:
-            return render_template(
-                "auth.html", mode="signup", show_code_popup=True,
-                pending_email=pending["email"], code_error=reason)
-        # The code was right — create the account from the pending row.
-        user_id = _create_account_from_pending(db, app, pending)
-        if user_id is None:
-            session.pop("pending_signup_id", None)
-            session.pop("pending_signup_email", None)
-            flash("That username or email was just taken. "
-                  "Please start again.")
-            return redirect(url_for("signup"))
-        _log(app, user_id, "signup",
-             "Account created (email confirmed); app wallet generated.")
-        session.pop("pending_signup_id", None)
-        session.pop("pending_signup_email", None)
-        _rotate_session(user_id)
-        # Fresh sign-in: the mode chooser shows once, then the
-        # answer is remembered (see _clear_mode_chosen).
-        _clear_mode_chosen(_db(app), user_id)
-        flash("Welcome! Your app wallet was created for you.")
-        return redirect(url_for("wallet"))
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -1548,9 +1474,9 @@ def register_routes(app: Flask) -> None:
         # the donor's browser fetches it from /api/donate/info
         # when it builds the transfer. When the recipient is not
         # configured the card says so plainly. The username field
-        # takes the account username (per the fox design); the email
-        # is collected at sign-up and used by the forgot-username
-        # flow, never as a login name.
+        # takes the account username (per the fox design); no email
+        # is collected at sign-up any more, and the username is
+        # never an email address.
         try:
             donation_masked = donations_mod.mask_address(
                 donations_mod.get_donation_recipient(_cfg(app)))
@@ -1559,18 +1485,7 @@ def register_routes(app: Flask) -> None:
         return render_template(
             "login.html",
             donation_address_masked=donation_masked,
-            rpc_url=_cfg(app).rpc_url,
-            # Recover Account popup state (None = closed): "email",
-            # "code", or "reset". The popup lives on Page 1 and its
-            # steps are rendered server-side by the recover routes.
-            # Read with .get, NOT .pop — a reload of the login page
-            # must not wipe the popup mid-flow; the state is cleared
-            # by the reset route on success or by /recover-account/
-            # cancel when the user closes the popup.
-            recover_step=session.get("recover_step"),
-            recover_email=session.get("recover_email", ""),
-            recover_error=session.get("recover_error", ""),
-            recover_dev_code=session.get("recover_dev_code", ""))
+            rpc_url=_cfg(app).rpc_url)
 
     @app.route("/logout")
     def logout():
@@ -1586,7 +1501,7 @@ def register_routes(app: Flask) -> None:
     def settings():
         user = _current_user(app)
         row = _db(app).execute(
-            "SELECT username, email, recovery_question, recovery_hint, "
+            "SELECT username, recovery_question, recovery_hint, "
             "recovery_answer_hash FROM users WHERE id = ?",
             (user["id"],)).fetchone()
         passkeys = _db(app).execute(
@@ -1598,7 +1513,6 @@ def register_routes(app: Flask) -> None:
         return render_template(
             "settings.html",
             username=row["username"],
-            email=row["email"],
             has_recovery=bool(row["recovery_answer_hash"]),
             recovery_question=row["recovery_question"],
             recovery_hint=row["recovery_hint"],
@@ -1728,262 +1642,6 @@ def register_routes(app: Flask) -> None:
             flash("Password changed. Log in with your new password.")
             return redirect(url_for("login"))
         return render_template("forgot_reset.html")
-
-    @app.route("/forgot-username", methods=["GET", "POST"])
-    def forgot_username():
-        """Recover a forgotten username: signup email + security answer.
-
-        The app sends no mail, so the username is revealed on screen
-        — only after the security answer proves ownership. One
-        generic message covers every not-ready case (no such email,
-        no question set) so the page never reveals whether an email
-        is registered. Wrong answers count toward the same 5-try
-        lockout as the forgot-password flow, keyed by username.
-        """
-        if request.method == "POST":
-            _csrf_check()
-            # Phase 2: the security answer, for the account the
-            # email step already resolved.
-            if "answer" in request.form:
-                user_id = session.get("forgot_username_user_id")
-                if not user_id:
-                    return redirect(url_for("forgot_username"))
-                row = _db(app).execute(
-                    "SELECT username, recovery_question, recovery_hint, "
-                    "recovery_answer_hash, recovery_answer_salt FROM users "
-                    "WHERE id = ?", (user_id,)).fetchone()
-                if not row or not row["recovery_question"]:
-                    session.pop("forgot_username_user_id", None)
-                    return redirect(url_for("forgot_username"))
-                if _check_login_lock(app, row["username"]):
-                    flash("Too many failed tries. Locked for 15 minutes.")
-                    return redirect(url_for("login"))
-                answer = request.form.get("answer") or ""
-                if not verify_password(answer, row["recovery_answer_salt"],
-                                       row["recovery_answer_hash"]):
-                    _record_login_fail(app, row["username"])
-                    flash("That answer is wrong.")
-                    return redirect(url_for("forgot_username"))
-                _clear_login_fails(app, row["username"])
-                session.pop("forgot_username_user_id", None)
-                _log(app, user_id, "username_recovered",
-                     "Username revealed through email + security answer.")
-                return render_template(
-                    "forgot_username.html", phase="revealed",
-                    username=row["username"])
-            # Phase 1: the signup email.
-            email = (request.form.get("email") or "").strip()
-            not_ready = ("Account recovery is not set up for this "
-                         "account.")
-            row = _db(app).execute(
-                "SELECT id, recovery_question FROM users "
-                "WHERE LOWER(email) = LOWER(?) AND email != ''",
-                (email,)).fetchone()
-            if not row or not row["recovery_question"]:
-                flash(not_ready)
-                return redirect(url_for("forgot_username"))
-            session["forgot_username_user_id"] = row["id"]
-            return redirect(url_for("forgot_username"))
-        # GET: the question form when the email step already resolved
-        # an account, otherwise the email form.
-        user_id = session.get("forgot_username_user_id")
-        if user_id:
-            row = _db(app).execute(
-                "SELECT recovery_question, recovery_hint FROM users "
-                "WHERE id = ?", (user_id,)).fetchone()
-            if row and row["recovery_question"]:
-                return render_template(
-                    "forgot_username.html", phase="question",
-                    question=row["recovery_question"],
-                    hint=row["recovery_hint"])
-            session.pop("forgot_username_user_id", None)
-        return render_template("forgot_username.html", phase="email")
-
-    # ------------------------------------------------------------------
-    # Recover Account (Page 1 popup): for a user who forgot their
-    # secret question's answer — so the security-question recovery
-    # cannot help them — and lost access to the account. The
-    # Security bot emails them a 4-digit code; the code unlocks a
-    # new password + new security question. This is a SEPARATE path
-    # from forgot-password (security question) and forgot-username
-    # (Page 19) — neither of those is changed here.
-    #
-    # Steps (the popup on the login page renders one step at a
-    # time, driven by session state; every POST redirects back to
-    # /login, which pops the state and re-renders the popup):
-    #   email -> the user enters their email (or username); the
-    #            Security bot sends a code to the account email.
-    #            Unknown email/username gets the SAME generic
-    #            treatment (the popup still advances to the code
-    #            step) so the page never reveals whether an
-    #            account exists.
-    #   code  -> "enter the code we've sent to your email".
-    #   reset -> new password + new security question (+ answer).
-    #            Enter changes the password (re-encrypted with the
-    #            new password+email) and sets the new question.
-    # ------------------------------------------------------------------
-    @app.route("/recover-account/cancel")
-    def recover_account_cancel():
-        """Close the Recover Account popup (the ✕ in the popup):
-        clear the recover state and go back to plain Page 1."""
-        session.pop("recover_step", None)
-        session.pop("recover_email", None)
-        session.pop("recover_error", None)
-        session.pop("recover_dev_code", None)
-        session.pop("recover_user_id", None)
-        return redirect(url_for("login"))
-
-    @app.route("/recover-account", methods=["GET", "POST"])
-    def recover_account():
-        if request.method == "GET":
-            session["recover_step"] = "email"
-            session["recover_email"] = ""
-            session["recover_error"] = ""
-            return redirect(url_for("login"))
-        _csrf_check()
-        identifier = (request.form.get("identifier") or "").strip()
-        ip = _client_ip()
-        if not rate_limit_mod.record_hit(
-                _db(app), f"recover:ip:{ip}",
-                MAX_RECOVER_PER_IP, RECOVER_IP_WINDOW_SECONDS):
-            session["recover_step"] = "email"
-            session["recover_error"] = (
-                "Too many tries from this address. "
-                "Please try again later.")
-            return redirect(url_for("login"))
-        if not identifier:
-            session["recover_step"] = "email"
-            session["recover_error"] = "Enter your email or username."
-            return redirect(url_for("login"))
-        db = _db(app)
-        row = None
-        if "@" in identifier:
-            if not rate_limit_mod.record_hit(
-                    db, f"recover:email:{identifier.lower()}",
-                    MAX_RECOVER_PER_EMAIL, RECOVER_EMAIL_WINDOW_SECONDS):
-                session["recover_step"] = "email"
-                session["recover_error"] = (
-                    "Too many tries for that email. "
-                    "Please try again later.")
-                return redirect(url_for("login"))
-            row = db.execute(
-                "SELECT id, email FROM users "
-                "WHERE LOWER(email) = LOWER(?) AND email != ''",
-                (identifier,)).fetchone()
-        else:
-            row = db.execute(
-                "SELECT id, email FROM users WHERE username = ?",
-                (identifier,)).fetchone()
-        # The popup advances to the code step either way — an
-        # unknown email/username is indistinguishable from a real
-        # one (no code is sent, so no code can ever match).
-        if row and row["email"]:
-            result = security_bot_mod.issue_code(
-                db, _cfg(app), purpose=security_bot_mod.PURPOSE_RECOVER,
-                email=row["email"], user_id=row["id"])
-            if result.get("dev_code"):
-                # Test-only fallback (dev-echo flag on): the code
-                # is shown in the popup so the flow can be tested
-                # without SMTP. Never in production.
-                session["recover_dev_code"] = result["dev_code"]
-            session["recover_email"] = row["email"]
-        else:
-            session["recover_email"] = identifier
-        session["recover_step"] = "code"
-        session["recover_error"] = ""
-        return redirect(url_for("login"))
-
-    @app.route("/recover-account/verify", methods=["POST"])
-    def recover_account_verify():
-        _csrf_check()
-        db = _db(app)
-        email = session.get("recover_email") or ""
-        code = request.form.get("code") or ""
-        if not email:
-            session["recover_step"] = "email"
-            session["recover_error"] = "Enter your email or username."
-            return redirect(url_for("login"))
-        ok, reason = security_bot_mod.verify_code(
-            db, purpose=security_bot_mod.PURPOSE_RECOVER,
-            email=email, code=code)
-        if not ok:
-            session["recover_step"] = "code"
-            session["recover_error"] = reason
-            return redirect(url_for("login"))
-        row = db.execute(
-            "SELECT id FROM users WHERE LOWER(email) = LOWER(?) "
-            "AND email != ''", (email,)).fetchone()
-        if not row:
-            session["recover_step"] = "email"
-            session["recover_error"] = "That code is wrong."
-            return redirect(url_for("login"))
-        session["recover_user_id"] = row["id"]
-        session["recover_step"] = "reset"
-        session["recover_error"] = ""
-        return redirect(url_for("login"))
-
-    @app.route("/recover-account/reset", methods=["POST"])
-    def recover_account_reset():
-        _csrf_check()
-        user_id = session.get("recover_user_id")
-        if not user_id:
-            return redirect(url_for("login"))
-        db = _db(app)
-        password = request.form.get("password") or ""
-        question = (request.form.get("question") or "").strip()
-        answer = (request.form.get("answer") or "").strip()
-        hint = (request.form.get("hint") or "").strip()
-        if len(password) < 8:
-            session["recover_step"] = "reset"
-            session["recover_error"] = (
-                "Password must be at least 8 characters.")
-            return redirect(url_for("login"))
-        if not 3 <= len(question) <= 200:
-            session["recover_step"] = "reset"
-            session["recover_error"] = (
-                "The security question must be 3-200 characters.")
-            return redirect(url_for("login"))
-        if not answer or len(answer) > 200:
-            session["recover_step"] = "reset"
-            session["recover_error"] = (
-                "The security answer must not be empty "
-                "(max 200 characters).")
-            return redirect(url_for("login"))
-        if len(hint) > 200:
-            session["recover_step"] = "reset"
-            session["recover_error"] = (
-                "The hint must be at most 200 characters.")
-            return redirect(url_for("login"))
-        row = db.execute(
-            "SELECT username FROM users WHERE id = ?",
-            (user_id,)).fetchone()
-        if not row:
-            session.pop("recover_user_id", None)
-            session["recover_step"] = "email"
-            session["recover_error"] = ""
-            return redirect(url_for("login"))
-        # New password (bound to the email, wallet re-encrypted
-        # with the new password+email user key) + new security
-        # question/answer, in one step.
-        _set_account_password(db, _cfg(app), user_id, password)
-        ans_salt, ans_hash = hash_password(answer)
-        db.execute(
-            "UPDATE users SET recovery_question = ?, "
-            "recovery_answer_hash = ?, recovery_answer_salt = ?, "
-            "recovery_hint = ? WHERE id = ?",
-            (question, ans_hash, ans_salt, hint, user_id))
-        db.commit()
-        _clear_login_fails(app, row["username"])
-        _log(app, user_id, "password_reset",
-             "Password + security question changed through Recover "
-             "Account (email code).")
-        session.pop("recover_user_id", None)
-        session.pop("recover_step", None)
-        session.pop("recover_email", None)
-        session.pop("recover_error", None)
-        session.pop("recover_dev_code", None)
-        flash("Password changed. Log in with your new password.")
-        return redirect(url_for("login"))
 
     # ------------------------------------------------------------------
     # Passkeys (WebAuthn): register in Settings, sign in from Login.
@@ -2281,16 +1939,11 @@ def register_routes(app: Flask) -> None:
     # username, the action, and the time) so there is an audit
     # trail of who overrode what, when. The target user also gets
     # an activity row for password resets, so their own log shows
-    # it. The override never emails anyone anything — the only
-    # emails the app ever sends are the Security bot's two codes
-    # (signup + recovery); the admin tells the user the new
-    # password himself, out of band.
+    # it. The app sends no emails at all — the admin tells the
+    # user the new password himself, out of band.
     #   * reset password — set a new password for a user (bound
-    #     to their email, wallet re-encrypted, as everywhere).
+    #     to their stored email, wallet re-encrypted, as everywhere).
     #   * clear lockout — clear a user's 15-minute login lockout.
-    #   * approve signup — create a pending signup's account
-    #     without the email code (email never arrived, etc.).
-    #   * void codes — void a user's outstanding email codes.
     # ------------------------------------------------------------------
     @app.route("/admin/security")
     @login_required
@@ -2306,12 +1959,8 @@ def register_routes(app: Flask) -> None:
         locked = {r["username"] for r in db.execute(
             "SELECT username FROM login_attempts "
             "WHERE locked_until IS NOT NULL").fetchall()}
-        pending = db.execute(
-            "SELECT id, username, email, created_at FROM pending_signups "
-            "ORDER BY id ASC").fetchall()
         return render_template(
-            "admin_security.html", users=users, locked=locked,
-            pending=pending)
+            "admin_security.html", users=users, locked=locked)
 
     def _admin_override_log(app, admin_user, action: str,
                             target_username: str) -> None:
@@ -2358,59 +2007,6 @@ def register_routes(app: Flask) -> None:
         _clear_login_fails(app, username)
         _admin_override_log(app, admin, "cleared login lockout", username)
         flash(f"Lockout cleared for {username}.")
-        return redirect(url_for("admin_security"))
-
-    @app.route("/admin/security/approve-signup", methods=["POST"])
-    @login_required
-    def admin_security_approve_signup():
-        admin = _current_user(app)
-        if not _is_admin(admin):
-            abort(403)
-        _csrf_check()
-        pending_id = request.form.get("pending_id") or ""
-        db = _db(app)
-        try:
-            pending_id_int = int(pending_id)
-        except ValueError:
-            flash("Bad signup.")
-            return redirect(url_for("admin_security"))
-        pending = db.execute(
-            "SELECT * FROM pending_signups WHERE id = ?",
-            (pending_id_int,)).fetchone()
-        if not pending:
-            flash("That signup is gone.")
-            return redirect(url_for("admin_security"))
-        user_id = _create_account_from_pending(db, app, pending)
-        if user_id is None:
-            flash("That username or email was just taken.")
-            return redirect(url_for("admin_security"))
-        _log(app, user_id, "signup",
-             "Account created by admin override (code bypassed).")
-        _admin_override_log(app, admin, "approved signup (code bypassed)",
-                            pending["username"])
-        flash(f"Account created for {pending['username']}.")
-        return redirect(url_for("admin_security"))
-
-    @app.route("/admin/security/void-codes", methods=["POST"])
-    @login_required
-    def admin_security_void_codes():
-        admin = _current_user(app)
-        if not _is_admin(admin):
-            abort(403)
-        _csrf_check()
-        username = (request.form.get("username") or "").strip()
-        db = _db(app)
-        row = db.execute(
-            "SELECT id, email FROM users WHERE username = ?",
-            (username,)).fetchone()
-        if not row:
-            flash("No such user.")
-            return redirect(url_for("admin_security"))
-        count = security_bot_mod.void_codes(
-            db, user_id=row["id"], email=row["email"] or None)
-        _admin_override_log(
-            app, admin, f"voided {count} email code(s)", username)
-        flash(f"Voided {count} code(s) for {username}.")
         return redirect(url_for("admin_security"))
 
     # ------------------------------------------------------------------

@@ -243,7 +243,6 @@ class JupiterExecutorBase(unittest.TestCase):
             "NETWORK": "mainnet",
             "DATABASE_PATH": self.cfg.database_path,
             "PAPER_START_CASH": "100",
-            "SECURITY_CODE_DEV_ECHO": "1",
             "JUPITER_REAL_SWAPS": "1",
         })
 

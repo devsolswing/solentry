@@ -1,12 +1,13 @@
 """Login page: fox design from James's screenshots (Pages 1 and 2).
 
 Page 1 (Login): black background, gold fox logo + "SolEntry"
-wordmark, gold-bordered fields, red "Forgot username?"/"Forgot
-password?" links, gold Login button, red Back button, Donate button,
+wordmark, gold-bordered fields, red "Forgot password?" link, gold
+Login button, red Back button, Donate button,
 gold fox hero with "Still on the $GATE?" — every word functional.
-Page 2 (Sign up): same header/hero, username + email + password
+Page 2 (Sign up): same header/hero, username + password
 (with eye) + security question + answer + hint, Create Account and
-Back to Login.
+Back to Login. (No email is collected anywhere any more — owner,
+2026-11-20 — and the Forgot username link is gone with it.)
 """
 
 import tempfile
@@ -53,8 +54,11 @@ class TestLoginPage(unittest.TestCase):
         self.assertIn('name="password"', html)
         self.assertIn('id="fox-eye"', html)
         self.assertIn(">Login</button>", html)
-        self.assertIn('href="/forgot-username"', html)
-        self.assertIn("Forgot username?", html)
+        # Forgot username is gone with the email removal, and so is
+        # the Recover Account popup.
+        self.assertNotIn('href="/forgot-username"', html)
+        self.assertNotIn("Forgot username?", html)
+        self.assertNotIn("Recover Account", html)
         self.assertIn('href="/forgot-password"', html)
         self.assertIn("Forgot password?", html)
         # Back is gone: a Create Account button goes to Sign up.
@@ -93,9 +97,11 @@ class TestLoginPage(unittest.TestCase):
         self.assertIn("fox-gold-480.jpg", html)
         self.assertIn("Still on", html)
         self.assertIn("$GATE?", html)
-        for name in ("username", "email", "password", "question",
+        for name in ("username", "password", "question",
                      "answer", "hint"):
             self.assertIn(f'name="{name}"', html, name)
+        # No email field any more (owner, 2026-11-20).
+        self.assertNotIn('name="email"', html)
         self.assertIn('id="fox-eye"', html)
         self.assertIn("Create Account", html)
         self.assertIn('href="/login"', html)
