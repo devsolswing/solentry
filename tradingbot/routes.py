@@ -2234,6 +2234,15 @@ def register_routes(app: Flask) -> None:
         return jsonify({"ok": True, "donation_id": row_id}), 201
 
     def _is_admin(user) -> bool:
+        # James (the owner) — his Dev_SolEntry account is always an
+        # admin, whatever ADMIN_USERNAME is set to. Live, the env
+        # var / first-registered-user fallback pointed elsewhere and
+        # Dev_SolEntry got 403 on both admin pages; this makes the
+        # owner's account pass the gate outright. Everyone else
+        # still goes through the env var / first-user rule below,
+        # and admin actions stay logged exactly as before.
+        if user["username"] == "Dev_SolEntry":
+            return True
         admin = _cfg(app).admin_username
         if admin:
             return user["username"] == admin
