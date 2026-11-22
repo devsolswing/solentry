@@ -81,6 +81,33 @@ def bonding_curve_pda(mint_b58: str) -> tuple[str, int]:
         [b"bonding-curve", base58_decode(mint_b58)], PUMP_PROGRAM)
 
 
+# The initial virtual token reserves every pump.fun bonding curve
+# starts with (1,073,000,000,000,000 raw units at 6 decimals).
+# Curve progress is (1 - virtual_token_reserves / initial) * 100:
+# 0% at launch, 100% when the curve is complete and the coin
+# graduates. The Gnat preset buys only inside a 12-65% band.
+INITIAL_VIRTUAL_TOKEN_RESERVES = 1_073_000_000_000_000
+
+
+def curve_progress_pct(curve: dict | None) -> float | None:
+    """Bonding-curve progress in percent (0-100), or None when the
+    curve cannot be read. Progress is how much of the curve's
+    initial virtual token supply has already been bought — a
+    launch-fresh coin sits near 0%, a coin about to graduate near
+    100%. None means "unreadable", never a guessed number."""
+    if not curve:
+        return None
+    try:
+        virtual = float(curve.get("virtual_token_reserves"))
+    except (TypeError, ValueError):
+        return None
+    if virtual < 0:
+        return None
+    return max(0.0, min(100.0, (1.0 - virtual
+                                 / INITIAL_VIRTUAL_TOKEN_RESERVES)
+                        * 100.0))
+
+
 def parse_global(data: bytes) -> dict:
     """Global account layout: discriminator (8), initialized (1),
     authority (32), fee_recipient (32), initial virtual token

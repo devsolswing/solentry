@@ -100,7 +100,7 @@ from .scanner import (BUY_FILTER_DEFAULT, BUY_FILTER_KEYS, REGIME_DEFAULT,
                       SLOW_LADDER, TRENDING_LADDER)
 
 RULE_VERSION = 1
-RULE_KINDS = ("trenches", "signals", "scanner")
+RULE_KINDS = ("trenches", "signals", "scanner", "gnat")
 RULE_SOURCES = ("pump.fun", "pumpswap", "dexscreener")
 
 # Windows the feeds provide, in seconds -> buy-metric name. The
@@ -382,6 +382,154 @@ CLYDE_NOTES = [
 ]
 
 
+GNAT_CATEGORY = "Gnat"
+GNAT_PRESET_NAME = "Gnat"
+GNAT_SCAN_INTERVAL_SECONDS = 30
+# James's spec values (2026-11-21) — REMY DEFAULTS awaiting his call.
+# They are his suggested numbers, not verified rules: label them so
+# everywhere they surface, and never present them as his final word.
+GNAT_BUY_THRESHOLD_PCT = 5.0
+GNAT_BUY_WINDOW_SECONDS = 180
+GNAT_STOP_LOSS_PCT = 18.0
+GNAT_BUY_SIZE_PCT = 18
+# Fixed size: 0.25 SOL per trade (James's spec). The app's buy model
+# is %-of-capital, so the loop converts 0.25 SOL at the live SOL
+# price when it can, and falls back to GNAT_BUY_SIZE_PCT of the
+# paper bankroll when no live SOL price exists (see silent_loop).
+GNAT_BUY_SIZE_SOL = 0.25
+GNAT_MAX_OPEN_TRADES = 3
+# Curve band: buy only while the bonding curve is 12-65% filled.
+GNAT_CURVE_MIN_PCT = 12.0
+GNAT_CURVE_MAX_PCT = 65.0
+# Buy-pressure gates (closest version — see GNAT_NOTES): the 5-minute
+# DexScreener txn bucket stands in for the spec's 30-second window.
+GNAT_MIN_BUYERS_5M = 15
+GNAT_MIN_BUY_SELL_RATIO = 2.5
+# Social links required at entry (spec left TRUE/FALSE open —
+# default TRUE, James's call).
+GNAT_REQUIRE_SOCIALS = True
+# Take-profit tiers: Tier 1 +40% sell 35% (stop on the rest moves to
+# breakeven +2%); Tier 2 +100% sell another 35% of the ORIGINAL
+# position; the remaining 30% rides the trailing stop.
+GNAT_TIER1_PROFIT_PCT = 40.0
+GNAT_TIER1_SELL_PCT = 35.0
+GNAT_BREAKEVEN_PLUS_PCT = 2.0
+GNAT_TIER2_PROFIT_PCT = 100.0
+GNAT_TIER2_SELL_PCT = 35.0
+# Trailing stop on the moonbag: 18% while +100% to +250%, 12%
+# above +250%.
+GNAT_TRAIL_LOW_PCT = 18.0
+GNAT_TRAIL_HIGH_PCT = 12.0
+GNAT_TRAIL_TIGHTEN_AT_PCT = 250.0
+# Momentum exhaustion (closest version): peak at least +25% and the
+# 5-minute change at or below -5% exits the rest of the position.
+GNAT_EXHAUST_MIN_PEAK_PCT = 25.0
+GNAT_EXHAUST_DROP_5M_PCT = 5.0
+# Time decay: not at least +15% within 90 seconds of entry → exit
+# 100%.
+GNAT_TIME_DECAY_SECONDS = 90
+GNAT_TIME_DECAY_MIN_GAIN_PCT = 15.0
+# Circuit breakers: halt all new entries for the rest of the day on
+# 2.0 SOL of realized losses, or after 4 consecutive losing trades.
+GNAT_MAX_DAILY_LOSS_SOL = 2.0
+GNAT_MAX_CONSEC_LOSSES = 4
+
+GNAT_RULES = {
+    "version": 1,
+    "kind": "gnat",
+    "scan_sources": ["pump.fun", "pumpswap"],
+    "scan_interval_seconds": GNAT_SCAN_INTERVAL_SECONDS,
+    "buy": {"metric": "gain_3m_pct",
+            "window_seconds": GNAT_BUY_WINDOW_SECONDS,
+            "threshold_pct": GNAT_BUY_THRESHOLD_PCT,
+            "pick": "strongest"},
+    # TP tiers as a plain sell ladder: 35% at +40%, then 35% of the
+    # ORIGINAL position at +100%. The loop sells ladder rungs as a
+    # fraction of the original amount (not the remaining amount),
+    # so these two rungs land exactly as specced; the remaining
+    # 30% rides the trailing stop below.
+    "sell_ladder": [{"pct_of_position": GNAT_TIER1_SELL_PCT,
+                     "profit_pct": GNAT_TIER1_PROFIT_PCT},
+                    {"pct_of_position": GNAT_TIER2_SELL_PCT,
+                     "profit_pct": GNAT_TIER2_PROFIT_PCT}],
+    "trailing_stop_pct": GNAT_TRAIL_LOW_PCT,
+    "rug_sell": dict(RUG_SELL_DEFAULT),
+    "top10_rug": {"drop_pct": 10.0,
+                  "concentration_pct": 25.0,
+                  "slow_climb_sell_pct": 0.0,
+                  "check_interval_seconds": 15.0},
+    "buy_filter": {"min_volume_5m_usd": 5000.0,
+                   "require_buy_dominance": True,
+                   "min_signal_pct": GNAT_BUY_THRESHOLD_PCT,
+                   "min_market_cap_usd": 0.0},
+    "max_new_positions_per_scan": 1,
+}
+
+
+def gnat_ruleset() -> dict:
+    """A fresh copy of the Gnat preset."""
+    return copy.deepcopy(GNAT_RULES)
+
+
+# Rules Gnat states that the engine cannot enforce as written.
+# Shown on the preset list, in plain words, next to the enforced
+# rules — never dropped, never pretended to be enforced.
+GNAT_NOTES = [
+    "Entry — net SOL inflow: at least 5 SOL of net positive inflow "
+    "across at least 15 unique buyers within 30 seconds. The app "
+    "has no sub-5-minute flow data and no wallet identities, so "
+    "the engine enforces the closest version instead: the coin "
+    "must show at least $5,000 of 5-minute volume, at least 15 buy "
+    "transactions in the 5-minute bucket, and a buy-to-sell "
+    "transaction ratio of at least 2.5:1 — counts, not wallets, "
+    "over 5 minutes, not 30 seconds.",
+    "Entry — bonding curve: buy only while the curve is 12-65% "
+    "filled, read straight from the on-chain bonding-curve "
+    "account (virtual token reserves vs the 1,073,000,000,000,000 "
+    "initial). A curve the RPC cannot read is never bought.",
+    "Entry — metadata and socials: the coin must have a valid "
+    "metadata URI (the on-chain Metaplex metadata account must "
+    "carry a non-empty URI) and at least one published social or "
+    "website link (counted from the DexScreener pair info). The "
+    "app cannot check whether those links are live — presence "
+    "only, never verified active. REQUIRE_SOCIALS defaults to "
+    "TRUE; James decides whether it stays on.",
+    "Anti-rug — creator: reject if the creator holds more than 5% "
+    "or has a rapid-dump history. NOT ENFORCED — the app has no "
+    "creator data source (no creator wallet, no launch history). "
+    "Recorded here, never faked. The price-based rug sell and the "
+    "top-10 watch are the live protection instead.",
+    "Anti-rug — top-10: reject if the top 10 non-curve holders "
+    "control more than 25%. ENFORCED twice: the pre-buy scam gate "
+    "rejects a coin at or over 25% concentration, and the top-10 "
+    "watch sells everything when a held coin's share reaches 25%.",
+    "Momentum exhaustion: exit when the rolling 10-second net SOL "
+    "flow flips negative by more than 4 SOL after being up at "
+    "least +25%. The app has no 10-second flow data, so the "
+    "engine enforces the closest version: when the peak is at "
+    "least +25% and the 5-minute change is at or below -5%, the "
+    "rest of the position exits in full.",
+    "Emergency exits — creator sells any tokens, one sell removes "
+    "more than 8% of the curve's virtual SOL, or buy velocity is "
+    "zero for 20 seconds while in drawdown: NOT ENFORCED — the "
+    "app has no wallet tracking and no per-second transaction "
+    "stream. Covered by the price-based rug sell, the top-10 "
+    "watch, the -18% hard stop and the 90-second time decay.",
+    "Sizing: 0.25 SOL per trade. The app's buy model is "
+    "%-of-capital, so the loop converts 0.25 SOL at the live SOL "
+    "price when it can, and falls back to 18% of the paper "
+    "bankroll when no live SOL price exists — the fallback is "
+    "labelled in the log, never silent.",
+    "Slippage stays at the app's 1% — the spec's 12%/20% is "
+    "James's call, not built. Jito tips are not built (they cost "
+    "SOL per trade) — also James's call.",
+    "Stops are non-negotiable: the -18% hard stop, the breakeven "
+    "+2% after +40%, the 18%/12% trailing tiers, the 90-second "
+    "time decay and the circuit breakers are James's spec. The "
+    "builderBot auto-tighten does NOT rewrite a Gnat bot's rules.",
+]
+
+
 def preset_bots() -> list:
     """The preset bots, in list order — Clyde first, then the
     existing presets. Each entry carries a fresh copy of its rule
@@ -413,6 +561,14 @@ def preset_bots() -> list:
          "rules": scanner_ruleset(),
          "notes": [],
          "endpoint": "bot_preset_scanner"},
+        {"key": "gnat",
+         "name": GNAT_PRESET_NAME,
+         "tagline": "Curve + buy-pressure sniper — 12-65% curve, "
+                    "0.25 SOL a trade, tiered take-profit.",
+         "category": GNAT_CATEGORY,
+         "rules": gnat_ruleset(),
+         "notes": list(GNAT_NOTES),
+         "endpoint": "bot_preset_gnat"},
     ]
 
 
@@ -487,15 +643,16 @@ def validate_ruleset(raw, bot=None):
     if kind not in RULE_KINDS:
         return _fail("The rule kind must be 'trenches' (scan pump.fun "
                      "and PumpSwap), 'scanner' (snipe gainers in "
-                     "3 minutes) or 'signals' (your own coin list).")
+                     "3 minutes), 'gnat' (curve + buy-pressure sniper) "
+                     "or 'signals' (your own coin list).")
     interval = raw.get("scan_interval_seconds")
     if not isinstance(interval, int) or isinstance(interval, bool) \
             or not 10 <= interval <= 3600:
         return _fail("Scan interval must be between 10 and 3600 seconds.")
     sources = raw.get("scan_sources", [])
-    if kind in ("trenches", "scanner"):
+    if kind in ("trenches", "scanner", "gnat"):
         if not isinstance(sources, list) or not sources:
-            return _fail("A trenches or scanner rule set needs at "
+            return _fail("A trenches, scanner or gnat rule set needs at "
                          "least one scan source (pump.fun or "
                          "pumpswap).")
         for s in sources:
@@ -516,13 +673,15 @@ def validate_ruleset(raw, bot=None):
             return _fail(f"Unknown buy setting '{key}'.")
     window = buy.get("window_seconds")
     if window not in WINDOW_METRICS:
-        return _fail("Buy window must be 3 minutes (scanner only), "
-                     "5 minutes, 1 hour, 6 hours, or 24 hours — those "
-                     "are the windows the price feed provides, plus "
-                     "the 3-minute window the scanner tracks itself.")
-    if kind == "scanner" and window != SCANNER_BUY_WINDOW_SECONDS:
-        return _fail("A scanner buys on a 3-minute gain — that is the "
-                     "only window the scanner tracks.")
+        return _fail("Buy window must be 3 minutes (scanner and gnat "
+                     "only), 5 minutes, 1 hour, 6 hours, or 24 hours — "
+                     "those are the windows the price feed provides, "
+                     "plus the 3-minute window the scanner tracks "
+                     "itself.")
+    if kind in ("scanner", "gnat") \
+            and window != SCANNER_BUY_WINDOW_SECONDS:
+        return _fail("A scanner or gnat buys on a 3-minute gain — "
+                     "that is the only window the scanner tracks.")
     if buy.get("metric") != WINDOW_METRICS[window]:
         return _fail("Buy metric does not match its window.")
     threshold = buy.get("threshold_pct")
@@ -624,9 +783,10 @@ def validate_ruleset(raw, bot=None):
     top10 = raw.get("top10_rug")
     clean_top10 = None
     if top10 is not None:
-        if kind not in ("scanner", "trenches"):
+        if kind not in ("scanner", "trenches", "gnat"):
             return _fail("The top-10 wallets watch is a memecoin rule — "
-                         "it only applies to scanner and trenches bots.")
+                         "it only applies to scanner, trenches and gnat "
+                         "bots.")
         if not isinstance(top10, dict):
             return _fail("The top-10 wallets watch must be a set of "
                          "settings (drop %).")
@@ -665,9 +825,10 @@ def validate_ruleset(raw, bot=None):
     buy_filter = raw.get("buy_filter")
     clean_filter = None
     if buy_filter is not None:
-        if kind not in ("trenches", "scanner"):
-            return _fail("The buy filter is a trenches/scanner rule — "
-                         "it only applies to bots that scan the feed.")
+        if kind not in ("trenches", "scanner", "gnat"):
+            return _fail("The buy filter is a trenches/scanner/gnat "
+                         "rule — it only applies to bots that scan the "
+                         "feed.")
         if not isinstance(buy_filter, dict):
             return _fail("The buy filter must be a set of settings "
                          "(minimum 5-minute volume, buy dominance, "
@@ -704,10 +865,10 @@ def validate_ruleset(raw, bot=None):
             "min_signal_pct": float(min_signal),
             "min_market_cap_usd": float(min_mcap),
         }
-    if kind in ("trenches", "scanner") and clean_filter is None:
+    if kind in ("trenches", "scanner", "gnat") and clean_filter is None:
         # Stored rules from before the filter existed load as the new
         # defaults on the next evaluation — the filter applies to the
-        # Scanner and Trenches bots already running.
+        # Scanner, Trenches and Gnat bots already running.
         clean_filter = dict(BUY_FILTER_DEFAULT)
     max_new = raw.get("max_new_positions_per_scan", 1)
     if not isinstance(max_new, int) or isinstance(max_new, bool) \
@@ -717,7 +878,7 @@ def validate_ruleset(raw, bot=None):
         "version": RULE_VERSION,
         "kind": kind,
         "scan_sources": list(sources)
-        if kind in ("trenches", "scanner") else [],
+        if kind in ("trenches", "scanner", "gnat") else [],
         "scan_interval_seconds": interval,
         "buy": {"metric": WINDOW_METRICS[window],
                 "window_seconds": window,
@@ -730,7 +891,7 @@ def validate_ruleset(raw, bot=None):
     }
     if kind == "scanner" or clean_top10 is not None:
         cleaned["top10_rug"] = clean_top10
-    if kind in ("trenches", "scanner"):
+    if kind in ("trenches", "scanner", "gnat"):
         cleaned["buy_filter"] = clean_filter
     if kind == "scanner":
         cleaned["trending_ladder"] = clean_trending
@@ -781,6 +942,12 @@ def summarize_rules(rules) -> str:
         lines.append(
             f"Scan {sources} every {rules['scan_interval_seconds']} "
             f"seconds for gainers, tracking improving coins.")
+    elif rules["kind"] == "gnat":
+        sources = " and ".join(rules["scan_sources"])
+        lines.append(
+            f"Scan {sources} every {rules['scan_interval_seconds']} "
+            f"seconds for new tokens, checking the bonding curve "
+            f"and buy pressure.")
     else:
         lines.append(
             f"Watch your own coin list every "
@@ -788,8 +955,8 @@ def summarize_rules(rules) -> str:
     lines.append(
         f"Buy when a coin gains {buy['threshold_pct']}% in "
         f"{_window_words(buy['window_seconds'])}"
-        f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner') else ''}"
-        f"{' — the 3-minute gain is tracked from recorded prices, because the feed only gives 5-minute changes' if rules['kind'] == 'scanner' else ''}.")
+        f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner', 'gnat') else ''}"
+        f"{' — the 3-minute gain is tracked from recorded prices, because the feed only gives 5-minute changes' if rules['kind'] in ('scanner', 'gnat') else ''}.")
     if rules["kind"] == "scanner":
         slow = "; ".join(
             f"sell {r['pct_of_position']:.0f}% at +{r['profit_pct']:.0f}% profit"
@@ -826,6 +993,19 @@ def summarize_rules(rules) -> str:
         f"Sell everything if the price falls "
         f"{rules['trailing_stop_pct']}% below the highest price since "
         f"holding.")
+    if rules["kind"] == "gnat":
+        lines.append(
+            "Take profit in tiers: sell 35% at +40% profit and move "
+            "the stop on the rest to breakeven +2%; sell another 35% "
+            "of the original position at +100% (2x); the remaining "
+            "30% rides a trailing stop of 18% up to +250%, then 12% "
+            "above +250%.")
+        lines.append(
+            "Time decay: if the coin is not at least +15% within "
+            "90 seconds of buying, sell everything. Circuit "
+            "breakers: no new buys for the rest of the day after "
+            "2.0 SOL of realized losses, or after 4 losing trades "
+            "in a row.")
     rug = rules.get("rug_sell")
     if rug:
         window_words = _window_words(rug["window_seconds"])
@@ -856,7 +1036,7 @@ def summarize_rules(rules) -> str:
             f"tokens reaches {concentration:.0f}%.{slow_word} "
             f"The proceeds stay in SOL.")
     buy_filter = rules.get("buy_filter")
-    if buy_filter and rules["kind"] in ("trenches", "scanner"):
+    if buy_filter and rules["kind"] in ("trenches", "scanner", "gnat"):
         mcap = buy_filter.get("min_market_cap_usd", 0.0)
         lines.append(
             f"Buy filter — only buy a real signal: at least "

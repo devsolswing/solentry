@@ -156,6 +156,14 @@ def _entry(mint: str, pair: dict) -> dict:
         "volume_h1_usd": _vol("h1"),
         "txns_m5_buys": _txn("m5", "buys"),
         "txns_m5_sells": _txn("m5", "sells"),
+        # Gnat entry gate: how many links the coin publishes
+        # (websites + socials from the pair's info). DexScreener
+        # only reports that the links EXIST in the pair metadata;
+        # whether they are live is NOT checked here — "active" is
+        # not verifiable from this feed.
+        "social_links": len((pair.get("info") or {}).get("websites")
+                            or []) + len((pair.get("info") or {})
+                                        .get("socials") or []),
     }
 
 

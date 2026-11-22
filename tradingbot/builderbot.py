@@ -959,6 +959,13 @@ def _review_bot(db, bot, enc_key: bytes):
               f"{win_rate:.0%}, net "
               f"${summary['net_pnl_usd']:.2f}) — tightening one step.")
     rules, error = load_rules(bot)
+    if rules is not None and error is None \
+            and rules.get("kind") == "gnat":
+        # Gnat's stops are non-negotiable (James's spec,
+        # 2026-11-21) — the auto-tighten must not rewrite its
+        # threshold, buy size or stop loss. A Gnat bot's rules
+        # change only when James says so.
+        return None
     threshold = None
     if rules is not None and error is None:
         threshold = float(rules["buy"]["threshold_pct"])

@@ -80,6 +80,22 @@
           <span class="bot-arrow" aria-hidden="true">›</span>
         </button>
       </form>
+      {# Gnat preset button (2026-11-21): same shape as Clyde's —
+         a carousel item alongside the active bot cards, hidden
+         until Presets is tapped. Button ONLY: no description, no
+         rules, no notes. It POSTs to create Gnat, landing on the
+         bot details page. The 🦟 icon is the gnat. #}
+      <form method="post" action="{{ gnat_preset.create_url }}" data-preset-item hidden>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="card bot-card" type="submit" aria-label="Create the Gnat bot">
+          <span class="bot-ico" aria-hidden="true">🦟</span>
+          <span class="bot-info">
+            <span class="bot-name"><strong>{{ gnat_preset.name }}</strong> <span class="badge preset">Preset</span></span>
+            <span class="muted small">{{ gnat_preset.strategy }} · Buy {{ gnat_preset.buy_size_pct }}% · Stop {{ gnat_preset.stop_loss_pct }}% · Max {{ gnat_preset.max_open_trades }}</span>
+          </span>
+          <span class="bot-arrow" aria-hidden="true">›</span>
+        </button>
+      </form>
     </div>
   </div>
 

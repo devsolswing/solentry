@@ -46,7 +46,8 @@ from datetime import datetime, timezone
 
 from .config import Config
 from .db import init_db
-from .coin_meta import ensure_coin_meta, get_coin_meta
+from .coin_meta import (ensure_coin_meta, get_coin_meta, metadata_pda,
+                        parse_metadata_account)
 from .devnet_watchlist import active_mints, enrich_scan
 from .executor import _skip, execute_real_trade, is_curve_complete
 from .jupiter_executor import execute_jupiter_swap
@@ -55,7 +56,19 @@ from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
 from .pnl import portfolio_totals, record_snapshot
 from .prices import get_prices
-from .rules import load_rules
+from .pumpfun import (bonding_curve_pda, curve_progress_pct,
+                      parse_bonding_curve)
+from .rules import (GNAT_BREAKEVEN_PLUS_PCT, GNAT_BUY_SIZE_PCT,
+                    GNAT_BUY_SIZE_SOL, GNAT_CURVE_MAX_PCT,
+                    GNAT_CURVE_MIN_PCT, GNAT_EXHAUST_DROP_5M_PCT,
+                    GNAT_EXHAUST_MIN_PEAK_PCT, GNAT_MAX_CONSEC_LOSSES,
+                    GNAT_MAX_DAILY_LOSS_SOL, GNAT_MIN_BUY_SELL_RATIO,
+                    GNAT_MIN_BUYERS_5M, GNAT_REQUIRE_SOCIALS,
+                    GNAT_STOP_LOSS_PCT, GNAT_TIER1_PROFIT_PCT,
+                    GNAT_TIER2_PROFIT_PCT, GNAT_TIME_DECAY_MIN_GAIN_PCT,
+                    GNAT_TIME_DECAY_SECONDS, GNAT_TRAIL_HIGH_PCT,
+                    GNAT_TRAIL_LOW_PCT, GNAT_TRAIL_TIGHTEN_AT_PCT,
+                    load_rules)
 from .scanner import (BREAKEVEN_TRIGGER_PCT, check_top10_concentration,
                       check_top10_rug, clear_watches, detect_regime,
                       gain_3m_pct, gain_window_pct, next_ladder_rung,
@@ -622,6 +635,235 @@ def _hard_exit_reason(stop_loss_pct: float, trailing_pct: float,
     return None
 
 
+# --- Gnat preset (2026-11-21): James's spec, honest-mapped ----------
+# Every threshold below is a REMY DEFAULT from James's suggested
+# values, awaiting his call — labelled so in the MANIFEST and in
+# rules.GNAT_NOTES. The engine's fastest data is the 5-second
+# DexScreener poll and the 30-second loop tick; anything the spec
+# asks for in a 5/10/15/30-second window, a unique-wallet count, or
+# a creator/dev-history signal is mapped to its closest version or
+# recorded as not enforced (see the MANIFEST), never faked.
+
+def _gnat_hard_exit_reason(avg_price: float, peak_price: float,
+                           price: float) -> str | None:
+    """Gnat's hard exits at `price`: the -18% hard stop, the
+    breakeven +2% stop armed at the Tier 1 peak (+40%), and the
+    tiered trailing stop on the moonbag (18% while the peak is
+    +100% to +250%, 12% above +250%). Pure — no DB, so the loop
+    and the tick-driven fast-exit thread share exactly this logic.
+
+    The floors stack upward only: the hard stop is the lowest
+    floor and the only exit before Tier 1; the breakeven floor
+    replaces it once armed; the trailing floor replaces the
+    breakeven floor once armed (it always sits above it). The
+    trailing tier is set by the PEAK profit — once the coin
+    peaked above +250% the stop stays at 12%, it never loosens
+    back to 18%. Returns the reason string or None."""
+    if avg_price <= 0 or price <= 0:
+        return None
+    peak = max(float(peak_price), price)
+    if _lte(price, avg_price * (1.0 - GNAT_STOP_LOSS_PCT / 100.0)):
+        return "stop_loss"
+    floor = None
+    reason = None
+    if _gte(peak, avg_price * (1.0 + GNAT_TIER1_PROFIT_PCT / 100.0)):
+        floor = avg_price * (1.0 + GNAT_BREAKEVEN_PLUS_PCT / 100.0)
+        reason = "breakeven stop"
+    if _gte(peak, avg_price * (1.0 + GNAT_TIER2_PROFIT_PCT / 100.0)):
+        peak_profit = (peak - avg_price) / avg_price * 100.0
+        trail_pct = (GNAT_TRAIL_HIGH_PCT
+                     if peak_profit > GNAT_TRAIL_TIGHTEN_AT_PCT
+                     else GNAT_TRAIL_LOW_PCT)
+        trail_floor = peak * (1.0 - trail_pct / 100.0)
+        if floor is None or trail_floor > floor:
+            floor = trail_floor
+            reason = "trailing stop"
+    if floor is not None and _lte(price, floor):
+        return reason
+    return None
+
+
+def _gnat_time_decay_reason(opened_ts: float | None, peak_price: float,
+                            avg_price: float,
+                            now_ts: float) -> str | None:
+    """Gnat time decay: not at least +15% within 90 seconds of
+    entry → exit 100%. The PEAK price is the test — a coin that
+    touched +15% and fell back is handled by the stops, not by
+    this exit. A position with no recorded open time never fires
+    (missing data exits nothing). Pure — no DB."""
+    if opened_ts is None or avg_price <= 0:
+        return None
+    if now_ts - opened_ts <= GNAT_TIME_DECAY_SECONDS:
+        return None
+    peak_gain = (float(peak_price) - avg_price) / avg_price * 100.0
+    if peak_gain < GNAT_TIME_DECAY_MIN_GAIN_PCT:
+        return (f"time decay: not +{GNAT_TIME_DECAY_MIN_GAIN_PCT:.0f}% "
+                f"within {GNAT_TIME_DECAY_SECONDS}s of entry")
+    return None
+
+
+def _gnat_momentum_exhausted(entry: dict, peak_price: float,
+                             avg_price: float) -> bool:
+    """Gnat momentum exhaustion, closest version: the peak reached
+    at least +25% and the 5-minute change is now at or below -5%
+    — the flow that carried the coin has flipped, so the rest of
+    the position exits in full. The spec's 10-second net-SOL-flow
+    window does not exist in the app's data (no sub-5-minute flow,
+    no transaction stream); the 5-minute change is the fastest
+    flow proxy the feed provides. Missing data never fires. Pure
+    — no DB."""
+    if avg_price <= 0:
+        return False
+    peak_gain = (float(peak_price) - avg_price) / avg_price * 100.0
+    if peak_gain < GNAT_EXHAUST_MIN_PEAK_PCT:
+        return False
+    change_5m = (entry or {}).get("change_5m_pct")
+    if change_5m is None:
+        return False
+    try:
+        return float(change_5m) <= -GNAT_EXHAUST_DROP_5M_PCT
+    except (TypeError, ValueError):
+        return False
+
+
+def _gnat_buy_halt(db, bot, now_ts: float, feed,
+                   prices_data: dict | None) -> tuple[bool, str]:
+    """Gnat circuit breakers on NEW BUYS for a gnat bot. Exits
+    still run — a halted bot can still stop out, it just cannot
+    open anything new. Returns (halted, reason).
+
+    1. Daily-loss breaker (James's spec: 2.0 SOL): today's realized
+       P&L at or beyond -2.0 SOL, converted at the live SOL price,
+       halts buys for the rest of the day. With no live SOL price
+       the SOL threshold cannot be evaluated and this breaker does
+       NOT trip — the loss-streak breaker below still applies.
+    2. Loss-streak breaker (James's spec: 4 consecutive losing
+       closed trades): halts buys for the rest of the day.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        row = db.execute(
+            "SELECT COALESCE(SUM(pnl_usd), 0) FROM trade_ledger "
+            "WHERE bot_id = ? AND side = 'sell' AND pnl_usd IS NOT NULL "
+            "AND substr(created_at, 1, 10) = ?",
+            (bot["id"], today)).fetchone()
+        daily_realized = float(row[0]) if row else 0.0
+    except Exception:
+        daily_realized = 0.0
+    sol_price = _live_sol_price_usd(feed, prices_data)
+    if sol_price is not None and sol_price > 0:
+        limit_usd = GNAT_MAX_DAILY_LOSS_SOL * sol_price
+        if daily_realized <= -limit_usd:
+            return True, (
+                f"gnat daily-loss circuit breaker: realized "
+                f"${daily_realized:.2f} today is at or beyond "
+                f"-{GNAT_MAX_DAILY_LOSS_SOL:.1f} SOL "
+                f"(${limit_usd:.2f}) — no new buys until tomorrow")
+    try:
+        rows = db.execute(
+            "SELECT win FROM trade_ledger WHERE bot_id = ? "
+            "AND side = 'sell' ORDER BY id DESC LIMIT ?",
+            (bot["id"], GNAT_MAX_CONSEC_LOSSES)).fetchall()
+    except Exception:
+        rows = []
+    if len(rows) >= GNAT_MAX_CONSEC_LOSSES and all(
+            r["win"] == 0 for r in rows):
+        return True, (
+            f"gnat loss-streak circuit breaker: "
+            f"{GNAT_MAX_CONSEC_LOSSES} consecutive losing closed "
+            f"trades — no new buys until tomorrow")
+    return False, ""
+
+
+def _gnat_entry_gates(db, cfg, entry: dict, rpc_factory,
+                      rpc_cache: dict) -> tuple[bool, str]:
+    """Gnat entry gates, after the gain + buy-filter + momentum
+    checks. Returns (True, "") when the coin passes, else
+    (False, reason). Fail-closed at every step.
+
+    1. Buy pressure (closest version): at least 15 buy
+       transactions in the 5-minute bucket and a buy-to-sell
+       transaction ratio of at least 2.5:1. The spec's 30-second
+       window and unique-buyer count do not exist in the app's
+       data — the 5-minute DexScreener txn bucket is the closest
+       window, and txn counts stand in for unique wallets. Zero
+       sells with buys present is an infinite ratio, so it
+       passes; missing counts fail.
+    2. Socials + metadata URI: when REQUIRE_SOCIALS (default
+       TRUE), at least one published social/website link in the
+       pair info; always, a non-empty metadata URI on the
+       on-chain Metaplex metadata account. Presence only — the
+       app cannot verify a link is live.
+    3. Curve band: bonding-curve progress 12-65%, read from the
+       on-chain curve account. A curve the RPC cannot read is
+       never bought.
+    Devnet watchlist mints (the operator's own test coins) skip
+    all three gates: they have no DexScreener pair data and their
+    curves sit below 12%, so the gates would block every devnet
+    test buy. The gain, momentum and scam gates still apply to
+    them, so exits stay testable on devnet.
+    """
+    mint = entry.get("mint")
+    if not mint:
+        return False, "no mint to check"
+    if entry.get("devnet_watchlist"):
+        return True, ""
+    buys = entry.get("txns_m5_buys")
+    sells = entry.get("txns_m5_sells")
+    try:
+        buys = int(buys) if buys is not None else None
+        sells = int(sells) if sells is not None else None
+    except (TypeError, ValueError):
+        return False, "gnat buy pressure: txn counts unreadable"
+    if buys is None or sells is None:
+        return False, "gnat buy pressure: no 5-minute txn data"
+    if buys < GNAT_MIN_BUYERS_5M:
+        return False, (f"gnat buy pressure: {buys} buys in 5 minutes, "
+                       f"need at least {GNAT_MIN_BUYERS_5M}")
+    if sells > 0 and buys / sells < GNAT_MIN_BUY_SELL_RATIO:
+        return False, (f"gnat buy pressure: buy/sell ratio "
+                       f"{buys / sells:.1f}:1, need at least "
+                       f"{GNAT_MIN_BUY_SELL_RATIO}:1")
+    if GNAT_REQUIRE_SOCIALS:
+        try:
+            social_links = int(entry.get("social_links") or 0)
+        except (TypeError, ValueError):
+            social_links = 0
+        if social_links < 1:
+            return False, ("gnat socials: no published social or "
+                           "website link")
+    try:
+        client = _top10_client_for_mint(cfg, mint, rpc_factory, rpc_cache)
+    except Exception:
+        return False, "gnat metadata: RPC unavailable"
+    try:
+        account = client.get_account_info(metadata_pda(mint))
+    except Exception:
+        return False, "gnat metadata: could not read metadata account"
+    meta = parse_metadata_account(
+        account.get("data") if account else None)
+    if not meta or not meta.get("uri"):
+        return False, "gnat metadata: no valid metadata URI"
+    try:
+        curve_addr, _ = bonding_curve_pda(mint)
+        curve_account = client.get_account_info(curve_addr)
+    except Exception:
+        return False, "gnat curve: could not read bonding curve"
+    try:
+        curve = parse_bonding_curve(
+            curve_account.get("data") if curve_account else None)
+    except Exception:
+        return False, "gnat curve: bonding curve unreadable"
+    progress = curve_progress_pct(curve)
+    if progress is None:
+        return False, "gnat curve: bonding curve unreadable"
+    if progress < GNAT_CURVE_MIN_PCT or progress > GNAT_CURVE_MAX_PCT:
+        return False, (f"gnat curve: {progress:.1f}% filled, outside "
+                       f"the {GNAT_CURVE_MIN_PCT:.0f}-"
+                       f"{GNAT_CURVE_MAX_PCT:.0f}% band")
+    return True, ""
+
+
 def default_real_executor(bot, user_id: int, coin: str, side: str,
                          amount: float, price: float, db, cfg) -> dict:
     """Real executor: the account's dedicated signing bot executes
@@ -922,7 +1164,8 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
               price: float, prices_usd: dict, rpc_factory,
               real_executor, actions: list,
               signals: dict | None = None,
-              feed=None, prices_data: dict | None = None) -> None:
+              feed=None, prices_data: dict | None = None,
+              kind: str | None = None) -> None:
     """Buy `coin` for a bot within its limits, or skip with a reason.
 
     `signals` is the buy-time signal snapshot from the feed entry
@@ -931,10 +1174,28 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     got bought. None for v1 bots and manual buys. `price` is the live
     mark price; a real position's cost basis is the EXECUTED spend
     when the executor reports it (see below), never the mark.
+    `kind` is the bot's rule kind: only gnat sizes in fixed SOL —
+    every other kind buys a % of the bankroll.
     """
     if bot["mode"] == "paper":
         bankroll = paper_bankroll(db, bot["user_id"], prices_usd)
-        buy_usd = bankroll * float(bot["buy_size_pct"]) / 100.0
+        size_note = ""
+        if kind == "gnat":
+            # Fixed 0.25 SOL per trade (James's spec), converted
+            # at the live SOL price. No live SOL price → fall back
+            # to the bot row's buy-size % of the bankroll, and say
+            # so on the buy line — the fallback is never silent.
+            sol_price = _live_sol_price_usd(feed, prices_data)
+            if sol_price is not None and sol_price > 0:
+                buy_usd = GNAT_BUY_SIZE_SOL * sol_price
+                size_note = " (0.25 SOL size)"
+            else:
+                buy_usd = bankroll * float(bot["buy_size_pct"]) / 100.0
+                size_note = (f" (fallback "
+                             f"{float(bot['buy_size_pct']):.0f}% size — "
+                             f"no live SOL price)")
+        else:
+            buy_usd = bankroll * float(bot["buy_size_pct"]) / 100.0
         buy_usd = min(buy_usd, paper_cash(db, bot["user_id"]))
         if buy_usd < MIN_PAPER_TRADE_USD:
             why = ("insufficient paper cash"
@@ -973,7 +1234,7 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             pass
         _log(db, bot["user_id"], "silent_buy",
              f"Silent bot '{bot['name']}' bought {amount:.4f} {coin} "
-             f"for ${usd:.2f} (paper).",
+             f"for ${usd:.2f} (paper){size_note}.",
              bot["mode"])
         actions.append({"action": "buy", "coin": coin, "amount": amount,
                         "usd": usd})
@@ -1113,7 +1374,7 @@ def _rug_reason(rug: dict, kind: str, coin: str, price: float,
     triggers on that fall, never on a faked "dev sold" signal.
     """
     drop_5m = float(rug["drop_5m_pct"])
-    if kind in ("trenches", "scanner") and price_map:
+    if kind in ("trenches", "scanner", "gnat") and price_map:
         entry = price_map.get(coin) or {}
         change_5m = entry.get("change_5m_pct")
         if change_5m is not None and float(change_5m) <= -drop_5m:
@@ -1170,10 +1431,11 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     db.commit()
 
     kind = rules["kind"]
-    if kind in ("trenches", "scanner"):
+    if kind in ("trenches", "scanner", "gnat"):
         if not trenches_data or trenches_data.get("error"):
             why = (trenches_data or {}).get("error") or "feed unavailable"
-            feed_name = "scanner" if kind == "scanner" else "trenches"
+            feed_name = ("scanner" if kind == "scanner"
+                         else ("gnat" if kind == "gnat" else "trenches"))
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': {feed_name} feed "
                  f"unavailable — {why[:80]}. No trades this scan.",
@@ -1188,7 +1450,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         price_map = _mint_price_map(json.loads(bot["coins"]))
 
     def _price_for(coin: str):
-        if kind in ("trenches", "scanner"):
+        if kind in ("trenches", "scanner", "gnat"):
             entry = price_map.get(coin)
             return entry["price_usd"] if entry else None
         entry = (price_map or {}).get(coin)
@@ -1282,7 +1544,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         # skipped for this scan — logged once per bot, never faked,
         # and the other exits still apply.
         top10 = rules.get("top10_rug")
-        if kind in ("scanner", "trenches") and top10:
+        if kind in ("scanner", "trenches", "gnat") and top10:
             try:
                 top10_client = _top10_client_for_mint(
                     cfg, coin, rpc_factory, rpc_cache)
@@ -1331,8 +1593,15 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         # the 30-second loop tick (and the 5-second tick-driven fast
         # exits) there is no 60-second lag any more — the report's
         # "4% stop exiting at -12.6%" came from the old 60s tick.
-        hard = _hard_exit_reason(stop_loss_pct, trailing_pct, kind,
-                                 avg_price, peak, price)
+        # Gnat runs its own hard exits: the -18% stop, the breakeven
+        # +2% armed at +40%, and the tiered 18%/12% trailing stop
+        # on the moonbag — never the shared helper's 10% breakeven
+        # or flat trailing.
+        if kind == "gnat":
+            hard = _gnat_hard_exit_reason(avg_price, peak, price)
+        else:
+            hard = _hard_exit_reason(stop_loss_pct, trailing_pct, kind,
+                                     avg_price, peak, price)
         if hard:
             _sell_position(db, cfg, bot, coin, price, hard,
                            rpc_factory, real_executor, actions,
@@ -1386,6 +1655,32 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     rpc_factory, real_executor, actions, amount=amount,
                     ladder_stage=stage + 1,
                     feed=feed, prices_data=prices_data)
+        # Gnat time decay + momentum exhaustion (gnat only): the
+        # time decay fires on age + peak, the exhaustion on peak +
+        # the 5-minute change — both exit the rest of the position
+        # in full. They run after the ladder so a rung that fired
+        # this pass still pays out first.
+        if kind == "gnat":
+            opened_at = (pos["opened_at"]
+                         if "opened_at" in pos.keys() else None)
+            opened_ts = (_parse_scan_time(opened_at)
+                         if opened_at else None)
+            decay = _gnat_time_decay_reason(opened_ts, peak,
+                                            avg_price, now_ts)
+            if decay:
+                _sell_position(db, cfg, bot, coin, price, decay,
+                               rpc_factory, real_executor, actions,
+                               feed=feed, prices_data=prices_data)
+                continue
+            entry = (price_map or {}).get(coin) or {}
+            if _gnat_momentum_exhausted(entry, peak, avg_price):
+                _sell_position(
+                    db, cfg, bot, coin, price,
+                    "momentum exhaustion: up 25%+ then 5-minute "
+                    "change -5% or worse",
+                    rpc_factory, real_executor, actions,
+                    feed=feed, prices_data=prices_data)
+                continue
         # Signal-death exit (scanner only): the position is held
         # only while the signal keeps coming. When the 5-minute
         # gain, the volume edge and the buyer edge are ALL gone,
@@ -1439,6 +1734,21 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             actions.append({"action": "skip", "coin": "",
                             "reason": halt_reason})
             return actions
+    # Gnat circuit breakers (gnat only): the daily-loss and
+    # loss-streak breakers from James's spec — same shape as the
+    # halts above, Gnat's own thresholds, logged once per day.
+    if kind == "gnat":
+        halted, halt_reason = _gnat_buy_halt(db, bot, now_ts, feed,
+                                             prices_data)
+        if halted:
+            if not _breaker_logged(db, bot["id"],
+                                   "gnat circuit breaker"):
+                _log(db, bot["user_id"], "silent_breaker",
+                     f"Silent bot '{bot['name']}': {halt_reason}.",
+                     bot["mode"])
+            actions.append({"action": "skip", "coin": "",
+                            "reason": halt_reason})
+            return actions
 
     # 2. Buys: strongest qualifying gainer, at most max_new per scan.
     bought = 0
@@ -1453,11 +1763,13 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     # low-performer buy filter — kept so the scan logs one line about
     # the strongest rejected coin instead of one line per candidate.
     filtered = []
-    if kind == "scanner":
+    if kind in ("scanner", "gnat"):
         # The scanner ranks by the 3-minute gain from price marks the
         # loop records itself (scanner.py) — the feed only provides
         # 5-minute changes. A coin with no mark at least 3 minutes
-        # old has no 3-minute gain yet and is not bought.
+        # old has no 3-minute gain yet and is not bought. Gnat
+        # shares this branch: it buys on the same 3-minute gain,
+        # then adds its own entry gates below.
         threshold = float(rules["buy"]["threshold_pct"])
         held = set(_positions(db, bot["id"]))
         record_marks(db, bot["id"], list(price_map.values()), _now())
@@ -1483,6 +1795,15 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             if not ok:
                 filtered.append((gain, entry, f"momentum gate: {why}"))
                 continue
+            # Gnat entry gates (gnat only): buy pressure, socials +
+            # metadata URI, curve band. Fail-closed — a coin that
+            # cannot be verified is never bought.
+            if kind == "gnat":
+                ok, why = _gnat_entry_gates(
+                    db, cfg, entry, rpc_factory, rpc_cache)
+                if not ok:
+                    filtered.append((gain, entry, why))
+                    continue
             # 2-scan confirmation: the signal must still be passing
             # on a later scan. A one-scan spike never buys.
             if not _signal_confirmed(db, bot["id"], entry["mint"],
@@ -1525,7 +1846,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 continue
             ranked.append((float(change), entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
-    if kind in ("trenches", "scanner"):
+    if kind in ("trenches", "scanner", "gnat"):
         if not ranked and filtered:
             # Every threshold-passing candidate failed the filter —
             # say so once, naming the strongest rejected coin.
@@ -1550,7 +1871,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                                 "reason": "max open trades reached"})
                 max_open_hit = True
                 break
-            if kind == "scanner":
+            if kind in ("scanner", "gnat"):
                 # Re-buy cooldown: a coin closed at a loss is not
                 # bought again for 30 minutes.
                 blocked_until = _cooldown_until(
@@ -1580,7 +1901,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 "sells_5m": entry.get("txns_m5_sells"),
                 "regime": detect_regime(entry, rules.get("regime")),
             }
-            if kind == "scanner":
+            if kind in ("scanner", "gnat"):
                 # The signal features for the signal-outcome log:
                 # the triggering 3-minute gain, the 5-minute volume
                 # ratio vs the hourly pace, the buyer ratio, and
@@ -1611,7 +1932,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             _buy_coin(db, cfg, bot, entry["mint"], entry["price_usd"],
                       _bankroll_prices(),
                       rpc_factory, real_executor, actions,
-                      signals=signals, feed=feed,
+                      signals=signals, feed=feed, kind=kind,
                       prices_data=prices_data)
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
@@ -1827,9 +2148,10 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
     scanner_top10.last_checked_at, so a pass that runs early skips
     coins already checked).
 
-    For every silent scanner or trenches bot with a top10_rug rule
-    and an open position, one RPC round fetches the top-10 total AND
-    the total supply, and BOTH top-10 exits run on that data:
+    For every silent scanner, trenches or gnat bot with a top10_rug
+    rule and an open position, one RPC round fetches the top-10
+    total AND the total supply, and BOTH top-10 exits run on that
+    data:
       * the 10% dump from peak (existing rule), and
       * the concentration triggers (builderBot): share of total
         supply at or above concentration_pct (default 21%) sells
@@ -1849,7 +2171,7 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
         rules, error = load_rules(bot)
         if rules is None or error is not None:
             continue
-        if rules["kind"] not in ("scanner", "trenches"):
+        if rules["kind"] not in ("scanner", "trenches", "gnat"):
             continue
         top10 = rules.get("top10_rug")
         if not top10:
@@ -1986,12 +2308,12 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
                     real_executor=None) -> list:
     """One fast-exit pass over the mints dirtied by live-feed ticks
     since the last pass: for every open position in a dirtied mint
-    (scanner + signals kinds — Trenches v2 owns trenches exits),
-    check the hard exits (rug sell, stop / breakeven stop, trailing
-    stop) at the tick price and sell at once when one fires. The
-    loop is the backstop: if this thread misses a tick, the next
-    loop pass (30s) still fires the same exit through the same
-    shared helper. Returns the actions taken."""
+    (scanner, signals and gnat kinds — Trenches v2 owns trenches
+    exits), check the hard exits (rug sell, stop / breakeven stop,
+    trailing stop) at the tick price and sell at once when one
+    fires. The loop is the backstop: if this thread misses a tick,
+    the next loop pass (30s) still fires the same exit through the
+    same shared helper. Returns the actions taken."""
     actions: list = []
     with _TICK_DIRTY_LOCK:
         mints = sorted(_TICK_DIRTY_MINTS)
@@ -2020,7 +2342,7 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
             rules, error = load_rules(bot)
             if rules is None or error is not None:
                 continue
-            if rules["kind"] not in ("scanner", "signals"):
+            if rules["kind"] not in ("scanner", "signals", "gnat"):
                 continue
             pos = _positions(db, bot["id"]).get(mint)
             if not pos:
@@ -2037,10 +2359,13 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
             avg_price = float(pos["avg_price"])
             peak = pos["peak_price"]
             peak = float(peak) if peak is not None else avg_price
-            hard = _hard_exit_reason(float(bot["stop_loss_pct"]),
-                                     float(rules["trailing_stop_pct"]),
-                                     rules["kind"], avg_price, peak,
-                                     price)
+            if rules["kind"] == "gnat":
+                hard = _gnat_hard_exit_reason(avg_price, peak, price)
+            else:
+                hard = _hard_exit_reason(float(bot["stop_loss_pct"]),
+                                         float(rules["trailing_stop_pct"]),
+                                         rules["kind"], avg_price, peak,
+                                         price)
             if hard:
                 _sell_position(db, cfg, bot, mint, price, hard,
                                rpc_factory, real_executor, actions,
@@ -2099,7 +2424,8 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     needs_trenches = False
     for bot in bots:
         rules, err = load_rules(bot)
-        if rules is not None and rules["kind"] in ("trenches", "scanner"):
+        if rules is not None and rules["kind"] in ("trenches", "scanner",
+                                                  "gnat"):
             needs_trenches = True
             break
     if needs_trenches:

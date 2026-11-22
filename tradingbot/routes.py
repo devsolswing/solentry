@@ -65,12 +65,13 @@ from .home_holdings import (enrich_row, fetch_chain_token_balances,
                             reconcile_holdings, sparkline_svg_1h)
 from .ledger import bot_wl_summary, recent_trades
 from .rules import (CLYDE_CATEGORY, CLYDE_PRESET_NAME,
-                    CLYDE_STOP_LOSS_PCT, RUG_SELL_DEFAULT,
+                    CLYDE_STOP_LOSS_PCT, GNAT_BUY_SIZE_PCT, GNAT_CATEGORY,
+                    GNAT_PRESET_NAME, GNAT_STOP_LOSS_PCT, RUG_SELL_DEFAULT,
                     SCANNER_CATEGORY, SCANNER_DISPLAY,
                     SCANNER_PRESET_NAME, TRENCHES_CATEGORY,
-                    TRENCHES_PRESET_NAME, clyde_ruleset, load_rules,
-                    preset_bots, scanner_ruleset, summarize_rules,
-                    trenches_ruleset, validate_ruleset)
+                    TRENCHES_PRESET_NAME, clyde_ruleset, gnat_ruleset,
+                    load_rules, preset_bots, scanner_ruleset,
+                    summarize_rules, trenches_ruleset, validate_ruleset)
 from .security import (decrypt_secret, encrypt_secret, hash_account_password,
                        hash_password, hash_token, new_csrf_token, new_token,
                        verify_account_password, verify_password,
@@ -3702,7 +3703,11 @@ def register_routes(app: Flask) -> None:
         # 2026-11-11): only Clyde's stats are rendered there, from
         # the same stored values the create route writes
         # (strategy 'bold', buy size 20%, stop loss
-        # CLYDE_STOP_LOSS_PCT, max 3 open).
+        # CLYDE_STOP_LOSS_PCT, max 3 open). Gnat joined the window
+        # 2026-11-21 as a second button with the same shape: its
+        # stats are the values its create route writes (strategy
+        # 'bold', buy size GNAT_BUY_SIZE_PCT, stop loss
+        # GNAT_STOP_LOSS_PCT, max 3 open).
         clyde_preset = next(p for p in presets if p["key"] == "clyde")
         clyde_preset.update({
             "strategy": "bold",
@@ -3710,12 +3715,20 @@ def register_routes(app: Flask) -> None:
             "stop_loss_pct": int(CLYDE_STOP_LOSS_PCT),
             "max_open_trades": 3,
         })
+        gnat_preset = next(p for p in presets if p["key"] == "gnat")
+        gnat_preset.update({
+            "strategy": "bold",
+            "buy_size_pct": GNAT_BUY_SIZE_PCT,
+            "stop_loss_pct": int(GNAT_STOP_LOSS_PCT),
+            "max_open_trades": 3,
+        })
         return render_template("bots.html", **data,
                                memecoin_bots=memecoin_bots,
                                signing_tasks=signing_tasks,
                                signing_tx_count=signing_tx_count,
                                presets=presets,
-                               clyde_preset=clyde_preset)
+                               clyde_preset=clyde_preset,
+                               gnat_preset=gnat_preset)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required
@@ -3938,6 +3951,47 @@ def register_routes(app: Flask) -> None:
              f"Created bot '{CLYDE_PRESET_NAME}' (Clyde preset, "
              f"paper). Silent trading is off.", "paper")
         flash(f"Created the {CLYDE_PRESET_NAME} bot (Clyde preset, "
+              f"paper). Turn silent trading on when you are ready — "
+              f"it only trades within its rules and limits.")
+        return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
+
+    @app.route("/bots/preset/gnat", methods=["POST"])
+    @login_required
+    def bot_preset_gnat():
+        """Create the Gnat preset bot.
+
+        Paper mode, silent off. One per user — if a Gnat bot
+        already exists, go to it instead of making a duplicate.
+        Stop loss 18% (Gnat's hard number, on the bot row), buy
+        size 18% (the fallback cap — the loop buys a fixed 0.25
+        SOL when a live SOL price exists) and max 3 open trades
+        (the preset defaults).
+        """
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        existing = db.execute(
+            "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+            "AND name = ?",
+            (user["id"], GNAT_CATEGORY, GNAT_PRESET_NAME)).fetchone()
+        if existing:
+            flash("You already have a Gnat bot.")
+            return redirect(url_for("bot_detail", bot_id=existing["id"]))
+        token = new_token()
+        cur = db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash, category, rules_json, platform) "
+            "VALUES (?, ?, 'bold', '[]', ?, ?, 'paper', 0, 3, ?, ?, ?, "
+            "'pump.fun')",
+            (user["id"], GNAT_PRESET_NAME, GNAT_BUY_SIZE_PCT,
+             GNAT_STOP_LOSS_PCT, hash_token(token), GNAT_CATEGORY,
+             json.dumps(gnat_ruleset())))
+        db.commit()
+        _log(app, user["id"], "bot_create",
+             f"Created bot '{GNAT_PRESET_NAME}' (Gnat preset, "
+             f"paper). Silent trading is off.", "paper")
+        flash(f"Created the {GNAT_PRESET_NAME} bot (Gnat preset, "
               f"paper). Turn silent trading on when you are ready — "
               f"it only trades within its rules and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
