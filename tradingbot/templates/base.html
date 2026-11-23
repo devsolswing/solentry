@@ -50,8 +50,8 @@ if ("serviceWorker" in navigator) {
     <form method="post" action="{{ url_for('mode_switch') }}" class="hud-mode">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="mode" value="{{ 'devnet' if header_mode == 'paper' else 'paper' }}">
-      <button class="mode-switch hud-switch" type="submit" aria-label="Switch to {{ 'Real trading (devnet)' if header_mode == 'paper' else 'Demo trading (paper)' }}">
-        <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">Devnet</span>
+      <button class="mode-switch hud-switch" type="submit" aria-label="Switch to {{ real_mode_label if header_mode == 'paper' else 'Demo trading (paper)' }}">
+        <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">{{ real_network_name }}</span>
       </button>
     </form>
   </div>
@@ -98,9 +98,9 @@ if ("serviceWorker" in navigator) {
     <form method="post" action="{{ url_for('choose_mode') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="mode" value="devnet">
-      <button class="btn big chooser-btn real" type="submit">Real trading — devnet</button>
+      <button class="btn big chooser-btn real" type="submit">{{ real_mode_label }}</button>
     </form>
-    <p class="muted small">Real SOL on devnet (test money, no real value). Mainnet is not connected.</p>
+    {% if network == 'mainnet' %}<p class="muted small">Real SOL on mainnet — real money. Trades are signed by your signing bot, within your bots' limits.</p>{% else %}<p class="muted small">Real SOL on devnet (test money, no real value). Mainnet is not connected.</p>{% endif %}
   </div>
 </div>
 {% endif %}

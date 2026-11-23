@@ -262,7 +262,7 @@ class TestGateBuyQuoteEndpoint(unittest.TestCase):
         signup(self.client, "alice")
         self.rpc = _FakeRpc(curves=_rpc_curves(_gate_curve()))
         self.patch = mock.patch.object(
-            routes, "SolanaRpcClient", lambda url: self.rpc)
+            routes, "SolanaRpcClient", lambda url, **kwargs: self.rpc)
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
@@ -384,9 +384,9 @@ class TestManualRealFuel(unittest.TestCase):
                             gate_tokens=0.0)
         patches = [
             mock.patch.object(routes, "SolanaRpcClient",
-                              lambda url: self.rpc),
+                              lambda url, **kwargs: self.rpc),
             mock.patch.object(solana_mod, "SolanaRpcClient",
-                              lambda url: self.rpc),
+                              lambda url, **kwargs: self.rpc),
             mock.patch.object(routes, "execute_real_trade"),
             mock.patch.object(routes, "execute_jupiter_swap"),
         ]
@@ -673,9 +673,9 @@ class TestWalletFuelStrip(unittest.TestCase):
                             gate_tokens=1000000.0)
         patches = [
             mock.patch.object(routes, "SolanaRpcClient",
-                              lambda url: self.rpc),
+                              lambda url, **kwargs: self.rpc),
             mock.patch.object(solana_mod, "SolanaRpcClient",
-                              lambda url: self.rpc),
+                              lambda url, **kwargs: self.rpc),
         ]
         for p in patches:
             p.start()

@@ -17,11 +17,12 @@ Guardrails (non-negotiable, from James's own rules):
   5. Real-money silent trading runs on the configured NETWORK
      (default devnet). Nothing mainnet unless NETWORK is mainnet.
 
-Real swaps: the dedicated signing bot executes real trades on
-devnet only, through pump.fun bonding-curve buys/sells (see
-executor.py). A real trade is refused plainly — never faked —
-whenever it is unverified: mainnet, a coin that is not a pump.fun
-token mint, a token with no bonding curve on devnet, or a trade
+Real swaps: the dedicated signing bot executes real trades on the
+configured NETWORK (devnet or mainnet), through pump.fun
+bonding-curve buys/sells (see executor.py) and Jupiter swaps for
+graduated coins. A real trade is refused plainly — never faked —
+whenever it is unverified: a coin that is not a pump.fun
+token mint, a token with no bonding curve, or a trade
 outside the bot's limits. A real executor can still be injected
 (tests do this); the wiring for it is `real_executor(bot, user_id,
 coin, side, amount, price, db, cfg)`.
@@ -49,14 +50,15 @@ from .db import init_db
 from .coin_meta import (ensure_coin_meta, get_coin_meta, metadata_pda,
                         parse_metadata_account)
 from .devnet_watchlist import active_mints, enrich_scan
-from .executor import _skip, execute_real_trade, is_curve_complete
+from .executor import (_skip, execute_real_trade, is_curve_complete,
+                       pending_signature_for, reconcile_pending_trades)
 from . import gate_fuel as gate_fuel_mod
 from .jupiter_executor import execute_jupiter_swap
 from .ledger import record_trade
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
 from .pnl import portfolio_totals, record_snapshot
-from .prices import get_prices
+from .prices import get_coingecko_sol_price_usd, get_prices
 from .pumpfun import (bonding_curve_pda, curve_progress_pct,
                       parse_bonding_curve)
 from .rules import (GNAT_BREAKEVEN_PLUS_PCT, GNAT_BUY_SIZE_PCT,
@@ -76,7 +78,8 @@ from .scanner import (BREAKEVEN_TRIGGER_PCT, check_top10_concentration,
                       passes_buy_filter, passes_momentum_gate, record_marks,
                       signal_dead, top10_share, top10_total)
 from .signals import signal_for_coin
-from .solana import SolanaRpcClient, is_valid_address, lamports_to_sol
+from .solana import (SolanaRpcClient, is_valid_address,
+                     lamports_to_sol, rpc_client_for_config)
 from .trenches import (fetch_mint_24h_changes, fetch_prices_for_mints,
                        fetch_trenches_scan)
 
@@ -226,6 +229,154 @@ def _claim_position_for_sell(position_id: int) -> bool:
 def _release_position_for_sell(position_id: int) -> None:
     with _SELL_IN_FLIGHT_LOCK:
         _SELL_IN_FLIGHT.discard(position_id)
+
+
+def validate_loop_startup(cfg: Config, candidates=None) -> None:
+    """Startup guardrail (research report audit #14): refuse to
+    start the silent loop on mainnet when a devnet-watchlist mint
+    is present as a candidate. `candidates` is the devnet mint list
+    to check (tests inject it); in production it is the configured
+    list — but ONLY when DEVNET_TRENCH_MINTS was set explicitly.
+    The built-in defaults (Gate/AuditTest) are inert on mainnet:
+    active_mints() returns [] there, so they are never candidates
+    and alone never block the loop. An operator who explicitly
+    configures devnet mints while on mainnet has misconfigured the
+    deployment, and the loop refuses to start rather than trade
+    them. Raises ValueError."""
+    if cfg.network != "mainnet":
+        return
+    if candidates is None:
+        if not getattr(cfg, "devnet_trench_mints_explicit", False):
+            return
+        candidates = list(cfg.devnet_trench_mints or [])
+    bad = [m for m in (candidates or []) if m]
+    if bad:
+        raise ValueError(
+            "refusing to start the silent loop: NETWORK=mainnet but "
+            "devnet watchlist mints are configured as candidates "
+            f"({', '.join(bad)}). Clear DEVNET_TRENCH_MINTS (or set "
+            "it empty) — devnet test tokens must never be candidates "
+            "on mainnet.")
+
+
+def _open_sell_claim(db, bot_id: int, coin: str):
+    """The open persistent sell claim for (bot, coin), or None."""
+    try:
+        return db.execute(
+            "SELECT * FROM sell_claims WHERE bot_id = ? AND coin_id = ? "
+            "AND status = 'open' ORDER BY id DESC LIMIT 1",
+            (bot_id, coin)).fetchone()
+    except Exception:
+        return None
+
+
+def _place_sell_claim(db, user_id: int, bot_id: int, coin: str,
+                      amount: float):
+    """Open a persistent sell claim for (bot, coin). Returns the
+    claim id, or None when the row could not be written (the
+    in-memory claim still guards the same-process race)."""
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        cur = db.execute(
+            "INSERT INTO sell_claims (user_id, bot_id, coin_id, amount, "
+            "status, claimed_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'open', ?, ?)",
+            (user_id, bot_id, coin, float(amount), now, now))
+        db.commit()
+        return cur.lastrowid
+    except Exception:
+        return None
+
+
+def _resolve_sell_claim(db, claim_id, status: str,
+                        signature=None) -> None:
+    """Mark a claim confirmed (with the landing signature) or
+    released. Never raises."""
+    if claim_id is None:
+        return
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            "UPDATE sell_claims SET status = ?, signature = ?, "
+            "updated_at = ? WHERE id = ?",
+            (status,
+             str(signature) if signature is not None else None,
+             now, claim_id))
+        db.commit()
+    except Exception:
+        return
+
+
+def _reconcile_sell_claim(db, cfg: Config, bot, coin: str,
+                          rpc) -> str:
+    """Reconcile an open persistent sell claim against the chain
+    before any re-sell. Returns "ok" (no claim, or a stale claim
+    released), "sold" (the claimed sell already landed — the
+    position is gone), or "blocked" (the claimed sell may still be
+    in flight — do not re-sell yet). Never raises: on any doubt
+    the safe answer is "blocked", never a second sell."""
+    claim = _open_sell_claim(db, int(bot["id"]), coin)
+    if claim is None:
+        return "ok"
+    signature = claim["signature"] or pending_signature_for(
+        db, int(bot["user_id"]), coin, "sell")
+    if not signature:
+        # No signature was ever recorded: nothing was sent (or the
+        # send predates pending-trade recording) — release it.
+        _resolve_sell_claim(db, claim["id"], "released")
+        return "ok"
+    get_tx = getattr(rpc, "get_transaction", None) if rpc else None
+    if get_tx is None:
+        return "blocked"
+    try:
+        receipt = get_tx(signature)
+    except Exception:
+        return "blocked"
+    if receipt is not None:
+        meta = receipt.get("meta") or {}
+        if meta.get("err") is None:
+            _resolve_sell_claim(db, claim["id"], "confirmed",
+                                signature)
+            return "sold"
+        _resolve_sell_claim(db, claim["id"], "released")
+        return "ok"
+    try:
+        claimed_at = datetime.fromisoformat(
+            str(claim["claimed_at"]).replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - claimed_at).total_seconds()
+    except (TypeError, ValueError):
+        age = 0.0
+    if age > float(cfg.pending_trade_horizon_seconds):
+        _resolve_sell_claim(db, claim["id"], "released")
+        return "ok"
+    return "blocked"
+
+
+def _call_real_executor(real_executor, bot, user_id, coin, side, amount,
+                        price, db, cfg, decision_price_as_of=None,
+                        sol_price_usd=None, sol_price_secondary=None):
+    """Call the real executor, passing the price-gate context (how
+    old the decision price is, the two SOL prices) when it is the
+    loop's default executor — which forwards it to the pump.fun /
+    Jupiter executors. An injected executor (tests, or a future
+    replacement) keeps the plain 7-argument protocol: it is called
+    exactly as before, with no extra arguments."""
+    if real_executor is default_real_executor:
+        age = None
+        if decision_price_as_of is not None:
+            try:
+                age = time.time() - float(decision_price_as_of)
+            except (TypeError, ValueError):
+                age = None
+        return real_executor(
+            bot, user_id, coin, side, amount, price, db, cfg,
+            decision_price_age_seconds=age,
+            sol_price_usd=sol_price_usd,
+            sol_price_secondary=sol_price_secondary)
+    return real_executor(bot, user_id, coin, side, amount, price,
+                         db, cfg)
 
 
 def _signal_confirmed(db, bot_id: int, mint: str, gain: float,
@@ -866,28 +1017,41 @@ def _gnat_entry_gates(db, cfg, entry: dict, rpc_factory,
 
 
 def default_real_executor(bot, user_id: int, coin: str, side: str,
-                         amount: float, price: float, db, cfg) -> dict:
+                         amount: float, price: float, db, cfg,
+                         decision_price_age_seconds=None,
+                         sol_price_usd=None,
+                         sol_price_secondary=None) -> dict:
     """Real executor: the account's dedicated signing bot executes
-    pump.fun trades on devnet (see executor.py) — and Jupiter
-    swaps on mainnet for graduated coins (see jupiter_executor.py,
-    gated behind James's go-ahead). The venue is the bonding
-    curve: complete (graduated) -> Jupiter, still bonding ->
-    pump.fun, unreadable -> refused plainly, never guessed.
-    Anything unverified is skipped honestly — never a fake fill."""
+    pump.fun trades on mainnet and devnet (see executor.py) — and
+    Jupiter swaps on mainnet for graduated coins (see
+    jupiter_executor.py, gated behind James's go-ahead). The venue
+    is the bonding curve: complete (graduated) -> Jupiter, still
+    bonding -> pump.fun, unreadable -> refused plainly, never
+    guessed. Anything unverified is skipped honestly — never a fake
+    fill. The price-gate context (decision price age, SOL prices)
+    is forwarded to whichever executor runs, so a real buy is
+    checked against a fresh on-chain read immediately before it
+    executes."""
     if not is_valid_address(coin):
         return _skip("Not a valid token address")
     try:
-        rpc = SolanaRpcClient(cfg.rpc_url)
+        rpc = rpc_client_for_config(cfg)
         complete = is_curve_complete(rpc, coin)
     except Exception:
         complete = None
     if complete is None:
         return _skip("bonding curve unavailable")
     if complete:
-        return execute_jupiter_swap(bot, user_id, coin, side, amount,
-                                    db, cfg)
-    return execute_real_trade(bot, user_id, coin, side, amount, price,
-                              db, cfg)
+        return execute_jupiter_swap(
+            bot, user_id, coin, side, amount, db, cfg,
+            decision_price_usd=price,
+            decision_price_age_seconds=decision_price_age_seconds,
+            sol_price_usd=sol_price_usd)
+    return execute_real_trade(
+        bot, user_id, coin, side, amount, price, db, cfg,
+        decision_price_age_seconds=decision_price_age_seconds,
+        sol_price_usd=sol_price_usd,
+        sol_price_secondary=sol_price_secondary)
 
 
 def _mint_price_map(coins) -> dict:
@@ -1098,10 +1262,11 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
             actions.append({"action": "skip", "coin": coin,
                             "reason": "holding smaller than position"})
         return
-    # Real mode: the signing bot executes on devnet (executor decides).
-    # $GATE fuel gate (2026-11-22): when fuel is on, a real trade
-    # needs 10,000 $GATE held — the live balance is read here,
-    # before anything executes. Not enrolled: open, nothing read.
+    # Real mode: the signing bot executes (executor decides).
+    # Persistent sell claim (restart-safe, 2026-11-22): reconcile
+    # any open claim against the chain BEFORE re-selling, so a
+    # ladder rung can never double-sell after a restart between an
+    # on-chain fill and the position close.
     wallet_row = db.execute(
         "SELECT pubkey FROM wallets WHERE user_id = ?",
         (bot["user_id"],)).fetchone()
@@ -1109,6 +1274,27 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
         gate_client = rpc_factory(cfg.rpc_url)
     except Exception:
         gate_client = None
+    claim_state = _reconcile_sell_claim(db, cfg, bot, coin, gate_client)
+    if claim_state == "sold":
+        _close_position(db, bot, coin, full_amount)
+        _log(db, bot["user_id"], "silent_skip",
+             f"Silent bot '{bot['name']}': {coin} position already "
+             f"sold — the earlier sell landed on-chain.",
+             bot["mode"])
+        actions.append({"action": "skip", "coin": coin,
+                        "reason": "position already sold"})
+        return
+    if claim_state == "blocked":
+        _log(db, bot["user_id"], "silent_skip",
+             f"Silent bot '{bot['name']}': {reason} sell of {coin} "
+             f"skipped — an earlier sell may still be in flight.",
+             bot["mode"])
+        actions.append({"action": "skip", "coin": coin,
+                        "reason": "sell already in flight"})
+        return
+    # $GATE fuel gate (2026-11-22): when fuel is on, a real trade
+    # needs 10,000 $GATE held — the live balance is read here,
+    # before anything executes. Not enrolled: open, nothing read.
     ok, fuel_reason, _held, _left = gate_fuel_mod.fuel_gate_check(
         db, cfg, gate_client,
         wallet_row["pubkey"] if wallet_row else "", bot["user_id"])
@@ -1119,9 +1305,17 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
         actions.append({"action": "skip", "coin": coin,
                         "reason": fuel_reason})
         return
-    result = real_executor(bot, bot["user_id"], coin, "sell", amount, price,
-                           db, cfg)
+    # The claim is placed only once the fuel gate has passed: a
+    # refused sell never holds a claim. An unconfirmed send leaves
+    # the claim open — the next pass reconciles it against the
+    # chain via the pending-trades signature.
+    claim_id = _place_sell_claim(db, bot["user_id"], int(bot["id"]),
+                                 coin, amount)
+    result = _call_real_executor(real_executor, bot, bot["user_id"],
+                                 coin, "sell", amount, price, db, cfg)
     if result.get("status") == "executed":
+        _resolve_sell_claim(db, claim_id, "confirmed",
+                            result.get("signature"))
         _close_position(db, bot, coin, amount)
         # Trade ledger (builderBot): P&L from the EXECUTED on-chain
         # amounts, never from the loop-seen mark price. The executor
@@ -1178,6 +1372,11 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
         actions.append({"action": "sell", "coin": coin, "amount": amount,
                         "reason": reason})
     else:
+        if result.get("reason") != "transaction not confirmed":
+            # The sell was refused before anything was sent — the
+            # claim is released. An unconfirmed send keeps its
+            # claim: the next pass reconciles it against the chain.
+            _resolve_sell_claim(db, claim_id, "released")
         why = result.get("reason", "real execution failed")
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': {reason} sell of {coin} "
@@ -1190,7 +1389,8 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
               real_executor, actions: list,
               signals: dict | None = None,
               feed=None, prices_data: dict | None = None,
-              kind: str | None = None) -> None:
+              kind: str | None = None,
+              decision_price_as_of: float | None = None) -> None:
     """Buy `coin` for a bot within its limits, or skip with a reason.
 
     `signals` is the buy-time signal snapshot from the feed entry
@@ -1201,6 +1401,11 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     when the executor reports it (see below), never the mark.
     `kind` is the bot's rule kind: only gnat sizes in fixed SOL —
     every other kind buys a % of the bankroll.
+    `decision_price_as_of` is when the decision price was fetched
+    (epoch seconds, the scan time): the real executor refuses a
+    buy on a price older than the freshness window. None when the
+    caller cannot say — the freshness check is then skipped and
+    recorded, never treated as fresh.
     """
     if bot["mode"] == "paper":
         bankroll = paper_bankroll(db, bot["user_id"], prices_usd)
@@ -1310,8 +1515,20 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         actions.append({"action": "skip", "coin": coin,
                         "reason": fuel_reason})
         return
-    result = real_executor(bot, bot["user_id"], coin, "buy", amount_sol,
-                           price, db, cfg)
+    # Price-gate context for the real executor: the decision price
+    # is the scan price fetched at decision_price_as_of (the loop
+    # passes the scan time); the two SOL prices are the live feed
+    # price and the CoinGecko cross-check (cached 60s — a missing
+    # second source skips only that check, never a guessed price).
+    sol_price = _live_sol_price_usd(feed, prices_data)
+    try:
+        sol_price_secondary = get_coingecko_sol_price_usd()
+    except Exception:
+        sol_price_secondary = None
+    result = _call_real_executor(
+        real_executor, bot, bot["user_id"], coin, "buy", amount_sol,
+        price, db, cfg, decision_price_as_of=decision_price_as_of,
+        sol_price_usd=sol_price, sol_price_secondary=sol_price_secondary)
     if result.get("status") == "executed":
         coin_amount = float(result.get("coin_amount") or 0)
         if coin_amount > 0:
@@ -1452,7 +1669,8 @@ def _lte(a: float, b: float) -> bool:
 def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                         prices_data: dict, trenches_data: dict | None,
                         rpc_factory, real_executor,
-                        feed=None) -> list:
+                        feed=None,
+                        decision_price_as_of=None) -> list:
     """One evaluation pass for a bot with a custom rule set.
 
     Fail-closed: a feed error, missing price data, or an unusable rule
@@ -1976,7 +2194,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                       _bankroll_prices(),
                       rpc_factory, real_executor, actions,
                       signals=signals, feed=feed, kind=kind,
-                      prices_data=prices_data)
+                      prices_data=prices_data,
+                      decision_price_as_of=decision_price_as_of)
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
     else:
@@ -2026,7 +2245,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                       rpc_factory, real_executor, actions,
                       signals={"gain_pct": float(change),
                                "gain_window": "24h"},
-                      feed=feed, prices_data=prices_data)
+                      feed=feed, prices_data=prices_data,
+                      decision_price_as_of=decision_price_as_of)
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
     if bought == 0 and blocked_gates and not max_open_hit:
@@ -2048,7 +2268,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
 def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
                   prices_data: dict, rpc_factory,
                   real_executor, trenches_data=None,
-                  feed=None) -> list:
+                  feed=None, decision_price_as_of=None) -> list:
     """One evaluation pass for one silent bot. Returns its actions.
 
     Bots with a stored rule set go through the rules engine; bots
@@ -2065,7 +2285,9 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
     if rules is not None:
         return _evaluate_rules_bot(db, cfg, bot, rules, prices_data,
                                    trenches_data, rpc_factory, real_executor,
-                                   feed=feed)
+                                   feed=feed,
+                                   decision_price_as_of=(
+                                       decision_price_as_of))
     actions: list = []
     coins = json.loads(bot["coins"])
     # The price list is SOL only; a signals bot's coins are pump.fun
@@ -2121,7 +2343,8 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
             continue
         _buy_coin(db, cfg, bot, coin, entry["price"], prices_usd,
                   rpc_factory, real_executor, actions,
-                  prices_data=prices_data)
+                  prices_data=prices_data,
+                  decision_price_as_of=decision_price_as_of)
     return actions
 
 
@@ -2461,6 +2684,12 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     real_executor = real_executor or default_real_executor
     trenches_fetcher = trenches_fetcher or fetch_trenches_scan
     prices_data = price_fetcher()
+    # When the decision prices were fetched (epoch seconds): the
+    # real executor refuses a buy on a price older than the
+    # freshness window, so the scan time travels with the
+    # evaluation. The price list is fetched first; the trenches
+    # scan (when needed) refreshes it.
+    decision_price_as_of = time.time()
     bots = db.execute(
         "SELECT * FROM bots WHERE silent = 1 ORDER BY id").fetchall()
     trenches_data = None
@@ -2476,6 +2705,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             "SELECT DISTINCT coin_id FROM bot_positions WHERE bot_id IN "
             "(SELECT id FROM bots WHERE silent = 1)").fetchall()]
         trenches_data = trenches_fetcher(mints=held_mints)
+        decision_price_as_of = time.time()
         # DEVNET-TEST-ONLY (remove before mainnet): add the
         # devnet-mint watchlist as extra scan candidates, priced
         # from their bonding curves. Inert unless NETWORK is
@@ -2494,12 +2724,23 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
         prices_data = feed.sanitize_prices_data(prices_data)
         if trenches_data is not None:
             trenches_data = feed.sanitize_trenches(trenches_data)
+    # Pending-trade reconciliation (mainnet fix): re-check every
+    # unconfirmed sent signature via getTransaction before this
+    # pass settles anything. A failure here never breaks the loop.
+    try:
+        _reconcile_rpc = rpc_factory(cfg.rpc_url)
+        reconcile_pending_trades(
+            db, _reconcile_rpc, cfg.pending_trade_horizon_seconds)
+    except Exception:
+        pass
     outcomes = []
     for bot in bots:
         try:
             actions = _evaluate_bot(db, cfg, bot, prices_data, rpc_factory,
                                     real_executor,
-                                    trenches_data=trenches_data, feed=feed)
+                                    trenches_data=trenches_data, feed=feed,
+                                    decision_price_as_of=(
+                                        decision_price_as_of))
             outcomes.append({"bot_id": bot["id"], "bot_name": bot["name"],
                              "user_id": bot["user_id"], "mode": bot["mode"],
                              "actions": actions, "error": None})
@@ -2588,6 +2829,9 @@ def loop_forever(db_path: str, cfg: Config, interval: int | None = None,
     never shared across threads. The 15-second top-10 watch starts
     alongside (once per process, not in once mode) — it runs on its
     own thread so its cadence does not depend on the loop interval."""
+    # Startup guardrail (audit #14): on mainnet with devnet mints
+    # explicitly configured as candidates, refuse to start at all.
+    validate_loop_startup(cfg)
     interval = interval if interval is not None \
         else cfg.silent_loop_interval_seconds
     if not once:
@@ -2672,6 +2916,13 @@ def start_background_loop(app) -> threading.Thread | None:
     if getattr(app, "_silent_loop_started", False):
         return None
     cfg = app.config["TRADINGBOT_CONFIG"]
+    try:
+        validate_loop_startup(cfg)
+    except ValueError as exc:
+        # Refuse to start the loop (not the app): loud log, no
+        # thread, no trades. Fix the config and restart.
+        print(f"[silent-loop] NOT STARTED: {exc}", flush=True)
+        return None
     thread = threading.Thread(
         target=loop_forever,
         args=(cfg.database_path, cfg, cfg.silent_loop_interval_seconds),

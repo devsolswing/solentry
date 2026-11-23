@@ -5,10 +5,10 @@
    with the bot's limits for real, two-step confirm for sends).
    Every action ends on a confirmation stating the result, with a
    way back to the coin page. Expects: coin (row), bots, mode
-   ('paper' or 'devnet'), mode_label, receive_address, coin_network
+   ('paper' or real), mode_label, receive_address, coin_network
    (which chain the coin lives on), send_refusal (plain refusal when
    the coin is not a Solana asset, else None), network_label
-   ("Solana (devnet)"). The Send and Receive windows account for
+   ("Solana (mainnet)" on mainnet). The Send and Receive windows account for
    the network: a Solana coin shows the network it will use in plain
    words; a coin that lives on another chain is refused plainly —
    its address is never shown and no send form is rendered, so
@@ -40,9 +40,9 @@
           {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
         </select>
       </label>
-      <button class="btn big" type="submit">Buy (real, devnet)</button>
+      <button class="btn big" type="submit">Buy (real, {{ network }})</button>
     </form>
-    <p class="muted small">Buys on pump.fun (devnet), signed by your signing bot, within the bot's limits. If the coin is not a live pump.fun token, the buy is refused plainly and nothing is placed.</p>
+    <p class="muted small">Buys on pump.fun ({{ network }}), signed by your signing bot, within the bot's limits. If the coin is not a live pump.fun token, the buy is refused plainly and nothing is placed.</p>
     {% endif %}
     <p><button class="btn ghost big" type="button" data-overlay-close>← Back to coin</button></p>
   </div>
@@ -68,7 +68,7 @@
           {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
         </select>
       </label>
-      <button class="btn big" type="submit">Sell (real, devnet)</button>
+      <button class="btn big" type="submit">Sell (real, {{ network }})</button>
     </form>
     <p class="muted small">Sells only the part you hold by hand. Coins a bot is managing are sold by that bot's rules.</p>
     {% endif %}
@@ -91,7 +91,7 @@
           {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
         </select>
       </label>
-      <button class="btn big" type="submit">Sell all (real, devnet)</button>
+      <button class="btn big" type="submit">Sell all (real, {{ network }})</button>
     </form>
     {% endif %}
     {% else %}

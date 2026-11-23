@@ -22,8 +22,8 @@ import unittest
 from unittest import mock
 
 from helpers import make_client, signup
-from test_executor import (FAKE_SIGNATURE, ExecutorBase, FakePumpRpc,
-                           make_curve)
+from test_executor import (CURVE_PRICE_USD, FAKE_SIGNATURE, ExecutorBase,
+                           FakePumpRpc, TEST_SOL_PRICE_USD, make_curve)
 from tradingbot import db as db_mod
 from tradingbot import pumpfun
 from tradingbot.executor import execute_real_trade
@@ -60,9 +60,12 @@ class TestExecutorSolAmounts(ExecutorBase):
         rpc = SpendingRpc(self.pubkey, self.mint, curve=make_curve())
         curve = pumpfun.parse_bonding_curve(make_curve())
         rpc.fill_tokens = pumpfun.buy_quote(curve, 95, 1_000_000_000)
-        result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 1.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+        result = execute_real_trade(
+            self._bot(), self.user_id, self.mint, "buy", 1.0,
+            CURVE_PRICE_USD, self.db, self.cfg,
+            decision_price_age_seconds=0.0,
+            sol_price_usd=TEST_SOL_PRICE_USD,
+            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         # 1.0 SOL swapped + 5,000 lamports network fee, from the

@@ -138,7 +138,7 @@
          $GATE per confirmed real trade); the counter shows trades
          left from the held balance. Paper trades are free, so no
          strip in paper mode. #}
-      {% if gate_mint and row.coin_id == gate_mint and mode == 'devnet' %}
+      {% if held_gate_mint and row.coin_id == held_gate_mint and mode == 'devnet' %}
       <div class="gate-fuel-strip">
         <span class="gate-fuel-text">
           {% if gate_fuel_trades_left is not none %}

@@ -133,6 +133,59 @@ class Config:
         # candidates on mainnet.
         self.devnet_trench_mints: list[str] = _parse_devnet_trench_mints(
             env)
+        # True only when DEVNET_TRENCH_MINTS was set explicitly in
+        # the environment (even to empty). The startup guardrail
+        # (silent_loop.validate_loop_startup) refuses to start on
+        # mainnet only when an operator EXPLICITLY configured devnet
+        # mints while on mainnet — the built-in defaults are inert
+        # on mainnet (active_mints returns [] there), so they alone
+        # never block the loop.
+        self.devnet_trench_mints_explicit: bool = (
+            env.get("DEVNET_TRENCH_MINTS") is not None)
+        # Mainnet executor fix (2026-11-22). Every value below is a
+        # Remy default, awaiting James's call — see
+        # ~/workspace/executor-fix-staging/MANIFEST.md.
+        # Fallback RPC: tried after RPC_URL on a transport failure,
+        # then the read skips. Mainnet default is a second public
+        # endpoint; devnet has no second public endpoint configured.
+        self.rpc_fallback_url: str = env.get(
+            "RPC_FALLBACK_URL",
+            "https://solana-rpc.publicnode.com"
+            if self.network == "mainnet" else "").strip()
+        # Priority-fee cap, micro-lamports per compute unit.
+        self.priority_fee_cap_micro_lamports: int = int(env.get(
+            "PRIORITY_FEE_CAP_MICRO_LAMPORTS", "50000"))
+        # Exit slippage, basis points (5%). Entries stay at the
+        # pump.fun / Jupiter 1% default.
+        self.exit_slippage_bps: int = int(env.get(
+            "EXIT_SLIPPAGE_BPS", "500"))
+        # Bounded re-quote retries for SELLS only (re-read the
+        # curve/quote, rebuild, resend). Buys are never retried.
+        self.sell_requote_attempts: int = max(
+            1, int(env.get("SELL_REQUOTE_ATTEMPTS", "3")))
+        # Per-trade Jupiter fee budget, SOL: a swap whose maximum
+        # fee (from its compute-budget instructions) exceeds this
+        # refuses instead of signing.
+        self.jupiter_max_fee_sol: float = float(env.get(
+            "JUPITER_MAX_FEE_SOL", "0.01"))
+        # Price-validation gate (report §3): feed price vs fresh
+        # on-chain read must agree within this % before a real buy.
+        self.two_source_tolerance_pct: float = float(env.get(
+            "TWO_SOURCE_TOLERANCE_PCT", "5"))
+        # Second SOL-price source (CoinGecko): USD-denominated
+        # decisions refuse when the two SOL prices disagree by
+        # more than this %.
+        self.sol_price_disagree_pct: float = float(env.get(
+            "SOL_PRICE_DISAGREE_PCT", "2"))
+        # A decision price older than this (seconds) is stale: new
+        # buys refuse on it. Exits may still decide on it, but the
+        # executor re-quotes before selling.
+        self.decision_price_max_age_seconds: float = float(env.get(
+            "DECISION_PRICE_MAX_AGE_SECONDS", "30"))
+        # Pending-trade horizon: a sent signature with no receipt
+        # after this long is finally marked failed (seconds).
+        self.pending_trade_horizon_seconds: float = float(env.get(
+            "PENDING_TRADE_HORIZON_SECONDS", "600"))
         # WebAuthn passkeys: RP identity comes from env vars only —
         # never hardcode the production domain. Dev defaults point at
         # a local server; Railway must set the real domain + origin.

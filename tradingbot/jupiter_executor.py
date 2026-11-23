@@ -94,15 +94,18 @@ from .jupiter import (JUPITER_PROGRAM_ID, SOL_MINT, JupiterError,
                       fetch_swap_transaction, mint_decimals,
                       no_liquid_route_message, quote_buy_mint,
                       quote_sell_mint, request_real_swap)
+from .price_gate import check_quote_vs_decision
 from .security import wipe_secret
 from .signing_bot import ensure_signing_bot
-from .solana import (ASSOCIATED_TOKEN_PROGRAM, SYSTEM_PROGRAM,
+from .solana import (ASSOCIATED_TOKEN_PROGRAM,
+                     BASE_TX_FEE_LAMPORTS, COMPUTE_BUDGET_PROGRAM,
+                     DEFAULT_COMPUTE_UNIT_LIMIT, SYSTEM_PROGRAM,
                      TOKEN_2022_PROGRAM, TOKEN_PROGRAM, base58_decode,
                      base58_encode, compact_u16_encode,
                      ed25519_publickey_from_seed, ed25519_sign,
                      find_associated_token_address, is_valid_address,
-                     lamports_to_sol, sol_to_lamports,
-                     SolanaRpcClient)
+                     lamports_to_sol, rpc_client_for_config,
+                     sol_to_lamports, SolanaRpcClient)
 
 # A quote that moves the price more than this refuses plainly —
 # a swap with that much impact is a bad trade, never a fill.
@@ -126,7 +129,7 @@ MAX_CREATE_ACCOUNT_LAMPORTS = 10_000_000
 # A token account is 165 bytes.
 TOKEN_ACCOUNT_SIZE = 165
 
-COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111"
+# (COMPUTE_BUDGET_PROGRAM comes from solana.py — one definition.)
 
 # Every program a Jupiter swap transaction may use. The System
 # program is in the set but its instructions are validated
@@ -534,6 +537,50 @@ def sign_versioned_transaction(seed: bytes, swap_tx_b64: str,
             base58_encode(signature))
 
 
+def max_swap_fee_lamports(parsed: dict, resolved_keys: list) -> int:
+    """The maximum fee a Jupiter swap transaction can charge, in
+    lamports: the 5,000-lamport base fee plus the worst case from
+    its Compute Budget instructions (unit price x unit limit).
+    A transaction with no limit instruction uses the runtime
+    default (200,000 units); no price instruction means no
+    priority fee. The caller refuses when this exceeds the
+    per-trade fee budget — the old 0.001 SOL reserve was never a
+    real bound (the allowlist alone permitted up to 0.14 SOL)."""
+    unit_limit = DEFAULT_COMPUTE_UNIT_LIMIT
+    unit_price = 0
+    for ins in parsed.get("instructions") or []:
+        idx = ins.get("program_id_index")
+        if idx is None or idx >= len(resolved_keys):
+            continue
+        if resolved_keys[idx] != COMPUTE_BUDGET_PROGRAM:
+            continue
+        data = ins.get("data") or b""
+        if not data:
+            continue
+        if data[0] == 2 and len(data) == 5:  # setComputeUnitLimit
+            unit_limit = int.from_bytes(data[1:5], "little")
+        elif data[0] == 3 and len(data) == 9:  # setComputeUnitPrice
+            unit_price = max(unit_price,
+                             int.from_bytes(data[1:9], "little"))
+    return BASE_TX_FEE_LAMPORTS + unit_limit * unit_price // 1_000_000
+
+
+def check_swap_fee_budget(parsed: dict, resolved_keys: list,
+                          max_fee_sol: float) -> None:
+    """Refuse (ValueError) when the swap's maximum fee exceeds the
+    per-trade budget. A false refusal is safe; a false acceptance
+    is what would cost money."""
+    try:
+        budget = int(float(max_fee_sol) * 1_000_000_000)
+    except (TypeError, ValueError):
+        raise ValueError("refused: fee budget is not configured")
+    fee = max_swap_fee_lamports(parsed, resolved_keys)
+    if fee > budget:
+        raise ValueError(
+            f"refused: swap fee {fee / 1_000_000_000:.4f} SOL exceeds "
+            f"the per-trade budget of {float(max_fee_sol):.4f} SOL")
+
+
 def _check_quote_fresh(quote: dict) -> None:
     """A quote older than MAX_QUOTE_AGE_SECONDS refuses — the swap
     must be built from a quote fetched in this call. A quote
@@ -575,7 +622,10 @@ def _token_balance_or_zero(rpc, ata: str) -> int:
 
 def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
                          amount: float, db, cfg: Config,
-                         rpc_client=None, quote: dict | None = None) -> dict:
+                         rpc_client=None, quote: dict | None = None,
+                         decision_price_usd=None,
+                         decision_price_age_seconds=None,
+                         sol_price_usd=None) -> dict:
     """Execute one real Jupiter swap for a bot, signed by the
     user's dedicated signing bot. Same (bot, user_id, coin, side,
     amount, db, cfg) protocol as the pump.fun executor's
@@ -586,11 +636,16 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
     coins Jupiter ever trades for this app. `amount` is SOL for
     buys and whole tokens for sells. `quote` is a test injection
     (a fresh quote dict); in production the quote is always fetched
-    here. Returns {"status": "executed", "signature",
+    here. `decision_price_usd` is the feed price that picked the
+    trade (buys only): the fresh quote's implied price must agree
+    with it within the two-source tolerance, or the buy refuses.
+    Returns {"status": "executed", "signature",
     "coin_amount", "signing_bot": ...} or {"status": "skipped",
     "reason": ...}. There is NO trading fee (removed 2026-11-12):
     the whole trade amount is swapped. Never raises for a refused
-    trade."""
+    trade. Sells retry (fresh quote, rebuild, resend) up to the
+    configured attempts when the send is unconfirmed; buys never
+    retry."""
     # The gate: James's explicit go-ahead AND mainnet. Either
     # missing refuses plainly — nothing is built, signed or sent.
     try:
@@ -610,7 +665,7 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
     except Exception:
         return _skip("signing bot unavailable")
     rpc = rpc_client if rpc_client is not None \
-        else SolanaRpcClient(cfg.rpc_url)
+        else rpc_client_for_config(cfg)
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
@@ -627,11 +682,23 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
             return _execute_jupiter_buy(
                 bot, user_id, mint, decimals, float(amount),
                 db, cfg, rpc, signing_bot, wallet_pubkey, seed,
-                wsol_ata, quote)
-        return _execute_jupiter_sell(
-            bot, user_id, mint, decimals, float(amount),
-            db, cfg, rpc, signing_bot, wallet_pubkey, seed,
-            wsol_ata, quote)
+                wsol_ata, quote, decision_price_usd,
+                decision_price_age_seconds, sol_price_usd)
+        last = None
+        for _attempt in range(max(1, int(cfg.sell_requote_attempts))):
+            # First attempt uses the caller's quote (a test
+            # injection, or None in production); retries fetch a
+            # fresh quote each time — a stale quote must never be
+            # resent.
+            last = _execute_jupiter_sell(
+                bot, user_id, mint, decimals, float(amount),
+                db, cfg, rpc, signing_bot, wallet_pubkey, seed,
+                wsol_ata, quote if _attempt == 0 else None)
+            if last.get("status") == "executed":
+                return last
+            if last.get("reason") != "transaction not confirmed":
+                return last
+        return last
     except Exception as exc:
         # A failed signing attempt is a loud skip, never a retry
         # loop and never a fake fill.
@@ -645,7 +712,10 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
 
 def _execute_jupiter_buy(bot, user_id, mint, decimals,
                          amount_sol, db, cfg, rpc, signing_bot,
-                         wallet_pubkey, seed, wsol_ata, quote):
+                         wallet_pubkey, seed, wsol_ata, quote,
+                         decision_price_usd=None,
+                         decision_price_age_seconds=None,
+                         sol_price_usd=None):
     """One real Jupiter BUY: `amount_sol` SOL, all of it swapped
     for the coin at `mint` (no fee — removed 2026-11-12)."""
     amount_lamports = sol_to_lamports(amount_sol)
@@ -674,6 +744,32 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
         _check_price_impact(quote)
     except ValueError as exc:
         return _skip(str(exc))
+    # Two-source check (report §3, rule 2): the fresh quote's
+    # implied price must agree with the decision price that picked
+    # the trade. Skipped when the caller passed no decision price.
+    if decision_price_usd is not None:
+        if decision_price_age_seconds is not None:
+            try:
+                age = float(decision_price_age_seconds)
+            except (TypeError, ValueError):
+                age = None
+            if age is not None and age > float(
+                    cfg.decision_price_max_age_seconds):
+                return _skip(
+                    f"decision price is stale ({age:.0f}s old, older "
+                    f"than {cfg.decision_price_max_age_seconds:.0f}s)")
+        sol = sol_price_usd
+        if sol is None:
+            try:
+                from .prices import get_sol_price_usd
+                sol = get_sol_price_usd()
+            except Exception:
+                sol = None
+        ok, reason = check_quote_vs_decision(
+            quote.get("out_amount_ui"), swap_sol, decision_price_usd,
+            sol, cfg.two_source_tolerance_pct)
+        if not ok:
+            return _skip(reason)
     out_ata = find_associated_token_address(wallet_pubkey, mint)
     ata_before = _token_balance_or_zero(rpc, out_ata)
     try:
@@ -687,6 +783,10 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
         verify_jupiter_transaction(
             parsed, resolved_keys, wallet_pubkey, SOL_MINT,
             swap_lamports, "buy", wsol_ata)
+        # Fee budget: the swap's maximum fee must fit the
+        # per-trade budget, or nothing is signed.
+        check_swap_fee_budget(parsed, resolved_keys,
+                              cfg.jupiter_max_fee_sol)
         signed_b64, signature = sign_versioned_transaction(
             seed, swap_tx_b64, wallet_pubkey)
     except ValueError as exc:
@@ -733,8 +833,11 @@ def _execute_jupiter_sell(bot, user_id, mint, decimals,
         return _skip("insufficient token balance")
     if quote is None:
         try:
-            quote = quote_sell_mint(mint, amount_tokens,
-                                    decimals=decimals)
+            # Exits get wider slippage than entries (5% vs 1%, a
+            # Remy default): a 1% min-out fails a fast-moving exit.
+            quote = quote_sell_mint(
+                mint, amount_tokens, decimals=decimals,
+                slippage_bps=int(cfg.exit_slippage_bps))
         except JupiterError as exc:
             # No liquid route says so plainly; anything else
             # (Jupiter unreachable) is reported as itself.
@@ -763,6 +866,8 @@ def _execute_jupiter_sell(bot, user_id, mint, decimals,
         verify_jupiter_transaction(
             parsed, resolved_keys, wallet_pubkey, mint,
             token_base, "sell", wsol_ata)
+        check_swap_fee_budget(parsed, resolved_keys,
+                              cfg.jupiter_max_fee_sol)
         signed_b64, signature = sign_versioned_transaction(
             seed, swap_tx_b64, wallet_pubkey)
     except ValueError as exc:

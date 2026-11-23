@@ -74,7 +74,9 @@ def effective_gate_mint(cfg) -> str | None:
     mainnet mint ONLY when the existing mainnet gate is open
     (JUPITER_REAL_SWAPS=1 AND NETWORK=mainnet); the devnet default
     is never buyable on mainnet. Anything else fails closed
-    (None)."""
+    (None). This is the BUY path only — the fuel counter and the
+    trade gate read HELD $GATE, which does not depend on whether
+    more can be bought (see held_gate_mint)."""
     if cfg.network == "mainnet":
         if not cfg.jupiter_real_swaps:
             return None
@@ -86,6 +88,26 @@ def effective_gate_mint(cfg) -> str | None:
     if not mint or mint == GATE_MINT_MAINNET:
         return None
     return mint
+
+
+def held_gate_mint(cfg) -> str | None:
+    """The mint whose HELD balance counts as fuel — for the
+    trades-left counter and the trade gate. Fuel is holdings-based:
+    it must work on mainnet whether or not buying more $GATE is
+    currently possible, so this deliberately does NOT require the
+    JUPITER_REAL_SWAPS gate that effective_gate_mint (the Buy
+    $GATE path) needs. Mainnet: GATE_MINT (env) unless it is the
+    devnet mint, else the mainnet mint. Devnet: GATE_MINT unless
+    it is the mainnet mint. None only when no mint is configured
+    at all."""
+    mint = (cfg.gate_mint or "").strip()
+    if cfg.network == "mainnet":
+        if mint and mint != GATE_MINT_DEVNET:
+            return mint
+        return GATE_MINT_MAINNET
+    if mint and mint != GATE_MINT_MAINNET:
+        return mint
+    return GATE_MINT_DEVNET
 
 
 def read_gate_curve(rpc, mint: str):
@@ -254,10 +276,10 @@ def fuel_gate_check(db, cfg, rpc, pubkey: str,
     proceeds."""
     if not is_fuel_enrolled(db, user_id):
         return True, None, None, None
-    mint = effective_gate_mint(cfg)
+    mint = held_gate_mint(cfg)
     if mint is None:
-        return (False, "Fuel is on but no $GATE mint is buyable on "
-                "this network — real trades are stopped.", None, None)
+        return (False, "Fuel is on but no $GATE mint is configured "
+                "on this network — real trades are stopped.", None, None)
     if not pubkey:
         return (False, "No app wallet — real trades need a wallet.",
                 None, None)
@@ -280,8 +302,11 @@ def cached_fuel_trades_left(db, cfg, user_id: int,
     per wallet (same pattern as the header SOL balance). Never
     used for a trade decision. None when the balance cannot be
     read (the chip hides — a display failure never blocks a
-    trade)."""
-    mint = effective_gate_mint(cfg)
+    trade). The mint is the HELD mint (held_gate_mint): the counter
+    works on mainnet whether or not buying more $GATE is possible,
+    and the read uses the failover RPC client so one 429 on the
+    primary does not hide the chip."""
+    mint = held_gate_mint(cfg)
     if mint is None or not pubkey:
         return None
     key = (pubkey, mint)
@@ -291,8 +316,8 @@ def cached_fuel_trades_left(db, cfg, user_id: int,
             < _FUEL_COUNTER_TTL_SECONDS):
         return _FUEL_COUNTER_CACHE["value"][key]
     try:
-        from .solana import SolanaRpcClient
-        rpc = SolanaRpcClient(cfg.rpc_url)
+        from .solana import rpc_client_for_config
+        rpc = rpc_client_for_config(cfg)
         held = held_gate_tokens_from_chain(rpc, pubkey, mint)
     except Exception:
         held = None

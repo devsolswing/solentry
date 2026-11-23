@@ -15,7 +15,7 @@
 </div>
 {% else %}
 <div class="card">
-  <h2>◎ Real app wallet (on-chain, devnet)</h2>
+  <h2>◎ Real app wallet (on-chain, {{ network }})</h2>
   {% if real_sol is not none %}
   <p class="big-num">{{ "%.4f"|format(real_sol) }} SOL{% if real_sol_usd is not none %} <span class="muted">≈ ${{ "%.2f"|format(real_sol_usd) }}</span>{% endif %}</p>
   {% else %}

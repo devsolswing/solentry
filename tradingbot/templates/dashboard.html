@@ -9,7 +9,7 @@
 <div class="card portfolio-head">
   <p class="portfolio-mode"><strong>{{ mode_label }}</strong></p>
   <p class="portfolio-total"{% if mode == 'paper' %} data-live-total-portfolio data-live-cash="{{ paper_cash }}"{% endif %}>{% if mode == 'paper' %}${{ "%.2f"|format(portfolio_usd) }} CAD{% else %}{% if portfolio_sol is not none %}{{ "%.4f"|format(portfolio_sol) }} SOL{% if portfolio_usd is not none %} <span class="muted small">≈ ${{ "%.2f"|format(portfolio_usd) }}</span>{% endif %}{% else %}Balance unavailable{% endif %}{% endif %}</p>
-  <p class="muted small">{% if mode == 'paper' %}${{ "%.2f"|format(paper_cash) }} CAD cash · Holdings <span data-live-total-value>${{ "%.2f"|format(holdings_value) }}</span> CAD{% else %}Your app wallet, on-chain (devnet){% endif %}</p>
+  <p class="muted small">{% if mode == 'paper' %}${{ "%.2f"|format(paper_cash) }} CAD cash · Holdings <span data-live-total-value>${{ "%.2f"|format(holdings_value) }}</span> CAD{% else %}Your app wallet, on-chain ({{ network }}){% endif %}</p>
   <div class="portfolio-chart">
     {% if portfolio_has_data %}{{ portfolio_chart_svg|safe }}{% else %}<p class="muted small">No chart data yet — your portfolio chart builds as you trade.</p>{% endif %}
   </div>
@@ -102,7 +102,7 @@
       {% endif %}
 
       <h3>Receive</h3>
-      <p class="muted small">Send {{ popup_coin.ticker }} to your app wallet (real, devnet) at this address:</p>
+      <p class="muted small">Send {{ popup_coin.ticker }} to your app wallet (real, {{ network }}) at this address:</p>
       <p class="addr">{{ receive_address }}</p>
       <button class="btn" data-copy="{{ receive_address }}">Copy address</button>
     </div>

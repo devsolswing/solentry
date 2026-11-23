@@ -1,11 +1,23 @@
-"""Pump.fun program (devnet): account layouts, quote math, and
+"""Pump.fun program: account layouts, quote math, and
 instruction builders for bonding-curve buys and sells.
 
-Verified against devnet RPC (2026-11-09): the program
-6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P is executable, and the
-global account at PDA ["global"] parses to the known constants
-(virtual token reserves 1,073,000,000,000,000; virtual SOL reserves
-30 SOL; token supply 1,000,000,000,000,000; fee 95 bps).
+Verified against devnet RPC (2026-11-09) and re-verified against
+mainnet RPC (2026-11-22): the program
+6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P is the same on both
+networks, and the global account at PDA ["global"] parses to the
+known constants (virtual token reserves 1,073,000,000,000,000;
+virtual SOL reserves 30 SOL; token supply 1,000,000,000,000,000;
+fee 95 bps). The exact built v3 buy simulates cleanly on mainnet
+(err null, BuyV3 invoked); the exact built sell reaches the
+program's balance check (NotEnoughTokensToSell for a zero balance)
+— so the 17-account layout below is current. The program added
+fee_config / fee_program accounts in Sep 2026, but v3 does NOT
+need a fee_program account: per the current TRADE_V3.md,
+"global_volume_accumulator, associated_user_volume_accumulator,
+associated_token_program and fee_program are not needed. The fee
+schedule is read from the Pump Fees fee_config account directly."
+The fee_config PDA derived here matches the address the docs
+publish (8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt).
 
 Trades use the v3 instructions (`buy_v3` / `sell_v3`), per the
 program's own docs (pump-fun/pump-public-docs,
@@ -24,7 +36,9 @@ global_volume_accumulator or fee_program account — and the
 buyback fee goes to ONE of the global account's 8 buyback
 recipients, passed as a single account. Prices, slippage checks
 and fee amounts are the same as v2/legacy, so the quote math
-below is unchanged.
+below is unchanged. No fee_program account: v3 reads the fee
+schedule from the fee_config account directly (see the module
+docstring — verified against the current mainnet program).
 
 Instruction discriminators are the first 8 bytes of
 SHA-256("global:buy_v3") / SHA-256("global:sell_v3") — buy_v3 is
@@ -359,7 +373,7 @@ def build_buy_instruction(accts: dict, token_amount: int,
     """Pump.fun buy_v3: `token_amount` base units out, at most
     `max_sol_cost` lamports in. The 17 accounts follow TRADE_V3.md
     exactly. `partial_fill` is omitted — the docs allow leaving it
-    off, and the devnet simulation passes without it. For
+    off, and the simulation passes without it. For
     SOL-paired coins the quote mint is wrapped SOL; the
     associated quote accounts are derived addresses that the
     program does not use and that do not need to exist. The

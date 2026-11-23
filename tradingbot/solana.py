@@ -24,10 +24,20 @@ TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 RENT_SYSVAR = "SysvarRent111111111111111111111111111111111"
+COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111"
 LAMPORTS_PER_SOL = 1_000_000_000
 # A token account is 165 bytes — the rent-exempt minimum for one is
 # queried live (getMinimumBalanceForRentExemption), never hardcoded.
 TOKEN_ACCOUNT_SIZE = 165
+# Fallback rent for one token account (~0.00204 SOL), used only when
+# the live rent query fails — the reserve check then stays safe
+# rather than guessing zero. Remy default, awaiting James's call.
+ATA_RENT_FALLBACK_LAMPORTS = 2_039_280
+# Default compute-unit limit the runtime applies when a transaction
+# carries no setComputeUnitLimit instruction.
+DEFAULT_COMPUTE_UNIT_LIMIT = 200_000
+# Base fee for a transaction with no priority fee (5,000 lamports).
+BASE_TX_FEE_LAMPORTS = 5_000
 
 # ---------------------------------------------------------------------------
 # base58 (Bitcoin alphabet, as Phantom exports)
@@ -428,11 +438,75 @@ def build_message(fee_payer_b58: str, instructions: list,
     return bytes(out)
 
 
+def build_compute_budget_price_instruction(micro_lamports: int) -> dict:
+    """One Compute Budget `setComputeUnitPrice` instruction
+    (build_message format): pay `micro_lamports` per compute unit
+    as a priority fee so the transaction lands faster on a busy
+    network. Data: [3] (setComputeUnitPrice discriminator) + the
+    price as u64 little-endian. No accounts. The caller caps the
+    price (see executor.py) — this builder never decides the cap."""
+    if int(micro_lamports) < 0:
+        raise ValueError("priority fee must not be negative")
+    return {
+        "program_id": COMPUTE_BUDGET_PROGRAM,
+        "accounts": [],
+        "data": bytes([3]) + int(micro_lamports).to_bytes(8, "little"),
+    }
+
+
+def build_compute_budget_limit_instruction(units: int) -> dict:
+    """One Compute Budget `setComputeUnitLimit` instruction
+    (build_message format). Data: [2] + the limit as u32
+    little-endian. No accounts."""
+    if int(units) <= 0:
+        raise ValueError("compute-unit limit must be positive")
+    return {
+        "program_id": COMPUTE_BUDGET_PROGRAM,
+        "accounts": [],
+        "data": bytes([2]) + int(units).to_bytes(4, "little"),
+    }
+
+
+def priority_fee_from_samples(fees: list, cap_micro_lamports: int) -> int:
+    """A priority-fee price (micro-lamports per compute unit) from
+    `getRecentPrioritizationFees` samples: the median of the
+    non-zero fees, capped at `cap_micro_lamports`. 0 when there is
+    no usable sample — the caller then sends with no priority-fee
+    instruction (the default 5,000-lamport fee) rather than
+    guessing a price. The median (not the max) keeps one spiking
+    slot from overpaying; the cap bounds the worst case."""
+    try:
+        cap = int(cap_micro_lamports)
+    except (TypeError, ValueError):
+        return 0
+    if cap <= 0:
+        return 0
+    usable = sorted(int(f) for f in (fees or [])
+                    if isinstance(f, (int, float)) and f > 0)
+    if not usable:
+        return 0
+    mid = len(usable) // 2
+    median = (usable[mid] if len(usable) % 2 == 1
+              else (usable[mid - 1] + usable[mid]) // 2)
+    return max(0, min(median, cap))
+
+
 def sign_message(seed: bytes, message: bytes) -> tuple[str, str]:
     """Sign a message. Returns (signed_tx_base64, signature_base58)."""
     signature = ed25519_sign(seed, message)
     serialized = compact_u16_encode(1) + signature + message
     return base64.b64encode(serialized).decode("ascii"), base58_encode(signature)
+
+
+def rpc_client_for_config(cfg):
+    """The RPC client for trading reads: primary RPC_URL with the
+    configured fallback (mainnet: a second public endpoint), and
+    10-second read timeouts. Importing here would be circular, so
+    this lives next to the client it builds."""
+    fallback = (getattr(cfg, "rpc_fallback_url", "") or "").strip()
+    return SolanaRpcClient(cfg.rpc_url,
+                           fallback_rpc_url=fallback or None,
+                           timeout=10)
 
 
 # ---------------------------------------------------------------------------
@@ -443,8 +517,10 @@ class RpcError(Exception):
 
 
 class SolanaRpcClient:
-    def __init__(self, rpc_url: str, http_post=None, timeout: int = 20):
+    def __init__(self, rpc_url: str, http_post=None, timeout: int = 10,
+                 fallback_rpc_url: str | None = None):
         self.rpc_url = rpc_url
+        self.fallback_rpc_url = fallback_rpc_url or None
         self.http_post = http_post or self._default_post
         self.timeout = timeout
 
@@ -457,28 +533,42 @@ class SolanaRpcClient:
             return json.loads(resp.read().decode("utf-8"))
 
     def _call(self, method, params):
-        try:
-            resp = self.http_post(
-                self.rpc_url,
-                {"jsonrpc": "2.0", "id": 1, "method": method,
-                 "params": params})
-        except Exception as exc:
-            raise RpcError("rpc request failed") from exc
-        if not isinstance(resp, dict):
-            raise RpcError(
-                f"rpc error response: {method}: not a JSON object")
-        err = resp.get("error")
-        if err is not None:
-            # Surface the node's real error (method + code +
-            # message) instead of a bare "rpc error response" — a
-            # removed method used to fail with no usable detail.
-            if isinstance(err, dict):
-                detail = f"{err.get('code')} {err.get('message')}"
-            else:
-                detail = str(err)
-            raise RpcError(
-                f"rpc error response: {method}: {detail}"[:200])
-        return resp.get("result")
+        """One RPC call, with failover: the primary URL first, then
+        the fallback URL when one is configured — but only when the
+        request itself failed (transport error / timeout). A node
+        error RESPONSE (bad method, bad params) is raised at once
+        and never retried on the fallback: the request is wrong,
+        not the node. Without a fallback this is exactly one
+        attempt, as before."""
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method,
+                   "params": params}
+        urls = [self.rpc_url]
+        if self.fallback_rpc_url and \
+                self.fallback_rpc_url != self.rpc_url:
+            urls.append(self.fallback_rpc_url)
+        last_transport_error = None
+        for url in urls:
+            try:
+                resp = self.http_post(url, payload)
+            except Exception as exc:
+                last_transport_error = exc
+                continue
+            if not isinstance(resp, dict):
+                raise RpcError(
+                    f"rpc error response: {method}: not a JSON object")
+            err = resp.get("error")
+            if err is not None:
+                # Surface the node's real error (method + code +
+                # message) instead of a bare "rpc error response" — a
+                # removed method used to fail with no usable detail.
+                if isinstance(err, dict):
+                    detail = f"{err.get('code')} {err.get('message')}"
+                else:
+                    detail = str(err)
+                raise RpcError(
+                    f"rpc error response: {method}: {detail}"[:200])
+            return resp.get("result")
+        raise RpcError("rpc request failed") from last_transport_error
 
     def get_balance_lamports(self, pubkey: str) -> int:
         result = self._call("getBalance", [pubkey])
@@ -575,6 +665,41 @@ class SolanaRpcClient:
         if not blockhash:
             raise RpcError("no blockhash")
         return blockhash
+
+    def get_recent_prioritization_fees(self, accounts: list) -> list:
+        """Recent priority-fee samples (micro-lamports per compute
+        unit) for the accounts a transaction touches, from
+        getRecentPrioritizationFees. Returns the raw fee numbers
+        (possibly empty); the caller turns them into a capped price
+        (see priority_fee_from_samples). Raises RpcError when the
+        node cannot answer — the caller then sends with no priority
+        fee rather than guessing one."""
+        result = self._call("getRecentPrioritizationFees",
+                            [list(accounts or [])])
+        if not isinstance(result, list):
+            raise RpcError("bad getRecentPrioritizationFees result")
+        fees = []
+        for entry in result:
+            try:
+                fees.append(int((entry or {}).get("prioritizationFee")))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return fees
+
+    def simulate_transaction(self, signed_b64: str) -> dict | None:
+        """Simulate a signed transaction (read-only — nothing is
+        sent and no SOL moves). Returns the simulation `value`
+        ({err, logs, unitsConsumed, ...}) or None when the node
+        cannot answer. Used to verify a built transaction against
+        the live program before the first real trade."""
+        result = self._call(
+            "simulateTransaction",
+            [signed_b64, {"encoding": "base64", "sigVerify": False,
+                          "commitment": "processed",
+                          "replaceRecentBlockhash": True}])
+        if not isinstance(result, dict):
+            return None
+        return result.get("value")
 
     # NOTE: there is deliberately no get_recent_blockhash here —
     # the devnet RPC removed getRecentBlockhash (returns -32601

@@ -13,7 +13,8 @@ import unittest
 from unittest import mock
 
 from helpers import csrf, login, make_client, signup
-from test_executor import ExecutorBase, FakePumpRpc, make_curve
+from test_executor import (CURVE_PRICE_USD, ExecutorBase, FakePumpRpc,
+                           TEST_SOL_PRICE_USD, make_curve)
 from tradingbot import rate_limit as rate_limit_mod
 from tradingbot.executor import _execute_buy, execute_real_trade
 from tradingbot.security import (decrypt_secret_mutable, encrypt_secret,
@@ -89,7 +90,11 @@ class TestExecutorWipe(ExecutorBase):
         with mock.patch("tradingbot.executor.sign_message", fake_sign):
             result = execute_real_trade(
                 self._bot(), self.user_id, self.mint, "buy", 0.01,
-                0.0, self.db, self.cfg, rpc_client=rpc)
+                CURVE_PRICE_USD, self.db, self.cfg,
+                decision_price_age_seconds=0.0,
+                sol_price_usd=TEST_SOL_PRICE_USD,
+                sol_price_secondary=TEST_SOL_PRICE_USD,
+                rpc_client=rpc)
         self.assertEqual(result["status"], "executed")
         self.assertIn("seed", captured)
         self.assertEqual(bytes(captured["seed"]), b"\x00" * 32)
@@ -107,7 +112,11 @@ class TestExecutorWipe(ExecutorBase):
         with mock.patch("tradingbot.executor.sign_message", fake_sign):
             result = execute_real_trade(
                 self._bot(), self.user_id, self.mint, "buy", 0.01,
-                0.0, self.db, self.cfg, rpc_client=rpc)
+                CURVE_PRICE_USD, self.db, self.cfg,
+                decision_price_age_seconds=0.0,
+                sol_price_usd=TEST_SOL_PRICE_USD,
+                sol_price_secondary=TEST_SOL_PRICE_USD,
+                rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("seed", captured)
         self.assertEqual(bytes(captured["seed"]), b"\x00" * 32)

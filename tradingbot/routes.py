@@ -10,7 +10,7 @@ Security notes:
 - Real-money movement only ever happens through the two-step send
   flow (create intent -> explicit confirm). Real TRADES are signed
   autonomously, but only by the account's dedicated signing bot, only
-  on devnet, only for trades the rules engine allows, and only
+  on the configured network (devnet or mainnet), only for trades the rules engine allows, and only
   within the bot's limits (see executor.py). The signing bot never
   sends to an arbitrary destination.
 """
@@ -82,7 +82,8 @@ from .signals import signal_for_coin
 from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
-                     lamports_to_sol, sol_to_lamports)
+                     lamports_to_sol, rpc_client_for_config,
+                     sol_to_lamports)
 from .trenches import (fetch_mint_1h_changes, fetch_mint_24h_changes,
                        fetch_mint_identities, fetch_prices_for_mints,
                        fetch_trenches_scan)
@@ -370,11 +371,17 @@ def _active_mode(db, user_id: int) -> str:
     return mode if mode in ("paper", "devnet") else "paper"
 
 
-def _mode_label(mode: str) -> str:
+def _mode_label(mode: str, cfg=None) -> str:
     """The plain-words label for a mode, used on every page so the
-    user always knows which side they are on."""
-    return "Real trading — devnet" if mode == "devnet" \
-        else "Demo trading (paper)"
+    user always knows which side they are on. The real-mode label
+    names the network the app actually runs on — "Real trading —
+    mainnet" now that the app is on mainnet (real mainnet SOL),
+    "Real trading — devnet" on devnet. The STORED mode value stays
+    'devnet' for real mode (internal); only the words change."""
+    if mode == "devnet":
+        network = (cfg.network if cfg is not None else "devnet")
+        return f"Real trading — {network}"
+    return "Demo trading (paper)"
 
 
 def _activity_for_mode(db, user_id: int, mode: str, limit: int = 20):
@@ -727,8 +734,11 @@ def _cached_real_balance(app, pubkey: str):
 def _gate_fuel_trades_left(app, user):
     """Trades left from the held $GATE balance, for the topbar chip
     (base.html) — display only, cached 60s inside gate_fuel. None
-    when the user is not in devnet mode, has no wallet, or the
-    balance cannot be read (the chip hides). Never raises."""
+    when the user is not in real mode, has no wallet, or the
+    balance cannot be read (the chip hides). Never raises. The
+    counter itself is holdings-based and works on mainnet (see
+    gate_fuel.held_gate_mint) — the chip shows in real mode on
+    either network."""
     try:
         db = _db(app)
         if _active_mode(db, user["id"]) != "devnet":
@@ -742,13 +752,56 @@ def _gate_fuel_trades_left(app, user):
         return None
 
 
+def _decision_price_age(app, coin: str) -> float:
+    """How old the decision price for a manual trade is, in
+    seconds. The live feed's fresh tick carries its own time; a
+    price resolved just now in-request (DexScreener fetch) is 0.
+    The real executor refuses a buy on a price older than the
+    freshness window, so this age is the honest bound the route
+    can state — never a guessed zero for a tick it did not see."""
+    feed = app.config.get("LIVE_FEED")
+    if feed is not None:
+        try:
+            tick = feed.snapshot([coin]).get(coin)
+        except Exception:
+            tick = None
+        if tick is not None and not tick.get("stale"):
+            try:
+                as_of = datetime.strptime(
+                    tick["as_of"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                        tzinfo=timezone.utc)
+                return max(0.0, (datetime.now(timezone.utc)
+                                 - as_of).total_seconds())
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _trade_sol_prices(app):
+    """(primary, secondary) SOL prices in USD for a manual trade's
+    price-gate cross-check: Jupiter (the app's price list) and
+    CoinGecko. Either may be None — the gate skips only the check
+    it cannot run, never a guessed price."""
+    try:
+        sol = get_prices()["prices"]["SOL"]["price"]
+    except Exception:
+        sol = None
+    try:
+        from .prices import get_coingecko_sol_price_usd
+        sol2 = get_coingecko_sol_price_usd()
+    except Exception:
+        sol2 = None
+    return sol, sol2
+
+
 def _header_balance(app, user):
     """What the top corner shows: {'mode', 'label', 'text'}.
 
     Paper mode: paper portfolio value (cash + holdings at current
-    prices). Devnet mode: the app wallet's on-chain SOL balance.
+    prices). Real mode: the app wallet's on-chain SOL balance.
     Never faked — an unreachable price feed or RPC shows
-    'unavailable' instead of a made-up number.
+    'unavailable' instead of a made-up number. The label names
+    the network the app actually runs on (Mainnet now).
     """
     db = _db(app)
     mode = _active_mode(db, user["id"])
@@ -757,7 +810,9 @@ def _header_balance(app, user):
         sol = (_cached_real_balance(app, wallet["pubkey"])
                if wallet else None)
         text = f"{sol:.4f} SOL" if sol is not None else "unavailable"
-        return {"mode": "devnet", "label": "Devnet", "text": text}
+        label = ("Mainnet" if _cfg(app).network == "mainnet"
+                 else "Devnet")
+        return {"mode": "devnet", "label": label, "text": text}
     prices = get_prices()
     price_map = {}
     for c, e in prices["prices"].items():
@@ -1251,6 +1306,15 @@ def register_routes(app: Flask) -> None:
         header_balance = _header_balance(app, user) if user else None
         return {"current_user": user, "csrf_token": _new_csrf(),
                 "network": _cfg(app).network,
+                # The real network's display name ("Mainnet" now
+                # that the app is on mainnet) and the real-mode
+                # label ("Real trading — mainnet"). The stored mode
+                # value stays 'devnet' for real mode (internal);
+                # only the words the user sees are network-aware.
+                "real_network_name": (
+                    "Mainnet" if _cfg(app).network == "mainnet"
+                    else "Devnet"),
+                "real_mode_label": _mode_label("devnet", _cfg(app)),
                 "header_balance": header_balance,
                 "header_mode": header_balance["mode"]
                 if header_balance else "paper",
@@ -2056,7 +2120,7 @@ def register_routes(app: Flask) -> None:
                         chart_range="all"):
         """Everything the coins page (dashboard) renders, for the
         ACTIVE mode only: paper shows the paper portfolio, paper
-        bots and paper activity; real (devnet) shows the real wallet,
+        bots and paper activity; real shows the real wallet,
         real bots and real activity. The two modes never mix on a
         page. `popup_coin` is the coin row for the open coin popup,
         or None. The wallet homepage reuses this data (with
@@ -2152,7 +2216,7 @@ def register_routes(app: Flask) -> None:
                 "holdings_value": holdings_value, "prices": prices,
                 "bots": bots, "activity": activity,
                 "coin_rows": coin_rows, "mode": mode,
-                "mode_label": _mode_label(mode),
+                "mode_label": _mode_label(mode, _cfg(app)),
                 "portfolio_sol": portfolio_sol,
                 "portfolio_usd": portfolio_usd,
                 "portfolio_chart_svg": portfolio_chart_svg,
@@ -2170,8 +2234,15 @@ def register_routes(app: Flask) -> None:
                 "popup_coin": popup_coin,
                 "trenches_rows": trenches_rows,
                 "trenches_error": trenches_error,
-                # Buy $GATE (2026-11-22): the mint the popup buys.
+                # Buy $GATE (2026-11-22): the mint the popup buys
+                # (buyability-gated). "held_gate_mint" is the mint
+                # whose HELD balance counts as fuel — the wallet
+                # fuel strip and the $GATE-first sort use it, so
+                # fuel works on mainnet whether or not buying more
+                # $GATE is currently possible.
                 "gate_mint": gate_fuel_mod.effective_gate_mint(
+                    _cfg(app)),
+                "held_gate_mint": gate_fuel_mod.held_gate_mint(
                     _cfg(app))}
 
     @app.route("/dashboard")
@@ -2251,9 +2322,10 @@ def register_routes(app: Flask) -> None:
         the screen disables buying — never a stale, cached, or
         invented price. Mainnet returns available=false too: the
         mainnet mint resolves, but no mainnet purchase path exists
-        yet (the pump.fun executor is devnet-only; Jupiter handles
-        graduated coins only), so quoting a price for a buy that
-        cannot execute would be a lie."""
+        yet (this screen's purchase flow is not wired for mainnet — the
+        pump.fun executor can trade bonding coins on mainnet now,
+        but this screen still disables buying there), so quoting
+        a price for a buy that cannot execute would be a lie."""
         cfg = _cfg(app)
         mint = gate_fuel_mod.effective_gate_mint(cfg)
         if mint is None:
@@ -2319,7 +2391,7 @@ def register_routes(app: Flask) -> None:
     @login_required
     def choose_mode():
         """The post-sign-in mode chooser: Demo trading (paper) or
-        Real trading (devnet). Sets the user's active mode and
+        Real trading (mainnet on mainnet, devnet on devnet). Sets the user's active mode and
         remembers the choice for this session, so the popup does not
         come back on every page — only after the next sign-in (the
         session is cleared on logout). The user can switch any time
@@ -2340,8 +2412,8 @@ def register_routes(app: Flask) -> None:
         # reappear mid-session.
         _mark_mode_chosen(db, user["id"])
         _log(app, user["id"], "mode_switch",
-             f"Trading mode chosen: {_mode_label(mode)}.")
-        flash(f"You are now on {_mode_label(mode)}.")
+             f"Trading mode chosen: {_mode_label(mode, _cfg(app))}.")
+        flash(f"You are now on {_mode_label(mode, _cfg(app))}.")
         return redirect(url_for("wallet"))
 
     @app.route("/mode", methods=["POST"])
@@ -2473,7 +2545,7 @@ def register_routes(app: Flask) -> None:
             chart_candles_count=len(candles),
             high_24h=high_24h,
             low_24h=low_24h, flow=flow, bots=bots, mode=mode,
-            mode_label=_mode_label(mode),
+            mode_label=_mode_label(mode, _cfg(app)),
             receive_address=wallet["pubkey"] if wallet else "",
             prices_source=prices["source"],
             prices_as_of=prices["as_of"],
@@ -2714,7 +2786,7 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         db = _db(app)
         mode = _active_mode(db, user["id"])
-        label = _mode_label(mode)
+        label = _mode_label(mode, _cfg(app))
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
@@ -2850,10 +2922,11 @@ def register_routes(app: Flask) -> None:
         # A Jupiter-routed coin trades through the Jupiter executor
         # (mainnet, gated behind James's go-ahead); anything else
         # is a pump.fun mint and trades through the pump.fun
-        # executor (devnet). With the Jupiter gate off the
-        # executor refuses plainly — nothing is built, signed or
-        # sent — instead of letting the pump.fun executor fail on
-        # a coin it was never built for.
+        # executor (mainnet now — the devnet-only gate is lifted).
+        # With the Jupiter gate off the executor refuses plainly —
+        # nothing is built, signed or sent — instead of letting
+        # the pump.fun executor fail on a coin it was never built
+        # for.
         bot, error = _real_bot_for_trade(
             app, user, request.form.get("bot_id") or "")
         if error:
@@ -2864,7 +2937,7 @@ def register_routes(app: Flask) -> None:
         # here, before anything executes. Not enrolled: the gate is
         # open and nothing is read. Paper trades never reach this
         # branch, so paper stays free.
-        rpc = SolanaRpcClient(_cfg(app).rpc_url)
+        rpc = rpc_client_for_config(_cfg(app))
         wallet_row = _wallet(app, user["id"])
         ok, reason, _held, _left = gate_fuel_mod.fuel_gate_check(
             db, _cfg(app), rpc,
@@ -2875,8 +2948,13 @@ def register_routes(app: Flask) -> None:
         # The venue is the bonding curve: a graduated coin trades
         # through Jupiter (mainnet, gated behind James's go-ahead);
         # anything still bonding trades through the pump.fun
-        # executor (devnet). An unreadable curve refuses plainly —
-        # the venue is never guessed.
+        # executor. An unreadable curve refuses plainly — the
+        # venue is never guessed. The price-gate context (how old
+        # the decision price is, the two SOL prices) travels with
+        # the buy so the executor can check it against a fresh
+        # on-chain read before signing.
+        decision_age = _decision_price_age(app, coin_id_resolved)
+        sol_price_usd, sol_price_secondary = _trade_sol_prices(app)
         try:
             complete = is_curve_complete(rpc, coin_id_resolved)
         except Exception:
@@ -2890,13 +2968,18 @@ def register_routes(app: Flask) -> None:
         if complete:
             result = execute_jupiter_swap(
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
-                db, _cfg(app))
+                db, _cfg(app), decision_price_usd=price or 0.0,
+                decision_price_age_seconds=decision_age,
+                sol_price_usd=sol_price_usd)
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
-                price or 0.0, db, _cfg(app))
-            venue_label = "on pump.fun (devnet)"
+                price or 0.0, db, _cfg(app),
+                decision_price_age_seconds=decision_age,
+                sol_price_usd=sol_price_usd,
+                sol_price_secondary=sol_price_secondary)
+            venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
             return _coin_result(
                 "Nothing was bought",
@@ -2963,7 +3046,7 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         db = _db(app)
         mode = _active_mode(db, user["id"])
-        label = _mode_label(mode)
+        label = _mode_label(mode, _cfg(app))
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
@@ -3100,7 +3183,7 @@ def register_routes(app: Flask) -> None:
         # A Jupiter-routed coin trades through the Jupiter executor
         # (mainnet, gated behind James's go-ahead); anything else
         # is a pump.fun mint and trades through the pump.fun
-        # executor (devnet). With the Jupiter gate off the
+        # executor. With the Jupiter gate off the
         # executor refuses plainly — nothing is built, signed or
         # sent.
         bot, error = _real_bot_for_trade(
@@ -3111,7 +3194,7 @@ def register_routes(app: Flask) -> None:
         # $GATE fuel gate (2026-11-22): same as the buy path — when
         # fuel is on, a real trade needs 10,000 $GATE held, read
         # live before anything executes. Not enrolled: open.
-        rpc = SolanaRpcClient(_cfg(app).rpc_url)
+        rpc = rpc_client_for_config(_cfg(app))
         wallet_row = _wallet(app, user["id"])
         ok, reason, _held, _left = gate_fuel_mod.fuel_gate_check(
             db, _cfg(app), rpc,
@@ -3141,7 +3224,7 @@ def register_routes(app: Flask) -> None:
             result = execute_real_trade(
                 bot, user["id"], coin_id_resolved, "sell", amount,
                 price or 0.0, db, _cfg(app))
-            venue_label = "on pump.fun (devnet)"
+            venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
             return _coin_result(
                 "Nothing was sold",
@@ -3195,7 +3278,7 @@ def register_routes(app: Flask) -> None:
                     if mode == "paper" else None)
         return render_template(
             "logs.html", activity=activity, analysis=analysis,
-            mode=mode, mode_label=_mode_label(mode))
+            mode=mode, mode_label=_mode_label(mode, _cfg(app)))
 
     # ------------------------------------------------------------------
     # Wallet: view / send (two-step) / deposit
@@ -3221,8 +3304,10 @@ def register_routes(app: Flask) -> None:
         # fuel coin comes first; everything else keeps its order
         # (sorted is stable). The fuel strip in wallet.html renders
         # under that row; the trades-left chip comes from
-        # inject_globals, so no second balance read here.
-        gate_mint = data.get("gate_mint")
+        # inject_globals, so no second balance read here. The sort
+        # uses the HELD mint, so $GATE stays first on mainnet
+        # whether or not buying more is currently possible.
+        gate_mint = data.get("held_gate_mint")
         if gate_mint:
             data["coin_rows"] = sorted(
                 data["coin_rows"],
@@ -3286,7 +3371,7 @@ def register_routes(app: Flask) -> None:
         return render_template(
             "trenches.html", trenches_rows=trenches_rows,
             trenches_error=trenches_error, mode=mode,
-            mode_label=_mode_label(mode))
+            mode_label=_mode_label(mode, _cfg(app)))
 
     def _coin_return_to(value: str):
         """The coin id behind a return_to of the form "coin:<id>",
@@ -3814,7 +3899,8 @@ def register_routes(app: Flask) -> None:
         # tasked, and how many real transactions it has signed.
         # Pending bot_proposals are the task queue (created_at is
         # when the task was tasked); trade_ledger mode='real' rows
-        # are the trades the signing bot executed on devnet — paper
+        # are the trades the signing bot executed on the configured
+        # network — paper
         # rows are simulated, never signed, and never counted. A
         # figure that cannot be read is None, and the template
         # shows "—" instead of a guess. The Support ID rides along

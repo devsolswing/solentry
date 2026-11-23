@@ -1,14 +1,14 @@
-"""Real (devnet) executor: pump.fun buy/sell signing with throwaway
-keys and a mocked RPC. NO real SOL moves in any test — the RPC is
-fake, the wallet is a throwaway keypair, and every signed
-transaction is decoded and checked, including a cryptographic
-signature verification against the wallet key.
+"""Real executor (devnet or mainnet): pump.fun buy/sell signing
+with throwaway keys and a mocked RPC. NO real SOL moves in any
+test — the RPC is fake, the wallet is a throwaway keypair, and
+every signed transaction is decoded and checked, including a
+cryptographic signature verification against the wallet key.
 
-Covers: buy and sell end-to-end against mocks, guard refusals
-(mainnet, paper bot, non-mint coin, over-limit amount, no bonding
-curve, migrated curve, fee reserve, missing wallet), the
-never-arbitrary-transfers destination restriction, and a
-rule-governed real trade through the silent loop.
+Covers: buy and sell end-to-end against mocks, the mainnet gate
+lift, guard refusals (paper bot, non-mint coin, over-limit
+amount, no bonding curve, migrated curve, fee reserve, missing
+wallet), the never-arbitrary-transfers destination restriction,
+and a rule-governed real trade through the silent loop.
 """
 
 import base64
@@ -25,6 +25,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from helpers import (TEST_ENCRYPTION_KEY, TEST_SESSION_SECRET, make_client,
                      signup)
 from tradingbot import executor as executor_mod
+from tradingbot import solana as solana_mod
+from tradingbot.price_gate import curve_price_sol_per_token
 from tradingbot import pumpfun
 from tradingbot import silent_loop as silent_loop_mod
 from tradingbot.config import Config
@@ -89,6 +91,16 @@ def make_curve(complete=False):
     return bytes(data)
 
 
+TEST_SOL_PRICE_USD = 100.0
+# The mock curve's marginal price at TEST_SOL_PRICE_USD. The
+# price gate requires the decision price to agree with the fresh
+# on-chain curve read within 5%, so buys use this as their
+# decision price instead of the old dummy 100.0 — the gate is the
+# feature, not something to dodge with an inconsistent price.
+CURVE_PRICE_USD = (curve_price_sol_per_token(
+    pumpfun.parse_bonding_curve(make_curve())) * TEST_SOL_PRICE_USD)
+
+
 class FakePumpRpc:
     """Mocked devnet RPC that models a pump.fun token: a global
     account, a bonding curve, a wallet SOL balance, and token
@@ -102,6 +114,11 @@ class FakePumpRpc:
         self.balance = balance_lamports
         self.sent = []
         self.fill_tokens = 0
+        # Priority-fee samples (micro-lamports) the fake returns
+        # from getRecentPrioritizationFees; [] means "no fee data".
+        self.fee_samples = []
+        # getTransaction receipts, keyed by signature.
+        self._tx_receipts = {}
         self._accounts = {}
         self._ata_balances = {}
         global_addr, _ = pumpfun.global_pda()
@@ -150,6 +167,15 @@ class FakePumpRpc:
 
     def confirm_transaction(self, signature):
         return True
+
+    def get_recent_prioritization_fees(self, accounts):
+        return list(self.fee_samples)
+
+    def get_minimum_balance_for_rent_exemption(self, data_len):
+        return 2039280
+
+    def get_transaction(self, signature):
+        return self._tx_receipts.get(signature)
 
 
 def parse_signed_tx(signed_b64):
@@ -300,8 +326,10 @@ class TestExecutorBuy(ExecutorBase):
         expected = pumpfun.buy_quote(curve, 95, 1_000_000_000)
         rpc.fill_tokens = expected
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 1.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+                                    "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                    decision_price_age_seconds=0.0,
+                                    sol_price_usd=TEST_SOL_PRICE_USD,
+                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         self.assertEqual(result["signing_bot"], self.support_id)
@@ -352,19 +380,39 @@ class TestExecutorBuy(ExecutorBase):
 
 
 class TestExecutorGuards(ExecutorBase):
-    def test_refuses_mainnet(self):
+    def test_allows_mainnet(self):
+        """The devnet-only gate is lifted (mainnet executor fix):
+        a mainnet buy executes exactly like a devnet one."""
         env = {"SESSION_SECRET": TEST_SESSION_SECRET,
                "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
                "NETWORK": "mainnet",
                "DATABASE_PATH": os.path.join(self.tmp.name, "m.db"),
                "PAPER_START_CASH": "10000"}
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
-        result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 1.0, 100.0, self.db,
-                                    Config(env=env), rpc_client=rpc)
-        self.assertEqual(result["status"], "skipped")
-        self.assertIn("devnet", result["reason"])
-        self.assertEqual(rpc.sent, [])
+        curve = pumpfun.parse_bonding_curve(make_curve())
+        rpc.fill_tokens = pumpfun.buy_quote(curve, 95, 1_000_000_000)
+        result = execute_real_trade(
+            self._bot(), self.user_id, self.mint, "buy", 1.0,
+            CURVE_PRICE_USD, self.db, Config(env=env),
+            decision_price_age_seconds=0.0,
+            sol_price_usd=TEST_SOL_PRICE_USD,
+            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(result["signature"], FAKE_SIGNATURE)
+        self.assertEqual(len(rpc.sent), 1)
+
+    def test_config_rejects_unknown_network(self):
+        """A network that is neither devnet nor mainnet never
+        reaches the executor at all: Config itself refuses it, so
+        the lifted gate cannot be widened to an unknown network
+        by misconfiguration."""
+        env = {"SESSION_SECRET": TEST_SESSION_SECRET,
+               "ENCRYPTION_KEY": TEST_ENCRYPTION_KEY,
+               "NETWORK": "localnet",
+               "DATABASE_PATH": os.path.join(self.tmp.name, "m.db"),
+               "PAPER_START_CASH": "10000"}
+        with self.assertRaises(ValueError):
+            Config(env=env)
 
     def test_refuses_paper_bot(self):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
@@ -378,8 +426,10 @@ class TestExecutorGuards(ExecutorBase):
     def test_refuses_major_coin_no_swap_path(self):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
         result = execute_real_trade(self._bot(), self.user_id, "SOL",
-                                    "buy", 1.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+                                    "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                    decision_price_age_seconds=0.0,
+                                    sol_price_usd=TEST_SOL_PRICE_USD,
+                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["reason"], "real swap not available in v1")
         self.assertEqual(rpc.sent, [])
@@ -388,8 +438,10 @@ class TestExecutorGuards(ExecutorBase):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
         # 10 SOL balance, 20% buy size = 2 SOL max; 3 SOL is over.
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 3.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+                                    "buy", 3.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                    decision_price_age_seconds=0.0,
+                                    sol_price_usd=TEST_SOL_PRICE_USD,
+                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("buy size", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -397,8 +449,10 @@ class TestExecutorGuards(ExecutorBase):
     def test_refuses_no_bonding_curve(self):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=None)
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 1.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+                                    "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                    decision_price_age_seconds=0.0,
+                                    sol_price_usd=TEST_SOL_PRICE_USD,
+                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("no bonding curve", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -407,8 +461,10 @@ class TestExecutorGuards(ExecutorBase):
         rpc = FakePumpRpc(self.pubkey, self.mint,
                           curve=make_curve(complete=True))
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 1.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+                                    "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                    decision_price_age_seconds=0.0,
+                                    sol_price_usd=TEST_SOL_PRICE_USD,
+                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("migrated", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -418,9 +474,12 @@ class TestExecutorGuards(ExecutorBase):
                           balance_lamports=1_000_500_000)
         # 100% buy size passes the size check; 0.0005 SOL left is
         # below the 0.001 SOL fee reserve.
-        result = execute_real_trade(self._bot(buy_size=100), self.user_id,
-                                    self.mint, "buy", 1.0, 100.0, self.db,
-                                    self.cfg, rpc_client=rpc)
+        result = execute_real_trade(
+            self._bot(buy_size=100), self.user_id, self.mint, "buy",
+            1.0, CURVE_PRICE_USD, self.db, self.cfg,
+            decision_price_age_seconds=0.0,
+            sol_price_usd=TEST_SOL_PRICE_USD,
+            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("fees", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -431,8 +490,10 @@ class TestExecutorGuards(ExecutorBase):
         self.db.commit()
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 1.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+                                    "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                    decision_price_age_seconds=0.0,
+                                    sol_price_usd=TEST_SOL_PRICE_USD,
+                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("no app wallet", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -451,8 +512,10 @@ class TestExecutorGuards(ExecutorBase):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
         rpc.confirm_transaction = lambda sig: False
         result = execute_real_trade(self._bot(), self.user_id, self.mint,
-                                    "buy", 1.0, 100.0, self.db, self.cfg,
-                                    rpc_client=rpc)
+                                    "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                    decision_price_age_seconds=0.0,
+                                    sol_price_usd=TEST_SOL_PRICE_USD,
+                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("not confirmed", result["reason"])
 
@@ -468,8 +531,10 @@ class TestConfirmationRecheck(ExecutorBase):
         curve = pumpfun.parse_bonding_curve(make_curve())
         rpc.fill_tokens = pumpfun.buy_quote(curve, 95, 963_500_000)
         return execute_real_trade(self._bot(), self.user_id, self.mint,
-                                  "buy", 1.0, 100.0, self.db, self.cfg,
-                                  rpc_client=rpc)
+                                  "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
+                                  decision_price_age_seconds=0.0,
+                                  sol_price_usd=TEST_SOL_PRICE_USD,
+                                  sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
 
     def test_slow_confirmation_reports_executed(self):
         """The main window never sees the transaction, but the
@@ -665,17 +730,23 @@ class TestLoopRealTrade(ExecutorBase):
              hashlib.sha256(b"tok").hexdigest()))
         bot_id = cur.lastrowid
         self.db.commit()
-        prices = {"prices": {self.mint: {"price": 100.0,
+        # The feed price must agree with the mock curve (the
+        # price gate), and the loop's SOL prices are pinned so no
+        # live price fetch happens in the test.
+        prices = {"prices": {self.mint: {"price": CURVE_PRICE_USD,
                                          "change_24h": 5.0}},
                   "source": "snapshot", "as_of": "test"}
         # The venue dispatch (is_curve_complete) lives in the
         # silent loop's default executor now, so its SolanaRpcClient
         # needs the fake too — patching only the executor's
         # reference would leave the loop talking to live devnet.
-        with mock.patch.object(executor_mod, "SolanaRpcClient",
+        with mock.patch.object(solana_mod, "SolanaRpcClient",
                               return_value=rpc), \
-                mock.patch.object(silent_loop_mod, "SolanaRpcClient",
-                                  return_value=rpc):
+                mock.patch.object(silent_loop_mod, "_live_sol_price_usd",
+                                  return_value=TEST_SOL_PRICE_USD), \
+                mock.patch.object(silent_loop_mod,
+                                  "get_coingecko_sol_price_usd",
+                                  return_value=TEST_SOL_PRICE_USD):
             outcomes = run_once(
                 self.db, self.cfg,
                 price_fetcher=lambda: prices,
@@ -712,10 +783,8 @@ class TestLoopRealTrade(ExecutorBase):
         prices = {"prices": {self.mint: {"price": 100.0,
                                          "change_24h": 5.0}},
                   "source": "snapshot", "as_of": "test"}
-        with mock.patch.object(executor_mod, "SolanaRpcClient",
-                              return_value=rpc), \
-                mock.patch.object(silent_loop_mod, "SolanaRpcClient",
-                                  return_value=rpc):
+        with mock.patch.object(solana_mod, "SolanaRpcClient",
+                              return_value=rpc):
             outcomes = run_once(
                 self.db, self.cfg,
                 price_fetcher=lambda: prices,

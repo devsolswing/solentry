@@ -555,6 +555,48 @@ CREATE TABLE IF NOT EXISTS gate_fuel_uses (
     created_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
+
+-- Pending trades (mainnet executor fix, 2026-11-22): every sent
+-- real-trade signature, recorded BEFORE the send (the signature is
+-- known once the transaction is signed locally). The loop re-checks
+-- unconfirmed rows via getTransaction each pass before a trade is
+-- finally marked failed — a transaction that landed after the ~30s
+-- confirmation window is never reported as failed. status is
+-- 'pending', 'confirmed' or 'failed'.
+CREATE TABLE IF NOT EXISTS pending_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    bot_id INTEGER,
+    coin_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    signature TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Persistent sell claims (mainnet executor fix, 2026-11-22): one
+-- open claim per (bot, position) while a real sell is in flight.
+-- Unlike the in-memory _SELL_IN_FLIGHT guard, this survives a
+-- process restart: before any re-sell, the loop reconciles the
+-- claim against the chain (via the pending-trades signature) so a
+-- ladder rung can never double-sell after a restart between an
+-- on-chain fill and the position close. status is 'open',
+-- 'confirmed' or 'released'.
+CREATE TABLE IF NOT EXISTS sell_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    bot_id INTEGER NOT NULL,
+    coin_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    signature TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
 """
 
 
