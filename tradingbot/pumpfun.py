@@ -211,6 +211,53 @@ def buy_quote(curve: dict, fee_bps: int, sol_lamports: int) -> int:
     return max(0, vt - (vt * vs) // (vs + net_sol))
 
 
+def sol_for_tokens(curve: dict, fee_bps: int,
+                   token_base_units: int) -> int | None:
+    """SOL lamports in to receive at least `token_base_units` out,
+    after the program fee — the inverse of buy_quote (used by the
+    Buy $GATE quote: a preset is an exact token amount, so the SOL
+    cost is the curve integral, not the marginal price times the
+    amount). Integer math only; the result is verified against
+    buy_quote (bumped a lamport at a time until the forward quote
+    covers the amount), so the caller never underpays for the tokens
+    asked. Returns None when the amount cannot be bought at this
+    curve state (at or above the virtual reserves, or a degenerate
+    fee/curve) — the quote then shows that preset as unavailable,
+    never a guessed price."""
+    if token_base_units <= 0:
+        return None
+    if fee_bps < 0 or fee_bps >= 10000:
+        return None
+    vt = curve["virtual_token_reserves"]
+    vs = curve["virtual_sol_reserves"]
+    if vt <= 0 or vs <= 0:
+        return None
+    remaining = vt - token_base_units
+    if remaining <= 0:
+        return None
+    # Smallest net SOL (after the program fee) whose forward quote
+    # covers the amount: floor(vt*vs/(vs+net)) <= vt - T needs
+    # net > vt*vs/(vt-T+1) - vs.
+    net = (vt * vs) // (remaining + 1) - vs + 1
+    if net <= 0:
+        net = 1
+    # Smallest gross SOL whose net (after the floored program fee)
+    # reaches `net`: the net actually kept is
+    # ceil(sol*(10000-fee_bps)/10000), so the minimal sol is
+    # floor((net-1)*10000/(10000-fee_bps)) + 1. (A ceiling division
+    # here overpays by more than a lamport — the fee only steps
+    # every 10000/fee_bps lamports — so the exact form matters.)
+    denom = 10000 - fee_bps
+    sol = ((net - 1) * 10000) // denom + 1
+    # Verify against the forward quote (and bump if a rounding edge
+    # ever slips through) so the caller never underpays.
+    for _ in range(100):
+        if buy_quote(curve, fee_bps, sol) >= token_base_units:
+            return sol
+        sol += 1
+    return None
+
+
 def sell_quote(curve: dict, fee_bps: int, token_base_units: int) -> int:
     """SOL lamports out for `token_base_units` in, after the program
     fee. Integer math only."""

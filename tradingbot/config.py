@@ -92,6 +92,16 @@ class Config:
         # refused too. No real money moves unless both hold.
         self.jupiter_real_swaps: bool = env.get(
             "JUPITER_REAL_SWAPS", "0") == "1"
+        # $GATE mint for the Buy $GATE button (2026-11-22): the mint
+        # the button buys, from the GATE_MINT env var. Default is
+        # the devnet Gate mint — the app runs on devnet now, so that
+        # is what is actually buyable. The mainnet $GATE mint is
+        # only used on mainnet (see gate_fuel.effective_gate_mint);
+        # a mainnet mint is never bought while NETWORK=devnet.
+        # Remy default, awaiting James's call.
+        self.gate_mint: str = env.get(
+            "GATE_MINT",
+            "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE").strip()
         # Live price feed: DexScreener poll for pump.fun mints
         # (Raydium pairs for graduated coins, bonding-curve prices
         # for devnet watchlist mints), Jupiter for the SOL price.

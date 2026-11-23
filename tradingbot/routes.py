@@ -40,6 +40,7 @@ from . import builderbot as builderbot_mod
 from . import analysis as analysis_mod
 from . import candles as candles_mod
 from . import donations as donations_mod
+from . import gate_fuel as gate_fuel_mod
 from . import jupiter as jupiter_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
@@ -723,6 +724,24 @@ def _cached_real_balance(app, pubkey: str):
     return value
 
 
+def _gate_fuel_trades_left(app, user):
+    """Trades left from the held $GATE balance, for the topbar chip
+    (base.html) — display only, cached 60s inside gate_fuel. None
+    when the user is not in devnet mode, has no wallet, or the
+    balance cannot be read (the chip hides). Never raises."""
+    try:
+        db = _db(app)
+        if _active_mode(db, user["id"]) != "devnet":
+            return None
+        wallet = _wallet(app, user["id"])
+        if not wallet:
+            return None
+        return gate_fuel_mod.cached_fuel_trades_left(
+            db, _cfg(app), user["id"], wallet["pubkey"])
+    except Exception:
+        return None
+
+
 def _header_balance(app, user):
     """What the top corner shows: {'mode', 'label', 'text'}.
 
@@ -1235,6 +1254,16 @@ def register_routes(app: Flask) -> None:
                 "header_balance": header_balance,
                 "header_mode": header_balance["mode"]
                 if header_balance else "paper",
+                # $GATE fuel counter (2026-11-22): trades left from
+                # the held $GATE balance, in the topbar on every
+                # page. Display only — the trade gate itself reads
+                # the live balance on every trade. None when the
+                # balance cannot be read (the chip hides).
+                "gate_fuel_trades_left": (
+                    _gate_fuel_trades_left(app, user) if user else None),
+                "gate_fuel_enrolled": (
+                    gate_fuel_mod.is_fuel_enrolled(_db(app), user["id"])
+                    if user else False),
                 # Page ID: the page's number in the top-left corner
                 # (see page_numbers.py — the single source of truth).
                 # None on popups, confirm screens and API/action
@@ -2140,7 +2169,10 @@ def register_routes(app: Flask) -> None:
                 "sol_price_usd": sol_price,
                 "popup_coin": popup_coin,
                 "trenches_rows": trenches_rows,
-                "trenches_error": trenches_error}
+                "trenches_error": trenches_error,
+                # Buy $GATE (2026-11-22): the mint the popup buys.
+                "gate_mint": gate_fuel_mod.effective_gate_mint(
+                    _cfg(app))}
 
     @app.route("/dashboard")
     @login_required
@@ -2207,6 +2239,81 @@ def register_routes(app: Flask) -> None:
             results.append(entry)
         return jsonify({"results": results, "error": found["error"],
                         "source": found["source"]})
+
+    @app.route("/api/gate-buy-quote")
+    @login_required
+    def gate_buy_quote():
+        """Live quote for the Buy $GATE screen: the SOL cost of each
+        exact preset (1M / 5M / 10M $GATE) read from the live
+        bonding curve when the screen opens, plus the estimated
+        $GATE out for a SOL amount (?sol=). Fail-closed: an
+        unreadable or complete curve returns available=false and
+        the screen disables buying — never a stale, cached, or
+        invented price. Mainnet returns available=false too: the
+        mainnet mint resolves, but no mainnet purchase path exists
+        yet (the pump.fun executor is devnet-only; Jupiter handles
+        graduated coins only), so quoting a price for a buy that
+        cannot execute would be a lie."""
+        cfg = _cfg(app)
+        mint = gate_fuel_mod.effective_gate_mint(cfg)
+        if mint is None:
+            return jsonify({"available": False,
+                            "reason": "No $GATE mint is buyable on "
+                            "this network right now."})
+        if cfg.network != "devnet":
+            return jsonify({"available": False,
+                            "reason": "$GATE cannot be bought on "
+                            "mainnet yet — no mainnet purchase path "
+                            "exists in the app."})
+        try:
+            rpc = SolanaRpcClient(cfg.rpc_url)
+            curve, fee_bps = gate_fuel_mod.read_gate_curve(rpc, mint)
+        except Exception:
+            curve, fee_bps = None, None
+        if curve is None or curve.get("complete"):
+            return jsonify({"available": False,
+                            "reason": "Bonding curve unavailable — "
+                            "the $GATE price cannot be read right "
+                            "now. Buying is disabled."})
+        quote = gate_fuel_mod.gate_buy_quote_for_curve(
+            curve, fee_bps, mint)
+        quote["available"] = True
+        sol_param = (request.args.get("sol") or "").strip()
+        if sol_param:
+            try:
+                sol_in = float(sol_param)
+            except ValueError:
+                return jsonify({"available": False,
+                                "reason": "Invalid SOL amount."}), 400
+            if sol_in <= 0:
+                return jsonify({"available": False,
+                                "reason": "SOL amount must be more "
+                                "than 0."}), 400
+            quote["tokens_out"] = gate_fuel_mod.tokens_out_for_sol(
+                curve, fee_bps, sol_in)
+        return jsonify(quote)
+
+    @app.route("/gate-fuel/enroll", methods=["POST"])
+    @login_required
+    def gate_fuel_enroll():
+        """Wallet-page fuel opt-in ("fuel trades with Gate"): enroll
+        held $GATE as fuel (each confirmed real trade then uses
+        10,000 $GATE), or stop fueling. The opt-in is a flag only —
+        no $GATE moves; the gate reads the live held balance on
+        every trade, so topping up resumes trading automatically
+        and running dry stops it, with no manual re-enable."""
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        enrolled = (request.form.get("enrolled") or "").strip() == "1"
+        gate_fuel_mod.set_fuel_enrolled(db, user["id"], enrolled)
+        if enrolled:
+            flash("Fuel is on — each confirmed real trade will use "
+                  "10,000 $GATE from your held balance.")
+        else:
+            flash("Fuel is off — real trades no longer use your "
+                  "held $GATE.")
+        return redirect(url_for("wallet"))
 
     @app.route("/choose-mode", methods=["POST"])
     @login_required
@@ -2752,13 +2859,25 @@ def register_routes(app: Flask) -> None:
         if error:
             return _coin_result("Nothing was bought", [error], False,
                                 coin_id_resolved, label)
+        # $GATE fuel gate (2026-11-22): when fuel is on, a real
+        # trade needs 10,000 $GATE held — the live balance is read
+        # here, before anything executes. Not enrolled: the gate is
+        # open and nothing is read. Paper trades never reach this
+        # branch, so paper stays free.
+        rpc = SolanaRpcClient(_cfg(app).rpc_url)
+        wallet_row = _wallet(app, user["id"])
+        ok, reason, _held, _left = gate_fuel_mod.fuel_gate_check(
+            db, _cfg(app), rpc,
+            wallet_row["pubkey"] if wallet_row else "", user["id"])
+        if not ok:
+            return _coin_result("Nothing was bought", [reason], False,
+                                coin_id_resolved, label)
         # The venue is the bonding curve: a graduated coin trades
         # through Jupiter (mainnet, gated behind James's go-ahead);
         # anything still bonding trades through the pump.fun
         # executor (devnet). An unreadable curve refuses plainly —
         # the venue is never guessed.
         try:
-            rpc = SolanaRpcClient(_cfg(app).rpc_url)
             complete = is_curve_complete(rpc, coin_id_resolved)
         except Exception:
             complete = None
@@ -2784,6 +2903,11 @@ def register_routes(app: Flask) -> None:
                 [f"No buy was placed — "
                  f"{result.get('reason', 'real execution failed')}."],
                 False, coin_id_resolved, label)
+        # Fuel drawdown: the trade executed — 10,000 $GATE from the
+        # held balance, keyed by the confirmed signature. A
+        # bookkeeping failure never breaks the trade result.
+        gate_fuel_mod.consume_gate_fuel(
+            db, user["id"], result.get("signature"))
         coin_amount = float(result.get("coin_amount") or 0)
         # Cost basis from the SOL the chain actually took, when the
         # executor reported it — the amount asked for is not what
@@ -2984,11 +3108,21 @@ def register_routes(app: Flask) -> None:
         if error:
             return _coin_result("Nothing was sold", [error], False,
                                 coin_id_resolved, label)
+        # $GATE fuel gate (2026-11-22): same as the buy path — when
+        # fuel is on, a real trade needs 10,000 $GATE held, read
+        # live before anything executes. Not enrolled: open.
+        rpc = SolanaRpcClient(_cfg(app).rpc_url)
+        wallet_row = _wallet(app, user["id"])
+        ok, reason, _held, _left = gate_fuel_mod.fuel_gate_check(
+            db, _cfg(app), rpc,
+            wallet_row["pubkey"] if wallet_row else "", user["id"])
+        if not ok:
+            return _coin_result("Nothing was sold", [reason], False,
+                                coin_id_resolved, label)
         # The venue is the bonding curve (see the buy path
         # above): graduated -> Jupiter, still bonding -> pump.fun,
         # unreadable -> refused plainly.
         try:
-            rpc = SolanaRpcClient(_cfg(app).rpc_url)
             complete = is_curve_complete(rpc, coin_id_resolved)
         except Exception:
             complete = None
@@ -3014,6 +3148,10 @@ def register_routes(app: Flask) -> None:
                 [f"No sell was placed — "
                  f"{result.get('reason', 'real execution failed')}."],
                 False, coin_id_resolved, label)
+        # Fuel drawdown: the trade executed — 10,000 $GATE from the
+        # held balance, keyed by the confirmed signature.
+        gate_fuel_mod.consume_gate_fuel(
+            db, user["id"], result.get("signature"))
         _remove_real_holding(db, user["id"], coin_id_resolved, amount)
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
@@ -3079,6 +3217,16 @@ def register_routes(app: Flask) -> None:
             chart_range = "1d"
         data = _dashboard_data(app, user, include_trenches=False,
                                chart_range=chart_range)
+        # $GATE at the top of the holdings list (2026-11-22): the
+        # fuel coin comes first; everything else keeps its order
+        # (sorted is stable). The fuel strip in wallet.html renders
+        # under that row; the trades-left chip comes from
+        # inject_globals, so no second balance read here.
+        gate_mint = data.get("gate_mint")
+        if gate_mint:
+            data["coin_rows"] = sorted(
+                data["coin_rows"],
+                key=lambda r: 0 if r.get("coin_id") == gate_mint else 1)
         return render_template("wallet.html", **data)
 
     @app.route("/wallet/details")

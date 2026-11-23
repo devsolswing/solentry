@@ -6,11 +6,20 @@
      data-search-url="{{ url_for('coin_search') }}"
      data-mode="{{ mode }}"
      data-currency="{{ 'CAD $' if mode == 'paper' else '$' }}"
-     data-mode-label="{{ mode_label }}">
+     data-mode-label="{{ mode_label }}"
+     data-gate-mint="{{ gate_mint or '' }}"
+     data-gate-quote-url="{{ url_for('gate_buy_quote') }}">
   <div class="coin-popup quick-trade-popup">
     <p class="popup-head"><button class="popup-close" type="button" id="quick-trade-close" aria-label="Close">✕</button></p>
     <h2>Buy or Sell Coin</h2>
     <p class="muted small">Type a coin name or paste a token address — live results appear as you type. Amounts in $ or tokens, at the live price.</p>
+    {# Buy $GATE (2026-11-22): one tap to the $GATE purchase screen.
+       Buys to HOLD in the user's wallet, like any other buy — no
+       fuel logic on this screen. Hidden when no $GATE mint is
+       buyable on this network. #}
+    {% if gate_mint %}
+    <p><button class="btn big gate-buy-btn" type="button" id="quick-trade-gate-open">Buy $GATE</button></p>
+    {% endif %}
     <label>Coin<input id="quick-trade-search" type="text" placeholder="Type a coin name or paste a token address…" autocomplete="off"></label>
     <div id="quick-trade-results" class="search-results"></div>
     <div id="quick-trade-selected" class="hidden">
@@ -72,6 +81,53 @@
         <button class="btn big" type="submit">Sell all</button>
       </form>
     </div>
+    {# $GATE purchase screen (2026-11-22): presets are EXACT token
+       amounts (1M / 5M / 10M $GATE, SOL paid is the live curve
+       quote fetched when the screen opens); the custom option is
+       exact-input (SOL in, $GATE out at the live curve). Paper
+       presets submit amount_tokens (exact fill); real presets
+       submit amount_sol (the quoted SOL — on-chain a preset can
+       only ever be approximate, curve + 1% slippage). One form,
+       one bot select: the preset buttons and the custom button
+       set the hidden amount fields (see quick_trade.js). Buying
+       stays disabled until a live quote loads — never a stale,
+       cached, or invented price. #}
+    {% if gate_mint %}
+    <div id="quick-trade-gate" class="hidden">
+      <p><strong>Buy $GATE</strong> <span class="muted small">— to hold in your wallet</span></p>
+      <p class="muted small" id="quick-trade-gate-status">Live price from the bonding curve…</p>
+      <form id="quick-trade-gate-form" method="post" action="{{ url_for('coin_buy', coin_id=gate_mint) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="amount_tokens" id="gate-amount-tokens" value="">
+        <input type="hidden" name="amount_sol" id="gate-amount-sol" value="">
+        {% if mode == 'paper' %}
+        <label>Bot to look after this coin (optional)
+          <select name="bot_id">
+            <option value="">No bot — just buy it</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }} ({{ b.mode }})</option>{% endfor %}
+          </select>
+        </label>
+        {% else %}
+        <label>Real bot to manage this buy (required — its buy-size limit is the cap)
+          <select name="bot_id" required>
+            <option value="">Choose a real bot…</option>
+            {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <div class="gate-presets">
+          {% for preset in [1000000, 5000000, 10000000] %}
+          <button class="btn big gate-preset-btn" type="submit" data-gate-tokens="{{ preset }}" data-gate-sol="" disabled>{{ "{:,}".format(preset) }} $GATE — <span class="gate-preset-price">…</span></button>
+          {% endfor %}
+        </div>
+        <h3>Or buy with SOL</h3>
+        <label>Amount (SOL) <input id="quick-trade-gate-custom-sol" type="number" step="any" min="0" placeholder="0"></label>
+        <p class="muted small" id="quick-trade-gate-custom-est"></p>
+        <button class="btn big" type="submit" id="quick-trade-gate-custom-btn" disabled>Buy $GATE</button>
+      </form>
+      <p><button class="btn ghost big" type="button" id="quick-trade-gate-back">← Back to buy / sell</button></p>
+    </div>
+    {% endif %}
     <p><button class="btn ghost big" type="button" id="quick-trade-back">← Back to coins</button></p>
   </div>
 </div>

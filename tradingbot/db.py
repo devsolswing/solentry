@@ -529,6 +529,32 @@ CREATE TABLE IF NOT EXISTS pending_signups (
     wrapped_user_key TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+
+-- Holdings-funded $GATE fuel (2026-11-22): the bundle model is
+-- SUPERSEDED (James, 2026-11-22) — bundles are never pushed. Fuel
+-- now comes from $GATE the user holds in their wallet: 10,000 $GATE
+-- per confirmed executed real trade, trades left =
+-- floor(held $GATE / 10,000). gate_fuel_enrollment is the opt-in
+-- from the wallet page ("fuel trades with Gate"); gate_fuel_uses
+-- is one row per consumed trade, keyed by the confirmed trade
+-- signature (UNIQUE, so a retried consumption can never double
+-- spend). The $GATE itself is never moved by fuel — the tokens
+-- stay in the wallet and the fuel balance is held minus consumed;
+-- see gate_fuel.py.
+CREATE TABLE IF NOT EXISTS gate_fuel_enrollment (
+    user_id INTEGER PRIMARY KEY,
+    enrolled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+CREATE TABLE IF NOT EXISTS gate_fuel_uses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    signature TEXT NOT NULL UNIQUE,
+    tokens REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
 """
 
 

@@ -54,6 +54,15 @@ h3 { font-size: 15px; margin: 14px 0 6px; }
 .live-status { font-size: 12px; font-weight: 700; color: #b9a99a; white-space: nowrap; }
 .live-status.live-up { color: #4ade80; }
 .live-status.live-down { color: #fbbf24; }
+/* $GATE fuel (2026-11-22): the trades-left chip in the topbar on
+   every page, and the fuel strip under the $GATE holding on the
+   wallet page. Gold when fuel remains, red at zero. */
+.fuel-chip { font-size: 12px; font-weight: 700; color: #ffd700; background: #000; border: 1px solid #ffb300; border-radius: 999px; padding: 4px 10px; white-space: nowrap; text-decoration: none; }
+.fuel-chip.fuel-empty { color: #f87171; border-color: #f87171; }
+.gate-fuel-strip { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; margin: 0 0 8px; background: #160b08; border: 1px solid #ffb300; border-radius: 10px; font-size: 14px; }
+.gate-fuel-form { margin: 0; }
+.gate-presets { display: grid; gap: 10px; margin: 12px 0; }
+.gate-preset-btn { width: 100%; }
 .live-stale { opacity: .55; }
 .addr { word-break: break-all; background: #000; border: 2px solid #ffb300; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 13px; }
 /* Plain refusal (coin detail Send/Receive when the coin is not a

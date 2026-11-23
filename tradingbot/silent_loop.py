@@ -50,6 +50,7 @@ from .coin_meta import (ensure_coin_meta, get_coin_meta, metadata_pda,
                         parse_metadata_account)
 from .devnet_watchlist import active_mints, enrich_scan
 from .executor import _skip, execute_real_trade, is_curve_complete
+from . import gate_fuel as gate_fuel_mod
 from .jupiter_executor import execute_jupiter_swap
 from .ledger import record_trade
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
@@ -1098,6 +1099,26 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
                             "reason": "holding smaller than position"})
         return
     # Real mode: the signing bot executes on devnet (executor decides).
+    # $GATE fuel gate (2026-11-22): when fuel is on, a real trade
+    # needs 10,000 $GATE held — the live balance is read here,
+    # before anything executes. Not enrolled: open, nothing read.
+    wallet_row = db.execute(
+        "SELECT pubkey FROM wallets WHERE user_id = ?",
+        (bot["user_id"],)).fetchone()
+    try:
+        gate_client = rpc_factory(cfg.rpc_url)
+    except Exception:
+        gate_client = None
+    ok, fuel_reason, _held, _left = gate_fuel_mod.fuel_gate_check(
+        db, cfg, gate_client,
+        wallet_row["pubkey"] if wallet_row else "", bot["user_id"])
+    if not ok:
+        _log(db, bot["user_id"], "silent_skip",
+             f"Silent bot '{bot['name']}': {reason} sell of {coin} "
+             f"skipped — {fuel_reason}.", bot["mode"])
+        actions.append({"action": "skip", "coin": coin,
+                        "reason": fuel_reason})
+        return
     result = real_executor(bot, bot["user_id"], coin, "sell", amount, price,
                            db, cfg)
     if result.get("status") == "executed":
@@ -1136,6 +1157,10 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
                      exit_reason=reason, mode="real", now=_now(),
                      signature=result.get("signature"),
                      sol_amount=sol_received)
+        # Fuel drawdown: the trade executed — 10,000 $GATE from the
+        # held balance, keyed by the confirmed signature.
+        gate_fuel_mod.consume_gate_fuel(
+            db, bot["user_id"], result.get("signature"))
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
                        "WHERE bot_id = ? AND coin_id = ?",
@@ -1271,6 +1296,20 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         actions.append({"action": "skip", "coin": coin,
                         "reason": "insufficient real balance"})
         return
+    # $GATE fuel gate (2026-11-22): when fuel is on, a real trade
+    # needs 10,000 $GATE held — the live balance is read here,
+    # before anything executes. Not enrolled: open, nothing read.
+    # (The wallet + client above were read for the SOL balance
+    # check; the gate reuses them.)
+    ok, fuel_reason, _held, _left = gate_fuel_mod.fuel_gate_check(
+        db, cfg, client, wallet["pubkey"], bot["user_id"])
+    if not ok:
+        _log(db, bot["user_id"], "silent_skip",
+             f"Silent bot '{bot['name']}': buy of {coin} skipped — "
+             f"{fuel_reason}.", bot["mode"])
+        actions.append({"action": "skip", "coin": coin,
+                        "reason": fuel_reason})
+        return
     result = real_executor(bot, bot["user_id"], coin, "buy", amount_sol,
                            price, db, cfg)
     if result.get("status") == "executed":
@@ -1314,6 +1353,10 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                          mode="real", now=_now(),
                          signature=result.get("signature"),
                          sol_amount=sol_spent)
+            # Fuel drawdown: the trade executed — 10,000 $GATE from
+            # the held balance, keyed by the confirmed signature.
+            gate_fuel_mod.consume_gate_fuel(
+                db, bot["user_id"], result.get("signature"))
         if signals and signals.get("gain_pct") is not None:
             _record_signal_entry(db, bot["id"], coin, signals, _now())
         _log(db, bot["user_id"], "silent_buy",
