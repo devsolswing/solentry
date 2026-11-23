@@ -13,6 +13,12 @@ if __name__ == "__main__":
         from tradingbot.livefeed import start_feed
 
         start_feed(app)
+        # Helius curve stream (free WSS): live prices for held +
+        # watched mints straight off the chain. No key = off, and
+        # the app runs on the DexScreener poll exactly as before.
+        from tradingbot.streaming import start_helius_stream
+
+        start_helius_stream(app)
     if cfg.silent_loop_enabled:
         from tradingbot.silent_loop import start_background_loop
 

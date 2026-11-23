@@ -101,6 +101,29 @@ def bonding_curve_pda(mint_b58: str) -> tuple[str, int]:
 # 0% at launch, 100% when the curve is complete and the coin
 # graduates. The Gnat preset buys only inside a 12-65% band.
 INITIAL_VIRTUAL_TOKEN_RESERVES = 1_073_000_000_000_000
+LAMPORTS_PER_SOL = 1_000_000_000
+
+
+def curve_spot_price_sol(curve: dict | None) -> float | None:
+    """Marginal spot price in SOL per whole token, from a parsed
+    bonding-curve dict: virtual SOL reserves over virtual token
+    reserves, converted to SOL per whole token. The same reserves
+    the executor's buy_quote reads, so a price derived here and
+    the on-chain quote can never drift apart by construction.
+    None when the curve is missing, complete (graduated — the
+    curve no longer prices the coin), or unpriceable: never a
+    guess. The caller multiplies by the live SOL price for USD."""
+    if not curve or curve.get("complete"):
+        return None
+    try:
+        vt = float(curve.get("virtual_token_reserves"))
+        vs = float(curve.get("virtual_sol_reserves"))
+    except (TypeError, ValueError):
+        return None
+    if vt <= 0 or vs <= 0:
+        return None
+    price = (vs / vt) * (TOKEN_BASE / LAMPORTS_PER_SOL)
+    return price if price > 0 else None
 
 
 def curve_progress_pct(curve: dict | None) -> float | None:

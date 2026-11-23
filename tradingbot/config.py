@@ -226,6 +226,23 @@ class Config:
         # SESSION_COOKIE_SECURE=0 only for plain-HTTP local dev.
         self.session_cookie_secure: bool = env.get(
             "SESSION_COOKIE_SECURE", "1") == "1"
+        # Helius live-price stream (free-tier WSS): subscribe to
+        # the bonding-curve accounts of held + watched mints and
+        # price them from on-chain virtual reserves — ground truth,
+        # ~400ms old (see tradingbot/streaming.py). Env-only, never
+        # hardcoded. Unset = streaming OFF; the app behaves exactly
+        # as today (DexScreener 5s poll). James's step: a free
+        # Helius account + HELIUS_API_KEY on Railway. HELIUS_STREAM_
+        # ENABLED=0 also turns it off with a key set.
+        self.helius_api_key: str = env.get("HELIUS_API_KEY", "").strip()
+        self.helius_stream_enabled: bool = env.get(
+            "HELIUS_STREAM_ENABLED", "1") == "1"
+        # Cap on streamed mints (held + browser-watched). The set
+        # is small by design — stream what you hold, poll what you
+        # discover — so 50 is far above the real set; it only bounds
+        # a pathological subscription count.
+        self.helius_max_stream_mints: int = max(
+            1, int(env.get("HELIUS_MAX_STREAM_MINTS", "50")))
 
     def require_secrets(self) -> None:
         """Fail fast at startup when required secrets are missing."""

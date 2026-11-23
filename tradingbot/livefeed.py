@@ -168,6 +168,17 @@ class LiveFeed:
             return False
         with self._lock:
             last = self._ticks.get(coin_id)
+            if last is not None and now < last["as_of"]:
+                # Out-of-order delivery: a tick stamped older than
+                # the stored one never overwrites it. A streamed
+                # price replayed after a fresher REST tick, or a
+                # slow poll arriving after a fresher stream tick,
+                # is dropped instead of rewinding the price.
+                log.warning(
+                    "[live-feed] rejected out-of-order tick %s: "
+                    "stamped %.3f, stored tick is %.3f; last good "
+                    "stands", coin_id, now, last["as_of"])
+                return False
             if last is not None:
                 prev = last["price"]
                 if abs(price / prev - 1.0) > MAX_SINGLE_TICK_JUMP:
@@ -271,6 +282,21 @@ class LiveFeed:
         if tick is None:
             return True
         return (now - tick["as_of"]) > STALE_AFTER_SECONDS
+
+    def tick_age_seconds(self, coin_id: str,
+                         now: float | None = None) -> float | None:
+        """Age in seconds of the stored tick for a coin, or None
+        when there is no tick. The Helius stream uses it for its
+        SOL reference: SOL refreshes from Jupiter every 60s, so
+        the feed's 30s staleness cut would drop half the stream's
+        updates — the stream allows a SOL tick up to its own
+        (longer) age bound instead."""
+        now = time.time() if now is None else now
+        with self._lock:
+            tick = self._ticks.get(coin_id)
+        if tick is None:
+            return None
+        return now - tick["as_of"]
 
     # --- mint subscriptions (what the DexScreener poller watches) --------
     def subscribe_mint(self, mint: str) -> None:
