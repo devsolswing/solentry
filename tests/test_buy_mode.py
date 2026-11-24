@@ -190,7 +190,9 @@ class TestModeSwitch(unittest.TestCase):
         self.assertIn("$100.00 CAD", html)
 
     def test_switch_persists_and_header_follows(self):
-        self.client.post("/mode", data={
+        # Mode is locked at sign-in: the chooser sets it (the /mode
+        # switch is gone — see test_invalid_mode_changes_nothing).
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/dashboard"),
             "mode": "devnet"})
         db = self.app.config["DB"]
@@ -200,13 +202,16 @@ class TestModeSwitch(unittest.TestCase):
         self.assertEqual(mode, "devnet")
         # Preference survives a fresh page load.
         html = self._header()
-        self.assertIn("Devnet", html)
+        # The mode-switch form is gone (mode lock), so the capital-D
+        # "Devnet" switch label is gone with it; the mode now shows
+        # as the "Real trading — devnet" label on the page.
+        self.assertIn("Real trading — devnet", html)
         # Devnet header shows an on-chain SOL balance or plainly says
         # it is unavailable (RPC may not answer in the sandbox) —
         # never a paper dollar figure as the devnet balance.
         self.assertTrue("SOL" in html or "unavailable" in html)
-        # Switch back.
-        self.client.post("/mode", data={
+        # Switch back via the chooser (a fresh sign-in choice).
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/dashboard"),
             "mode": "paper"})
         mode = db.execute(
@@ -216,10 +221,12 @@ class TestModeSwitch(unittest.TestCase):
         self.assertIn("$100.00 CAD", self._header())
 
     def test_invalid_mode_changes_nothing(self):
+        # The mode switch is gone (mode is locked at sign-in): any
+        # POST to /mode 404s and changes nothing.
         resp = self.client.post("/mode", data={
             "csrf_token": csrf(self.client, "/dashboard"),
             "mode": "mainnet"})
-        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.status_code, 404)
         db = self.app.config["DB"]
         mode = db.execute(
             "SELECT active_mode FROM users WHERE username = 'alice'"
@@ -328,7 +335,7 @@ class TestBuySelectors(unittest.TestCase):
 
     def test_real_buy_without_bot_refused_plainly_with_no_fill(self):
         self._create()
-        self.client.post("/mode", data={
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/dashboard"),
             "mode": "devnet"})
         cash_before = self.db.execute(
@@ -355,7 +362,7 @@ class TestBuySelectors(unittest.TestCase):
         self.assertIn('name="amount_sol"', html)
         self.assertIn('name="bot_id"', html)
         self.assertIn("Luna (paper)", html)
-        self.client.post("/mode", data={
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/dashboard"),
             "mode": "devnet"})
         html = self.client.get(f"/coins/{GATE}").get_data(as_text=True)

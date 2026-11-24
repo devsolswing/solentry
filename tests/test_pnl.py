@@ -173,7 +173,7 @@ class TestPnlPage(PnlBase):
         self.assertEqual(self.client.get("/pnl").status_code, 404)
         login(self.client, "alice")
         self.assertEqual(self.client.get("/pnl").status_code, 404)
-        self.client.post("/mode", data={
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
         self.assertEqual(self.client.get("/pnl").status_code, 404)
 
@@ -184,7 +184,7 @@ class TestPnlPage(PnlBase):
         self.assertIn("$100.00 CAD", html)  # paper portfolio value
         self.assertNotIn("2.0000 SOL", html)
         # Real mode shows the on-chain balance only — no paper value.
-        self.client.post("/mode", data={
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
         html = self.client.get("/wallet").get_data(as_text=True)
         self.assertIn("2.0000 SOL", html)  # mocked on-chain balance
@@ -295,7 +295,7 @@ class TestPumpfunWallet(PnlBase):
         self.assertNotIn(
             "Pump.fun trading wallet",
             self.client.get("/wallet").get_data(as_text=True))
-        self.client.post("/mode", data={
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
         resp = self.client.get("/wallet/details")
         html = resp.get_data(as_text=True)

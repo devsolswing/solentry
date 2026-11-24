@@ -24,7 +24,7 @@ from unittest import mock
 
 import tradingbot.routes as routes
 import tradingbot.silent_loop as silent_loop
-from helpers import csrf, login, make_client, signup
+from helpers import csrf, grant_fuel, login, make_client, signup
 from tradingbot.assistant import parse_message
 from tradingbot.rules import (SCANNER_DISPLAY, load_rules,
                               scanner_ruleset, summarize_rules,
@@ -1137,6 +1137,8 @@ class TestScannerEngine(ScannerEngineBase):
     def test_top10_real_mode_proceeds_in_sol(self):
         """Real mode: the sell reason says the proceeds are in SOL —
         the pump.fun sell pays out in SOL by construction."""
+        # Package fuel (2026-11-23): the real sell costs 1 credit.
+        grant_fuel(self.db, self.user_id, 100)
         bot_id = self._insert_bot(rules=scanner_ruleset(), mode="real")
 
         def fake_real(bot, user_id, coin, side, amount, price, db, cfg):

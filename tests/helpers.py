@@ -62,3 +62,25 @@ def login(client, username: str, password: str = "password123"):
     return client.post("/login", data={
         "csrf_token": token, "username": username, "password": password,
     }, follow_redirects=False)
+
+
+def grant_fuel(db, user_id: int, trades: int) -> int:
+    """Credit package fuel directly (test shortcut for a completed
+    $GATE package purchase): writes a completed purchase row for
+    the matching bundle (or a custom row when no bundle matches)
+    and returns the ledger-truth balance. $GATE held outside the
+    app never becomes fuel — only this path creates credits."""
+    from tradingbot import gate_fuel as gate_fuel_mod
+
+    for bundle in gate_fuel_mod.bundles():
+        if bundle["trades"] == trades:
+            gate_fuel_mod.credit_purchase(
+                db, user_id, bundle, 0, "test-buy", "test-purchase")
+            return gate_fuel_mod.get_fuel(db, user_id)["trades_remaining"]
+    db.execute(
+        "INSERT INTO gate_fuel_purchases (user_id, bundle_id, coins, "
+        "trades, sol_paid, send_signature, status) VALUES "
+        "(?, 'test', ?, ?, 0, 'test-purchase', 'completed')",
+        (user_id, trades * 10_000, trades))
+    db.commit()
+    return gate_fuel_mod.get_fuel(db, user_id)["trades_remaining"]

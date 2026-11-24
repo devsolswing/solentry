@@ -22,8 +22,8 @@ from unittest import mock
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey)
 
-from helpers import (TEST_ENCRYPTION_KEY, TEST_SESSION_SECRET, make_client,
-                     signup)
+from helpers import (TEST_ENCRYPTION_KEY, TEST_SESSION_SECRET, grant_fuel,
+                     make_client, signup)
 from tradingbot import executor as executor_mod
 from tradingbot import solana as solana_mod
 from tradingbot.price_gate import curve_price_sol_per_token
@@ -243,6 +243,10 @@ class ExecutorBase(unittest.TestCase):
         _, self.mint, _ = generate_keypair()
         self.support_id = get_signing_bot(self.db,
                                           self.user_id)["support_id"]
+        # Package fuel (2026-11-23): real trades cost 1 trade
+        # credit. These executor tests drive real execution — the
+        # fuel gate must not be what stops them.
+        grant_fuel(self.db, self.user_id, 100)
 
     def tearDown(self):
         self.tmp.cleanup()

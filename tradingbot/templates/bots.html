@@ -146,6 +146,27 @@
     <p class="muted">No tasks right now.</p>
     {% endif %}
   </div>
+
+  {# GATEkeeper (James, 2026-11-23): the bot that holds the $GATE
+     fuel — the fuel balance and the Buy $GATE button live here
+     next to the signing bot. Real mode: the live package count.
+     Paper mode: "free ~ ∞" — paper trades are free. #}
+  <div class="card bot-card gatekeeper-card">
+    <span class="bot-ico" aria-hidden="true">⛽</span>
+    <span class="bot-info">
+      <span class="bot-name"><strong>GATEkeeper</strong></span>
+      {% if gate_fuel and gate_fuel.trades_left is not none %}
+      <span class="muted small"><span data-gate-fuel-count>{{ gate_fuel.trades_left }}</span> trades left</span>
+      {% elif mode == 'paper' %}
+      <span class="muted small">free ~ ∞</span>
+      {% else %}
+      <span class="muted small">Fuel unavailable right now</span>
+      {% endif %}
+      <span class="muted small">1 trade credit per real trade — buy a $GATE package to refill.</span>
+    </span>
+    <span class="bot-arrow" aria-hidden="true">›</span>
+  </div>
+  <p><button class="btn big gate-buy-btn" type="button" data-gate-buy-open>Buy $GATE</button></p>
 </div>
 
 <script nonce="{{ csp_nonce }}">

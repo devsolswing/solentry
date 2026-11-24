@@ -852,7 +852,13 @@ class TestBuilderBotHttp(unittest.TestCase):
         There must be exactly one handler, plus an in-flight guard
         so a double tap can never send twice."""
         html = self.client.get("/bots/create").get_data(as_text=True)
-        self.assertNotIn("b.addEventListener('click'", html)
+        # The chatbox script itself must wire each suggestion tap
+        # exactly once (delegated on suggBox). The gate popup script
+        # (included on every page) has its own b.addEventListener
+        # for its Buy buttons, so the check is scoped to the
+        # chatbox script, before the popup include.
+        chatbox_html = html.split("gate-buy-popup")[0]
+        self.assertNotIn("b.addEventListener('click'", chatbox_html)
         self.assertIn("suggBox.addEventListener('click'", html)
         self.assertIn("let sending = false;", html)
         self.assertIn("if (!text || sending) return;", html)

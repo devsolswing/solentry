@@ -29,7 +29,7 @@ from unittest import mock
 
 import tradingbot.routes as routes
 import tradingbot.silent_loop as sl
-from helpers import csrf, make_client, make_config, signup
+from helpers import csrf, grant_fuel, make_client, make_config, signup
 from tradingbot.builderbot import review_bot
 from tradingbot.coin_meta import metadata_pda
 from tradingbot.ledger import record_trade, version_wl_summary
@@ -837,6 +837,10 @@ class TestPitDailyLossBreaker(PitBase):
 
     def test_breaker_halts_buys_but_not_exits(self):
         # A halted bot still stops out of an open position.
+        # Package fuel (2026-11-23): the exit is a real trade and
+        # costs 1 credit — funded here so the breaker, not the
+        # fuel gate, is what is being tested.
+        grant_fuel(self.db, self.user_id, 100)
         bot_id = self._insert_bot(rules=pit_ruleset(), mode="real")
         record_trade(self.db, self.user_id, bot_id, "L0", "sell",
                      1.0, 90.0, 90.0, pnl_usd=-2.0, mode="real",
@@ -852,22 +856,40 @@ class TestPitDailyLossBreaker(PitBase):
         self.assertIn("stop loss", sells[0]["reason"])
 
 
-class TestPitFuelEnrollment(PitBase):
-    def test_unenrolled_real_bot_is_blocked_plainly(self):
-        # Real mode, never opted into $GATE fuel: no buy, a plain
-        # message saying so — never silently free.
+class TestPitFuelPackages(PitBase):
+    """$GATE package fuel (2026-11-23): a Pit bot trades real only
+    while its owner holds package credits. No package: no buy, a
+    plain message saying so — never silently free. The gate covers
+    ALL real trades, exits included: at zero fuel even a stop-loss
+    exit is refused until the user refills."""
+
+    def test_no_package_real_bot_is_blocked_plainly(self):
+        # Real mode, no $GATE package bought: no buy, a plain
+        # message saying to buy a package — never silently free.
         bot_id = self._insert_bot(rules=pit_ruleset(), mode="real")
         outcomes = self._buy_twice(bot_id, _pit_entry(PIT_MINT, 0.0106))
         self.assertEqual(self._buys(outcomes), [])
         skips = [a for o in outcomes for a in o["actions"]
                  if a["action"] == "skip"]
         self.assertTrue(
-            any("fuel enrollment" in a["reason"] for a in skips),
+            any("$GATE package" in a["reason"] for a in skips),
             skips)
 
-    def test_unenrolled_real_bot_still_exits(self):
-        # The enrollment gate blocks new buys only — an open
-        # position still stops out.
+    def test_no_package_real_bot_exit_refused(self):
+        # The gate covers exits too: at zero fuel an open position
+        # does NOT stop out — the user refills first.
+        bot_id = self._insert_bot(rules=pit_ruleset(), mode="real")
+        self._insert_position(bot_id, PIT_MINT, 100.0, 0.01,
+                              last_price=0.0095)
+        outcomes = self._run([_pit_entry(PIT_MINT, 0.0095,
+                                         change_5m=-4.0)],
+                             executor=self._stub_executor())
+        sells = self._sells(outcomes)
+        self.assertEqual(len(sells), 0)
+
+    def test_funded_real_bot_still_exits(self):
+        # With a package bought, the same open position stops out.
+        grant_fuel(self.db, self.user_id, 100)
         bot_id = self._insert_bot(rules=pit_ruleset(), mode="real")
         self._insert_position(bot_id, PIT_MINT, 100.0, 0.01,
                               last_price=0.0095)

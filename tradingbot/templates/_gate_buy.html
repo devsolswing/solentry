@@ -1,0 +1,148 @@
+{# Buy $GATE packages (James, 2026-11-23): trade credits for real
+   trading, bought in the app. The user picks a package, pays SOL,
+   and the app buys the $GATE on the bonding curve and sends it
+   straight to the dev wallet — the trades are credited
+   automatically once the transfer is confirmed safe on-chain.
+   A package is the ONLY way fuel is created; $GATE bought outside
+   the app can never become fuel. The quote refreshes live while
+   the popup is open; the buy button stays disabled until a fresh
+   quote arrives. #}
+{% if gate_bundles %}
+<div id="gate-buy-popup" class="gate-popup" hidden>
+  <div class="gate-popup-card" role="dialog" aria-label="Buy $GATE">
+    <div class="gate-popup-head">
+      <h3>Buy $GATE packages</h3>
+      <button type="button" class="gate-close" data-gate-buy-close aria-label="Close">✕</button>
+    </div>
+    <p class="muted">Each package buys $GATE for the dev wallet and fuels the trades shown — 1 trade credit per real trade. Buying fuel never costs fuel.</p>
+    <div class="gate-quote" data-gate-quote hidden>
+      <span class="gate-quote-label">Live price</span>
+      <span class="gate-quote-value" data-gate-price-text>—</span>
+      <span class="gate-quote-note" data-gate-price-note></span>
+    </div>
+    <form method="post" action="{{ url_for('gate_buy') }}" class="gate-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="gate-bundles">
+        {% for b in gate_bundles %}
+        <label class="gate-bundle{% if loop.first %} gate-bundle-default{% endif %}">
+          <input type="radio" name="bundle_id" value="{{ b.id }}"{% if loop.first %} checked{% endif %}>
+          <span class="gate-bundle-amount">{{ b.label }}</span>
+          <span class="gate-bundle-trades">{{ b.trades }} trades{% if b.bonus %} (+{{ b.bonus }} free){% endif %}</span>
+          <span class="gate-bundle-price" data-gate-price data-bundle="{{ b.id }}">—</span>
+        </label>
+        {% endfor %}
+      </div>
+      <p class="gate-best" data-gate-best></p>
+      <p class="gate-hint">The $GATE goes straight to the dev wallet — your trades are credited automatically once the transfer is confirmed safe on-chain.</p>
+      <p class="gate-hint"><a href="{{ gate_pumpfun_url }}" target="_blank" rel="noopener">View $GATE on pump.fun ↗</a></p>
+      <button class="btn big gate-buy-btn" type="submit" data-gate-buy-submit disabled>Buy $GATE</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+<script>
+(function () {
+  var popup = document.getElementById('gate-buy-popup');
+  if (!popup) return;
+  var quoteBox = popup.querySelector('[data-gate-quote]');
+  var priceText = popup.querySelector('[data-gate-price-text]');
+  var priceNote = popup.querySelector('[data-gate-price-note]');
+  var submit = popup.querySelector('[data-gate-buy-submit]');
+  var best = popup.querySelector('[data-gate-best]');
+  var radios = popup.querySelectorAll('input[name="bundle_id"]');
+  var quoteUrl = '{{ gate_quote_url }}';
+  var quoteTimer = null;
+  var countdownTimer = null;
+
+  function stopQuoteTimer() {
+    if (quoteTimer) { clearInterval(quoteTimer); quoteTimer = null; }
+  }
+  function startQuoteTimer() {
+    stopQuoteTimer();
+    quoteTimer = setInterval(refreshQuotes, 15000);
+  }
+
+  function refreshQuotes() {
+    if (popup.hidden) return;
+    fetch(quoteUrl).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok || !d.prices || !d.prices.length) {
+        priceText.textContent = 'Price unavailable — try again in a moment.';
+        priceNote.textContent = '';
+        submit.disabled = true;
+        return;
+      }
+      var solPrice = d.sol_price_usd;
+      var bestBundle = null;
+      d.prices.forEach(function (p) {
+        var el = popup.querySelector('[data-gate-price][data-bundle="' + p.bundle_id + '"]');
+        if (el) el.textContent = p.sol_amount != null ? p.sol_amount.toFixed(4) + ' SOL' : '—';
+        if (p.best_value) bestBundle = p;
+      });
+      var sel = popup.querySelector('input[name="bundle_id"]:checked');
+      var chosen = null;
+      d.prices.forEach(function (p) { if (sel && p.bundle_id === sel.value) chosen = p; });
+      if (chosen && chosen.sol_amount != null) {
+        priceText.textContent = '≈ ' + chosen.sol_amount.toFixed(4) + ' SOL';
+        priceNote.textContent = solPrice ? '(SOL ≈ $' + Number(solPrice).toFixed(2) + ')' : '';
+        submit.disabled = false;
+      } else {
+        priceText.textContent = 'Price unavailable — try again in a moment.';
+        submit.disabled = true;
+      }
+      if (bestBundle) best.textContent = 'Best value: ' + bestBundle.label + ' for ' + bestBundle.trades + ' trades.';
+      quoteBox.hidden = false;
+    }).catch(function () {
+      priceText.textContent = 'Price unavailable — try again in a moment.';
+      submit.disabled = true;
+      quoteBox.hidden = false;
+    });
+  }
+
+  radios.forEach(function (r) { r.addEventListener('change', refreshQuotes); });
+
+  function closeAll() {
+    popup.hidden = true;
+    stopQuoteTimer();
+  }
+  document.querySelectorAll('[data-gate-buy-open]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      popup.hidden = false;
+      refreshQuotes();
+      startQuoteTimer();
+    });
+  });
+  document.querySelectorAll('[data-gate-buy-close]').forEach(function (b) {
+    b.addEventListener('click', closeAll);
+  });
+  popup.addEventListener('click', function (e) { if (e.target === popup) closeAll(); });
+
+  // The trades-left countdown: every page with the popup polls
+  // /api/gate-fuel every 30s so the chip and the popup show the
+  // live count after a trade lands.
+  function refreshCountdown() {
+    fetch('/api/gate-fuel').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok) return;
+      document.querySelectorAll('[data-gate-fuel-count]').forEach(function (el) {
+        el.textContent = d.trades_left;
+      });
+      document.querySelectorAll('[data-gate-no-fuel-count]').forEach(function (el) {
+        el.textContent = d.trades_left;
+      });
+      if (d.trades_left === 0) {
+        document.querySelectorAll('[data-gate-no-fuel-show]').forEach(function (el) {
+          el.hidden = false;
+        });
+      } else {
+        document.querySelectorAll('[data-gate-no-fuel-show]').forEach(function (el) {
+          el.hidden = true;
+        });
+      }
+    }).catch(function () { /* keep the last count */ });
+  }
+  if (!window._gateCountdownStarted) {
+    window._gateCountdownStarted = true;
+    countdownTimer = setInterval(refreshCountdown, 30000);
+    refreshCountdown();
+  }
+})();
+</script>

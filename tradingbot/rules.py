@@ -730,14 +730,13 @@ PIT_NOTES = [
     "tomorrow. Exits still run. With no live SOL price the "
     "breaker cannot be evaluated and does NOT trip — the loss "
     "is still logged, never hidden.",
-    "Fuel — every confirmed real trade costs 10,000 $GATE from "
-    "the held balance (about $0.02 a trade at the Nov-20 $GATE "
-    "price — it rises with the $GATE price; at 100x it would be "
-    "about $2 a trade). Hold 1,000,000 $GATE for 100 trades. A "
-    "Pit bot trades real ONLY while its owner is enrolled in "
-    "fuel ('fuel trades with Gate' on the wallet page) — an "
-    "unenrolled bot is blocked from real buys with a plain "
-    "message, never silently free.",
+    "Fuel — every confirmed real trade costs 1 trade credit "
+    "from a $GATE package bought in the app (1M $GATE = 100 "
+    "trades, 5M = 550, 10M = 1450). $GATE bought outside the "
+    "app can never be fuel. A Pit bot trades real ONLY while "
+    "its owner holds package credits — a bot with no fuel is "
+    "blocked from real buys with a plain message, never "
+    "silently free.",
     "Versions — the bot's name tag shows its version, starting "
     "at v1.0, then v1.1, v1.2, and so on after every update. "
     "Every change is logged with a number in the preset "

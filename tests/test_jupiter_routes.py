@@ -28,7 +28,7 @@ from unittest import mock
 import tradingbot.jupiter as jup
 import tradingbot.prices as prices
 import tradingbot.routes as routes
-from helpers import csrf, make_client, signup
+from helpers import csrf, grant_fuel, make_client, signup
 from test_jupiter import REAL_QUOTE
 
 # A graduated pump.fun mint (6 decimals by construction).
@@ -118,6 +118,9 @@ class JupiterRoutesBase(unittest.TestCase):
         self.user_id = self.db.execute(
             "SELECT id FROM users WHERE username = 'alice'"
         ).fetchone()["id"]
+        # Package fuel (2026-11-23): real buys/sells cost 1 trade
+        # credit — the dispatch tests drive real execution.
+        grant_fuel(self.db, self.user_id, 100)
         resp = self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "paper"})
         self.assertEqual(resp.status_code, 302)

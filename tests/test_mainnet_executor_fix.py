@@ -479,48 +479,36 @@ class TestChipAndCopy(MainnetFixBase):
         self.assertEqual(_mode_label("paper", self._mainnet_cfg()),
                          "Demo trading (paper)")
 
-    def test_held_gate_mint_works_on_mainnet_without_buy_path(self):
-        """The fuel counter's mint resolves on mainnet even when
-        JUPITER_REAL_SWAPS is off (no buy path) — the counter is
-        holdings-based, not buy-based."""
+    def test_gate_mint_resolves_on_mainnet_without_buy_path(self):
+        """The package mint resolves on mainnet even when
+        JUPITER_REAL_SWAPS is off (no Jupiter path) — packages buy
+        through the pump.fun executor while $GATE is still bonding,
+        so the mint is not buy-path-gated."""
         env = _mainnet_env(self.tmp.name)
         env["JUPITER_REAL_SWAPS"] = "0"
         cfg = Config(env=env)
-        self.assertEqual(gate_fuel_mod.held_gate_mint(cfg), MAINNET_GATE)
+        self.assertEqual(gate_fuel_mod.gate_mint(cfg), MAINNET_GATE)
 
-    def test_fuel_counter_reads_on_mainnet(self):
-        """25,000,000 $GATE held on mainnet = 2,500 trades left,
-        read through the failover RPC client."""
+    def test_package_balance_starts_at_zero_on_mainnet(self):
+        """25,000,000 $GATE held on mainnet is NOT fuel: the
+        package balance starts at 0 and grows only from packages
+        bought in the app. A package purchase then credits its
+        trades."""
         cfg = self._mainnet_cfg()
-        held_base = 25_000_000 * 1_000_000
-
-        # The balance reader queries both token programs; the
-        # $GATE account lives under the legacy SPL Token program,
-        # so only that call returns it (returning it twice would
-        # double-count the holding).
-        from tradingbot.home_holdings import TOKEN_PROGRAM_ID
-
-        class _FakeChainRpc:
-            def _call(self, method, params):
-                if method != "getTokenAccountsByOwner":
-                    raise AssertionError(f"unexpected {method}")
-                if params[1].get("programId") != TOKEN_PROGRAM_ID:
-                    return {"value": []}
-                return {"value": [{
-                    "account": {"data": {"parsed": {"info": {
-                        "mint": MAINNET_GATE,
-                        "tokenAmount": {
-                            "amount": str(held_base),
-                            "decimals": 6,
-                            "uiAmount": 25_000_000.0}}}}}}]}
-
-        gate_fuel_mod._FUEL_COUNTER_CACHE["value"].clear()
-        gate_fuel_mod._FUEL_COUNTER_CACHE["at"].clear()
-        with mock.patch.object(solana_mod, "SolanaRpcClient",
-                              return_value=_FakeChainRpc()):
-            left = gate_fuel_mod.cached_fuel_trades_left(
-                self.db, cfg, self.user_id, self.pubkey)
-        self.assertEqual(left, 2500)
+        self.assertEqual(gate_fuel_mod.get_fuel(
+            self.db, self.user_id)["trades_remaining"], 0)
+        self.db.execute(
+            "INSERT INTO real_holdings (user_id, coin_id, amount, "
+            "avg_price) VALUES (?, ?, ?, ?)",
+            (self.user_id, MAINNET_GATE, 25_000_000.0, 0.000002))
+        self.db.commit()
+        self.assertEqual(gate_fuel_mod.get_fuel(
+            self.db, self.user_id)["trades_remaining"], 0)
+        bundle = gate_fuel_mod.get_bundle("bundle_1m")
+        gate_fuel_mod.credit_purchase(
+            self.db, self.user_id, bundle, 0, "test-buy", "test-purchase")
+        self.assertEqual(gate_fuel_mod.get_fuel(
+            self.db, self.user_id)["trades_remaining"], 100)
 
     def test_mainnet_pages_show_mainnet_copy(self):
         """Rendered pages on a mainnet-configured app say mainnet,

@@ -32,28 +32,22 @@ if ("serviceWorker" in navigator) {
   </div>
   {% if current_user %}
   <div class="top-actions">
-    {# $GATE fuel counter (2026-11-22): trades left from the held
-       $GATE balance, on every page. Display only — cached 60s.
-       Links to the wallet, where the fuel button lives. Hidden in
-       paper mode (paper trades are free) and when the balance
-       cannot be read. #}
+    {# $GATE fuel (2026-11-23): the Trades Left chip sits in the
+       mode switch's spot — the switch is gone (mode is locked at
+       sign-in). Real mode shows the ledger-truth count with the
+       fuel logo; paper mode shows "free ~ ∞" (paper trades are
+       free). Black/gold, prominent. The count updates live from
+       the /api/gate-fuel poll. #}
     {% if header_mode == 'devnet' and gate_fuel_trades_left is not none %}
-    <a class="fuel-chip{{ ' fuel-empty' if gate_fuel_trades_left == 0 else '' }}" href="{{ url_for('wallet') }}" title="Trades left from your held $GATE — 10,000 $GATE per real trade. Buy more $GATE to top up.">⛽ {{ gate_fuel_trades_left }} trades</a>
+    <a class="fuel-chip{{ ' fuel-empty' if gate_fuel_trades_left == 0 else '' }}" href="{{ url_for('wallet') }}" title="Trades left from your $GATE packages. Buy more $GATE to top up.">{% if gate_logo_url %}<img class="fuel-chip-logo" src="{{ gate_logo_url }}" alt="" onerror="this.style.display='none'">{% endif %}Trades Left: <span data-gate-fuel-count>{{ gate_fuel_trades_left }}</span></a>
+    {% elif header_mode == 'paper' %}
+    <span class="fuel-chip" title="Paper trading is free — no fuel needed.">free ~ ∞</span>
     {% endif %}
     {# Live-feed status: hidden until live.js runs on a page with
        live numbers. Shows the source and how fresh the last tick
        is — "● Live · 12:03:44 · kraken" — or that the feed is down
        and the page is showing last prices. #}
     <span id="live-status" class="live-status" hidden>↻ Connecting to live feed…</span>
-    {# Paper/Devnet switch lives in the topbar now — same form,
-       same endpoint, works from every page. #}
-    <form method="post" action="{{ url_for('mode_switch') }}" class="hud-mode">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="mode" value="{{ 'devnet' if header_mode == 'paper' else 'paper' }}">
-      <button class="mode-switch hud-switch" type="submit" aria-label="Switch to {{ real_mode_label if header_mode == 'paper' else 'Demo trading (paper)' }}">
-        <span class="mode-opt {{ 'on' if header_mode == 'paper' }}">Paper</span><span class="mode-opt {{ 'on' if header_mode == 'devnet' }}">{{ real_network_name }}</span>
-      </button>
-    </form>
   </div>
   {% endif %}
 </header>
@@ -117,5 +111,9 @@ if ("serviceWorker" in navigator) {
 <script src="{{ url_for('static', filename='coin_tick.js') }}"></script>
 <script src="{{ url_for('static', filename='chart.js') }}"></script>
 <script src="{{ url_for('static', filename='live.js') }}"></script>
+{# $GATE fuel popups (James, 2026-11-23): included whenever the page
+   carries the bundles — homepage, wallet page, bots page, and the
+   no-fuel result page. Hidden until opened. #}
+{% include "_gate_buy.html" %}
 </body>
 </html>

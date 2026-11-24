@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from helpers import make_client, signup
+from helpers import grant_fuel, make_client, signup
 from test_executor import (CURVE_PRICE_USD, FAKE_SIGNATURE, ExecutorBase,
                            FakePumpRpc, TEST_SOL_PRICE_USD, make_curve)
 from tradingbot import db as db_mod
@@ -217,6 +217,9 @@ class TestLoopRecordsFrictionFields(unittest.TestCase):
             "SELECT id FROM users WHERE username = 'alice'"
         ).fetchone()["id"]
         self.feed = self.app.config["LIVE_FEED"]
+        # Package fuel (2026-11-23): real trades cost 1 trade
+        # credit — the friction tests drive real execution.
+        grant_fuel(self.db, self.user_id, 100)
 
     def tearDown(self):
         self.tmp.cleanup()

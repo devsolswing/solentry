@@ -514,29 +514,75 @@ CREATE TABLE IF NOT EXISTS pending_signups (
     created_at INTEGER NOT NULL
 );
 
--- Holdings-funded $GATE fuel (2026-11-22): the bundle model is
--- SUPERSEDED (James, 2026-11-22) — bundles are never pushed. Fuel
--- now comes from $GATE the user holds in their wallet: 10,000 $GATE
--- per confirmed executed real trade, trades left =
--- floor(held $GATE / 10,000). gate_fuel_enrollment is the opt-in
--- from the wallet page ("fuel trades with Gate"); gate_fuel_uses
--- is one row per consumed trade, keyed by the confirmed trade
--- signature (UNIQUE, so a retried consumption can never double
--- spend). The $GATE itself is never moved by fuel — the tokens
--- stay in the wallet and the fuel balance is held minus consumed;
--- see gate_fuel.py.
-CREATE TABLE IF NOT EXISTS gate_fuel_enrollment (
+-- $GATE trade packages (James, 2026-11-23): real trades cost 1
+-- trade credit, bought as a $GATE package inside the app (1M = 100
+-- trades, 5M = 550, 10M = 1450). The purchased $GATE goes straight
+-- to the dev wallet and the package's trades are credited
+-- automatically once that transfer confirms on-chain. $GATE bought
+-- OUTSIDE the app is never fuel; the package balance starts at 0
+-- and grows only from packages bought in the app. The LEDGER is
+-- the truth — the cached counter below is only a concurrency
+-- primitive, and every read recomputes from purchases minus uses
+-- (see gate_fuel.py).
+-- gate_fuel: cached counter per user (reconciled against the ledger
+-- on every read; the ledger wins when they disagree).
+-- ledger_rowid_at_first_purchase anchors the backfill: the highest
+-- trade_ledger rowid at the moment of the user's first completed
+-- package purchase. Trades at or below it predate fuel and are never
+-- backfilled; trades above it are post-fuel. A rowid anchor, not a
+-- timestamp — trade_ledger created_at is second-precision, so a
+-- pre-fuel trade can share the purchase's second.
+-- gate_fuel_purchases: one row per completed package purchase
+-- (credits granted). status is 'completed' — a purchase is only
+-- recorded after the dev-wallet send is confirmed on-chain.
+-- gate_fuel_uses: one row per consumed credit, keyed by the
+-- confirmed on-chain signature (UNIQUE: one signature can never
+-- consume twice) and, for silent-bot trades, the trade_ledger
+-- trade_id (UNIQUE: one ledger row can never consume twice).
+-- signature is NULL only for rows backfilled from the trade ledger
+-- (the ledger never stored the signature); trade_id is NULL only
+-- for manual trades (which write no ledger row).
+-- gate_fuel_enrollment is RETIRED (2026-11-23): the holdings-funded
+-- model is gone. The table stays so old databases keep their shape;
+-- nothing reads it any more. Holdings-era gate_fuel_uses rows (the
+-- tokens column) stay as history — the migration in
+-- _migrate_gate_fuel_uses rebuilds the table keeping them, and the
+-- package balance starts from gate_fuel_purchases only.
+CREATE TABLE IF NOT EXISTS gate_fuel (
     user_id INTEGER PRIMARY KEY,
-    enrolled INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL,
+    trades_remaining INTEGER NOT NULL DEFAULT 0 CHECK (trades_remaining >= 0),
+    total_purchased INTEGER NOT NULL DEFAULT 0,
+    total_used INTEGER NOT NULL DEFAULT 0,
+    ledger_rowid_at_first_purchase INTEGER,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+CREATE TABLE IF NOT EXISTS gate_fuel_purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    bundle_id TEXT NOT NULL,
+    coins INTEGER NOT NULL,
+    trades INTEGER NOT NULL,
+    sol_spent REAL NOT NULL,
+    buy_signature TEXT,
+    send_signature TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 CREATE TABLE IF NOT EXISTS gate_fuel_uses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
-    signature TEXT NOT NULL UNIQUE,
-    tokens REAL NOT NULL,
-    created_at TEXT NOT NULL,
+    trade_id TEXT UNIQUE,
+    signature TEXT UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+CREATE TABLE IF NOT EXISTS gate_fuel_enrollment (
+    user_id INTEGER PRIMARY KEY,
+    enrolled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
@@ -905,6 +951,43 @@ def _purge_generated_fee_wallets(conn: sqlite3.Connection) -> None:
         "VALUES ('purge_generated_fee_wallets', '2026-11-10')")
 
 
+def _migrate_gate_fuel_uses(conn: sqlite3.Connection) -> None:
+    """Rebuild gate_fuel_uses from the holdings-era shape to the
+    package shape (2026-11-23). The holdings-era table is
+    (signature TEXT NOT NULL UNIQUE, tokens REAL NOT NULL) with no
+    trade_id; the package table is (trade_id TEXT UNIQUE,
+    signature TEXT UNIQUE) with the tokens column kept but no
+    longer written. SQLite cannot ADD a UNIQUE column, so the
+    table is rebuilt: old rows are copied across (id, user,
+    signature, created_at — and their tokens values, kept as
+    history), trade_id stays NULL on them, and the package
+    balance starts from gate_fuel_purchases only — old rows never
+    convert to credits. Idempotent: a table that already has
+    trade_id is left alone. Fresh databases get the package shape
+    straight from SCHEMA and never enter this branch."""
+    cols = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(gate_fuel_uses)").fetchall()}
+    if not cols or "trade_id" in cols:
+        return
+    conn.execute(
+        "CREATE TABLE gate_fuel_uses_new ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "user_id INTEGER NOT NULL, "
+        "trade_id TEXT UNIQUE, "
+        "signature TEXT UNIQUE, "
+        "tokens REAL, "
+        "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+        "FOREIGN KEY (user_id) REFERENCES users (id))")
+    conn.execute(
+        "INSERT INTO gate_fuel_uses_new "
+        "(id, user_id, trade_id, signature, tokens, created_at) "
+        "SELECT id, user_id, NULL, signature, tokens, created_at "
+        "FROM gate_fuel_uses")
+    conn.execute("DROP TABLE gate_fuel_uses")
+    conn.execute(
+        "ALTER TABLE gate_fuel_uses_new RENAME TO gate_fuel_uses")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, column, ddl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(
@@ -918,6 +1001,7 @@ def init_db(path: str) -> sqlite3.Connection:
     conn = connect(path)
     conn.executescript(SCHEMA)
     _migrate(conn)
+    _migrate_gate_fuel_uses(conn)
     _backfill_pumpfun_wallets(conn)
     _backfill_signing_bots(conn)
     _backfill_builderbots(conn)

@@ -7,6 +7,17 @@
   {% for line in lines %}
   <p>{{ line }}</p>
   {% endfor %}
+  {# Out of fuel (2026-11-23): the no-fuel banner — the countdown
+     at 0 and the Buy $GATE button that opens the package popup.
+     Shown when a real trade was refused for no fuel, and live-updated
+     by the 30s poll: it hides itself the moment fuel is credited. #}
+  {% if gate_no_fuel %}
+  <div class="gate-no-fuel-banner" data-gate-no-fuel-show>
+    <p><strong>Out of $GATE fuel</strong> — <span data-gate-no-fuel-count>{{ gate_fuel.trades_left if gate_fuel and gate_fuel.trades_left is not none else 0 }}</span> trades left.</p>
+    <p class="muted small">Buy a $GATE package to keep trading — 1 trade credit per real trade. Your real bots are off until you refill.</p>
+    <p><button class="btn big gate-buy-btn" type="button" data-gate-buy-open>Buy $GATE</button></p>
+  </div>
+  {% endif %}
   <p><a class="btn big" href="{{ url_for('coin_detail', coin_id=coin_id) }}">← Back to coin</a> <a class="btn ghost big" href="{{ url_for('dashboard') }}">← Back to coins</a></p>
 </div>
 {% endblock %}

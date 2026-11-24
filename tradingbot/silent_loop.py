@@ -54,7 +54,6 @@ from .executor import (_skip, execute_real_trade, is_curve_complete,
                        pending_signature_for, reconcile_pending_trades)
 from . import gate_fuel as gate_fuel_mod
 from . import pit as pit_mod
-from .gate_fuel import is_fuel_enrolled
 from .jupiter_executor import execute_jupiter_swap
 from .ledger import record_trade
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
@@ -1454,9 +1453,6 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
     # any open claim against the chain BEFORE re-selling, so a
     # ladder rung can never double-sell after a restart between an
     # on-chain fill and the position close.
-    wallet_row = db.execute(
-        "SELECT pubkey FROM wallets WHERE user_id = ?",
-        (bot["user_id"],)).fetchone()
     try:
         gate_client = rpc_factory(cfg.rpc_url)
     except Exception:
@@ -1479,18 +1475,17 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
         actions.append({"action": "skip", "coin": coin,
                         "reason": "sell already in flight"})
         return
-    # $GATE fuel gate (2026-11-22): when fuel is on, a real trade
-    # needs 10,000 $GATE held — the live balance is read here,
-    # before anything executes. Not enrolled: open, nothing read.
-    ok, fuel_reason, _held, _left = gate_fuel_mod.fuel_gate_check(
-        db, cfg, gate_client,
-        wallet_row["pubkey"] if wallet_row else "", bot["user_id"])
-    if not ok:
+    # $GATE fuel gate (2026-11-23): a real sell costs 1 package
+    # credit. No fuel means no trade — the bot is turned off by
+    # the gate until the user refills. Paper sells never reach
+    # this branch.
+    if not gate_fuel_mod.enforce_fuel_gate(db, bot["user_id"]):
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': {reason} sell of {coin} "
-             f"skipped — {fuel_reason}.", bot["mode"])
+             f"skipped — out of $GATE fuel (0 trades left). Buy a "
+             f"$GATE package to resume.", bot["mode"])
         actions.append({"action": "skip", "coin": coin,
-                        "reason": fuel_reason})
+                        "reason": "out of fuel"})
         return
     # The claim is placed only once the fuel gate has passed: a
     # refused sell never holds a claim. An unconfirmed send leaves
@@ -1530,18 +1525,20 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
                 exec_price = proceeds_usd / amount
                 pnl_usd = (proceeds_usd
                            - amount * float(pos["avg_price"]))
-        record_trade(db, bot["user_id"], bot["id"], coin, "sell", amount,
-                     exec_price if exec_price is not None else price,
-                     (exec_price * amount if exec_price is not None
-                      else amount * price),
-                     pnl_usd=pnl_usd,
-                     exit_reason=reason, mode="real", now=_now(),
-                     signature=result.get("signature"),
-                     sol_amount=sol_received)
-        # Fuel drawdown: the trade executed — 10,000 $GATE from the
-        # held balance, keyed by the confirmed signature.
-        gate_fuel_mod.consume_gate_fuel(
-            db, bot["user_id"], result.get("signature"))
+        # $GATE fuel: one credit for this confirmed executed trade.
+        # The trade_id links the fuel-use row to the ledger row, so
+        # the count is recomputable from the ledger at any time.
+        trade_id = record_trade(
+            db, bot["user_id"], bot["id"], coin, "sell", amount,
+            exec_price if exec_price is not None else price,
+            (exec_price * amount if exec_price is not None
+             else amount * price),
+            pnl_usd=pnl_usd,
+            exit_reason=reason, mode="real", now=_now(),
+            signature=result.get("signature"),
+            sol_amount=sol_received)
+        gate_fuel_mod.consume_fuel(db, bot["user_id"], trade_id,
+                                   result.get("signature"))
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
                        "WHERE bot_id = ? AND coin_id = ?",
@@ -1729,19 +1726,19 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         actions.append({"action": "skip", "coin": coin,
                         "reason": "insufficient real balance"})
         return
-    # $GATE fuel gate (2026-11-22): when fuel is on, a real trade
-    # needs 10,000 $GATE held — the live balance is read here,
-    # before anything executes. Not enrolled: open, nothing read.
+    # $GATE fuel gate (2026-11-23): a real buy costs 1 package
+    # credit. No fuel means no trade — the bot is turned off by
+    # the gate until the user refills. Paper buys never reach
+    # this branch.
     # (The wallet + client above were read for the SOL balance
-    # check; the gate reuses them.)
-    ok, fuel_reason, _held, _left = gate_fuel_mod.fuel_gate_check(
-        db, cfg, client, wallet["pubkey"], bot["user_id"])
-    if not ok:
+    # check; the gate needs neither.)
+    if not gate_fuel_mod.enforce_fuel_gate(db, bot["user_id"]):
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': buy of {coin} skipped — "
-             f"{fuel_reason}.", bot["mode"])
+             f"out of $GATE fuel (0 trades left). Buy a $GATE "
+             f"package to resume.", bot["mode"])
         actions.append({"action": "skip", "coin": coin,
-                        "reason": fuel_reason})
+                        "reason": "out of fuel"})
         return
     # Price-gate context for the real executor: the decision price
     # is the scan price fetched at decision_price_as_of (the loop
@@ -1759,6 +1756,7 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         sol_price_usd=sol_price, sol_price_secondary=sol_price_secondary)
     if result.get("status") == "executed":
         coin_amount = float(result.get("coin_amount") or 0)
+        trade_id = None
         if coin_amount > 0:
             # Cost basis from the EXECUTED spend: the SOL the chain
             # actually took (wallet balance delta, including the
@@ -1792,16 +1790,20 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             # 8-digit trade ID. The recorded price is the executed
             # cost when known, else the mark price.
             buy_price = exec_avg if exec_avg is not None else price
-            record_trade(db, bot["user_id"], bot["id"], coin, "buy",
-                         coin_amount, buy_price,
-                         coin_amount * buy_price,
-                         mode="real", now=_now(),
-                         signature=result.get("signature"),
-                         sol_amount=sol_spent)
-            # Fuel drawdown: the trade executed — 10,000 $GATE from
-            # the held balance, keyed by the confirmed signature.
-            gate_fuel_mod.consume_gate_fuel(
-                db, bot["user_id"], result.get("signature"))
+            trade_id = record_trade(db, bot["user_id"], bot["id"],
+                                    coin, "buy",
+                                    coin_amount, buy_price,
+                                    coin_amount * buy_price,
+                                    mode="real", now=_now(),
+                                    signature=result.get("signature"),
+                                    sol_amount=sol_spent)
+        # $GATE fuel: one credit for this confirmed executed trade.
+        # The trade_id links the fuel-use row to the ledger row when
+        # one was written; a fill with no ledger row (zero tokens
+        # received) still counts by its signature — the transaction
+        # executed on-chain, so the credit is owed either way.
+        gate_fuel_mod.consume_fuel(db, bot["user_id"], trade_id,
+                                   result.get("signature"))
         if signals and signals.get("gain_pct") is not None:
             _record_signal_entry(db, bot["id"], coin, signals, _now())
         _log(db, bot["user_id"], "silent_buy",
@@ -2316,17 +2318,15 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             actions.append({"action": "skip", "coin": "",
                             "reason": halt_reason})
             return actions
-    # Pit fuel enrollment (pit real mode only): a Pit bot whose
-    # owner has never opted into $GATE fuel does not trade for free
-    # in the background — it is blocked with a plain message until
-    # the owner taps 'fuel trades with Gate' on the wallet page.
-    # The position exits above already ran; this gates only new
-    # buys. Logged once per day, not once per scan.
+    # Pit fuel (pit real mode only, 2026-11-23): a Pit bot trades
+    # real only while the owner holds package fuel credits — the
+    # package gate is the fuel check now (the old enrollment
+    # opt-in is gone). The position exits above already ran; this
+    # gates only new buys. Logged once per day, not once per scan.
     if kind == "pit" and bot["mode"] == "real":
-        if not is_fuel_enrolled(db, bot["user_id"]):
-            reason = ("Pit real trades need fuel enrollment — tap "
-                      "'fuel trades with Gate' on the wallet page "
-                      "to opt in. No buy this scan.")
+        if not gate_fuel_mod.has_fuel(db, bot["user_id"]):
+            reason = ("Pit real trades need $GATE fuel — buy a $GATE "
+                      "package to keep trading. No buy this scan.")
             if not _breaker_logged(db, bot["id"],
                                    "pit fuel enrollment"):
                 _log(db, bot["user_id"], "silent_skip",

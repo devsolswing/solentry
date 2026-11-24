@@ -423,7 +423,9 @@ class TestChooserRememberedInDb(HomeRedoBase):
                       self._html("/wallet"))
 
     def test_hud_mode_switch_also_marks_chosen(self):
-        resp = self.client.post("/mode", data={
+        # The chooser is the mode-setting route now (the /mode
+        # switch is gone): choosing a mode marks it chosen.
+        resp = self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"),
             "mode": "devnet"})
         self.assertEqual(resp.status_code, 302)

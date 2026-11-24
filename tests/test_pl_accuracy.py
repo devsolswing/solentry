@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import tradingbot.routes as routes
-from helpers import make_client, signup
+from helpers import grant_fuel, make_client, signup
 from tradingbot.ledger import bot_wl_summary
 from tradingbot.livefeed import LiveFeed
 from tradingbot.paper import holdings_value
@@ -75,6 +75,9 @@ class AccuracyBase(unittest.TestCase):
             "SELECT id FROM users WHERE username = 'alice'"
         ).fetchone()["id"]
         self.feed = self.app.config["LIVE_FEED"]
+        # Package fuel (2026-11-23): real round-trips cost 1 trade
+        # credit each — the P&L tests drive real execution.
+        grant_fuel(self.db, self.user_id, 100)
 
     def tearDown(self):
         self.rpc_patch.stop()

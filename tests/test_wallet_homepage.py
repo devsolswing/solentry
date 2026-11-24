@@ -31,7 +31,7 @@ from unittest import mock
 
 import tradingbot.prices as prices
 import tradingbot.routes as routes
-from helpers import csrf, login, make_client, signup
+from helpers import csrf, grant_fuel, login, make_client, signup
 from tradingbot.solana import generate_keypair
 
 DEST = "11111111111111111111111111111111"
@@ -456,6 +456,8 @@ class TestDetailTradingMint(HomeBase):
         self.assertIn("hold none", html)
 
     def test_real_sell_all_with_mocked_executor(self):
+        # Package fuel (2026-11-23): the real sell costs 1 credit.
+        grant_fuel(self.db, self.user_id, 100)
         self._choose_mode("devnet")
         mint = generate_keypair()[1]
         self.client.post("/bots/create", data={

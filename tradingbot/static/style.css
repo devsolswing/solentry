@@ -57,12 +57,41 @@ h3 { font-size: 15px; margin: 14px 0 6px; }
 /* $GATE fuel (2026-11-22): the trades-left chip in the topbar on
    every page, and the fuel strip under the $GATE holding on the
    wallet page. Gold when fuel remains, red at zero. */
-.fuel-chip { font-size: 12px; font-weight: 700; color: #ffd700; background: #000; border: 1px solid #ffb300; border-radius: 999px; padding: 4px 10px; white-space: nowrap; text-decoration: none; }
+/* $GATE fuel (2026-11-23): the Trades Left chip is black/gold
+   and prominent — it sits in the topbar where the mode switch
+   used to be. The logo is the $GATE coin image when the feed
+   can fetch it. */
+.fuel-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: #ffd700; background: #000; border: 2px solid #ffb300; border-radius: 999px; padding: 5px 12px; white-space: nowrap; text-decoration: none; }
 .fuel-chip.fuel-empty { color: #f87171; border-color: #f87171; }
-.gate-fuel-strip { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; margin: 0 0 8px; background: #160b08; border: 1px solid #ffb300; border-radius: 10px; font-size: 14px; }
-.gate-fuel-form { margin: 0; }
-.gate-presets { display: grid; gap: 10px; margin: 12px 0; }
-.gate-preset-btn { width: 100%; }
+.fuel-chip-logo { width: 18px; height: 18px; border-radius: 50%; }
+/* $GATE fuel row (2026-11-23): trades-left count + Buy $GATE,
+   under the action buttons on Home and under the wallet hero. */
+.gate-top-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0; padding: 8px 10px; background: #000; border: 2px solid #ffb300; border-radius: 10px; }
+.gate-top-count { font-size: 15px; font-weight: 700; color: #ffd700; }
+/* $GATE package popup (2026-11-23): fixed overlay, black/gold
+   card. The quote line shows the live SOL price while open. */
+.gate-popup { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.gate-popup-card { background: #111; border: 2px solid #ffb300; border-radius: 12px; padding: 16px; max-width: 420px; width: 100%; }
+.gate-popup-head { display: flex; justify-content: space-between; align-items: center; }
+.gate-close { background: none; border: none; color: #ffd700; font-size: 18px; cursor: pointer; }
+.gate-quote { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 10px 0; padding: 8px 10px; background: #000; border: 1px solid #ffb300; border-radius: 8px; }
+.gate-quote-label { font-size: 12px; color: #aaa; }
+.gate-quote-value { font-size: 16px; font-weight: 700; color: #ffd700; }
+.gate-quote-note { font-size: 12px; color: #aaa; }
+.gate-form { margin: 0; }
+.gate-bundles { display: grid; gap: 10px; margin: 12px 0; }
+.gate-bundle { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #444; border-radius: 10px; cursor: pointer; }
+.gate-bundle input { accent-color: #ffb300; }
+.gate-bundle-amount { font-weight: 700; color: #ffd700; }
+.gate-bundle-trades { font-size: 13px; color: #ccc; }
+.gate-bundle-price { margin-left: auto; font-weight: 700; }
+.gate-best { font-size: 13px; color: #ffd700; }
+.gate-hint { font-size: 12px; color: #aaa; }
+.gate-buy-btn { width: 100%; }
+/* Out-of-fuel banner (2026-11-23): shown on the trade result
+   page when a real trade was refused for no fuel. */
+.gate-no-fuel-banner { margin: 12px 0; padding: 12px; background: #160b08; border: 2px solid #f87171; border-radius: 10px; }
+.gatekeeper-card { cursor: default; }
 .live-stale { opacity: .55; }
 .addr { word-break: break-all; background: #000; border: 2px solid #ffb300; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 13px; }
 /* Plain refusal (coin detail Send/Receive when the coin is not a

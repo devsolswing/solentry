@@ -464,7 +464,9 @@ class TestAuditLog(unittest.TestCase):
             "SELECT id FROM users WHERE username = 'alice'"
         ).fetchone()["id"]
         token = csrf(self.client, "/dashboard")
-        self.client.post("/mode", data={
+        # The chooser logs kind 'mode_switch' (the /mode route is
+        # gone — mode is locked at sign-in).
+        self.client.post("/choose-mode", data={
             "csrf_token": token, "mode": "devnet",
         }, follow_redirects=True)
         row = self.db.execute(

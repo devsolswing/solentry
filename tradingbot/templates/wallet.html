@@ -38,6 +38,19 @@
     </div>
   </div>
 
+  {# $GATE fuel (2026-11-23): the fuel row under the action
+     buttons. Real mode: the live trades-left count from the
+     package ledger, with the Buy $GATE button beside it. Paper
+     mode: "free ~ ∞" — paper trades are free. #}
+  <div class="gate-top-row">
+    {% if mode == 'devnet' %}
+    <span class="gate-top-count"><span data-gate-fuel-count>{{ gate_fuel_trades_left if gate_fuel_trades_left is not none else '—' }}</span> trades left</span>
+    {% else %}
+    <span class="gate-top-count">free ~ ∞</span>
+    {% endif %}
+    <button class="btn small gate-buy-btn" type="button" data-gate-buy-open>Buy $GATE</button>
+  </div>
+
   {# Four action buttons: BUY gold with a cart icon, SELL red with a
      download icon, Send black/gold-border with a paper-plane icon,
      Receive black/gold-border with a download icon. All four are
@@ -133,28 +146,6 @@
         <span class="holdings-price-block"><span class="holdings-price">{% if row.price is not none %}{% if row.price >= 1 %}${{ "{:,.2f}".format(row.price) }}{% elif row.price >= 0.01 %}${{ "%.4f"|format(row.price) }}{% else %}${{ "%.8f"|format(row.price) }}{% endif %}{% else %}—{% endif %}</span><span class="holdings-amount muted">{{ "{:,.4f}".format(row.held) }} {{ row.ticker }}</span><span class="holdings-value-live" hidden><span data-live-value="{{ row.coin_id }}" data-live-amount="{{ row.held }}">{% if row.value is not none %}${{ "%.2f"|format(row.value) }}{% else %}value unavailable{% endif %}</span></span></span>
         <span class="holdings-1h{% if row.change_1h is not none %} {{ 'up' if row.change_1h >= 0 else 'down' }}{% else %} muted{% endif %}"><span data-live-change-1h="{{ row.coin_id }}" data-live-decimals="2">{% if row.change_1h is not none %}{% if row.change_1h >= 0 %}+{% endif %}{{ "%.2f"|format(row.change_1h) }}%{% else %}—{% endif %}</span></span>
       </a>
-      {# $GATE fuel strip (2026-11-22): under the $GATE row, real
-         mode only. The button enrolls held $GATE as fuel (10,000
-         $GATE per confirmed real trade); the counter shows trades
-         left from the held balance. Paper trades are free, so no
-         strip in paper mode. #}
-      {% if held_gate_mint and row.coin_id == held_gate_mint and mode == 'devnet' %}
-      <div class="gate-fuel-strip">
-        <span class="gate-fuel-text">
-          {% if gate_fuel_trades_left is not none %}
-          ⛽ Fuel: {{ gate_fuel_trades_left }} trade{{ 's' if gate_fuel_trades_left != 1 else '' }} left
-          {% else %}
-          ⛽ Fuel: unavailable right now
-          {% endif %}
-          <span class="muted small">(10,000 $GATE per real trade{% if gate_fuel_enrolled %} — fuel is on{% endif %})</span>
-        </span>
-        <form method="post" action="{{ url_for('gate_fuel_enroll') }}" class="gate-fuel-form">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="enrolled" value="{{ '0' if gate_fuel_enrolled else '1' }}">
-          <button class="btn small gate-fuel-btn" type="submit">{{ 'Stop fueling with Gate' if gate_fuel_enrolled else 'fuel trades with Gate' }}</button>
-        </form>
-      </div>
-      {% endif %}
       {% endfor %}
       {% if not coin_rows %}
       <p class="muted">You hold no coins in {{ mode_label }} yet — buy one below.</p>

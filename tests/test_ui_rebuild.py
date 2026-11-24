@@ -307,8 +307,10 @@ class TestHomePage(UiBase):
         nav = html.split('<nav class="hud"')[1].split("</nav>")[0]
         self.assertNotIn("Coins</a>", nav)
         self.assertNotIn("P&amp;L</a>", nav)
-        # The mode switch lives in the topbar, not a fifth tab.
-        self.assertIn('action="/mode"', html)
+        # No mode switch anywhere now (mode is locked at sign-in):
+        # the topbar shows the fuel chip instead of a switch form.
+        self.assertNotIn('action="/mode"', html)
+        self.assertIn("fuel-chip", html)
 
     def test_bottom_nav_uses_svg_icons(self):
         # The bottom nav uses clean inline SVG icons (house, robot,

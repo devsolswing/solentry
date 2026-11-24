@@ -72,7 +72,7 @@ class TestLogsPage(LogsBase):
         # The route is deleted, not redirected: 404 logged in and
         # out, in both modes.
         self.assertEqual(self.client.get("/pnl").status_code, 404)
-        self.client.post("/mode", data={
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
         self.assertEqual(self.client.get("/pnl").status_code, 404)
         self.client.get("/logout")
@@ -152,7 +152,7 @@ class TestLogsPage(LogsBase):
                        "2026-11-10T10:00:00Z", "paper")
         self._activity("real_buy", "Real buy",
                        "2026-11-10T10:01:00Z", "real")
-        self.client.post("/mode", data={
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/wallet"), "mode": "devnet"})
         html = self._html("/logs")
         self.assertIn("Real buy", html)

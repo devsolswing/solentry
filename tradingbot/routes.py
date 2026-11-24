@@ -737,13 +737,12 @@ def _cached_real_balance(app, pubkey: str):
 
 
 def _gate_fuel_trades_left(app, user):
-    """Trades left from the held $GATE balance, for the topbar chip
-    (base.html) — display only, cached 60s inside gate_fuel. None
-    when the user is not in real mode, has no wallet, or the
-    balance cannot be read (the chip hides). Never raises. The
-    counter itself is holdings-based and works on mainnet (see
-    gate_fuel.held_gate_mint) — the chip shows in real mode on
-    either network."""
+    """Trades left from the package ledger, for the topbar chip
+    (base.html) — the ledger truth, read fresh on every render
+    (a cheap DB read, no cache). The chip shows in real mode on
+    every page. None in paper mode (paper trades are free — the
+    template shows "free ~ ∞" there instead) and when the user
+    has no wallet. Never raises."""
     try:
         db = _db(app)
         if _active_mode(db, user["id"]) != "devnet":
@@ -751,8 +750,8 @@ def _gate_fuel_trades_left(app, user):
         wallet = _wallet(app, user["id"])
         if not wallet:
             return None
-        return gate_fuel_mod.cached_fuel_trades_left(
-            db, _cfg(app), user["id"], wallet["pubkey"])
+        return gate_fuel_mod.get_fuel(db, user["id"])[
+            "trades_remaining"]
     except Exception:
         return None
 
@@ -1323,16 +1322,25 @@ def register_routes(app: Flask) -> None:
                 "header_balance": header_balance,
                 "header_mode": header_balance["mode"]
                 if header_balance else "paper",
-                # $GATE fuel counter (2026-11-22): trades left from
-                # the held $GATE balance, in the topbar on every
-                # page. Display only — the trade gate itself reads
-                # the live balance on every trade. None when the
-                # balance cannot be read (the chip hides).
+                # $GATE fuel (2026-11-23): trades left from the
+                # package ledger, in the topbar on every page. The
+                # number is the ledger truth (see
+                # _gate_fuel_trades_left); the Buy $GATE popup and
+                # the GATEkeeper card read the same gate_fuel
+                # status, bundles, logo and pump.fun link below.
+                # None in paper mode — the template shows
+                # "free ~ ∞" there instead.
                 "gate_fuel_trades_left": (
                     _gate_fuel_trades_left(app, user) if user else None),
-                "gate_fuel_enrolled": (
-                    gate_fuel_mod.is_fuel_enrolled(_db(app), user["id"])
-                    if user else False),
+                "gate_fuel": (
+                    gate_fuel_mod.gatekeeper_status(_db(app), user["id"])
+                    if user else None),
+                "gate_bundles": gate_fuel_mod.bundles(),
+                "gate_quote_url": url_for("api_gate_quote"),
+                "gate_logo_url": gate_fuel_mod.get_gate_logo_url(
+                    gate_fuel_mod.gate_mint(_cfg(app))),
+                "gate_pumpfun_url": gate_fuel_mod.pumpfun_url(
+                    gate_fuel_mod.gate_mint(_cfg(app))),
                 # Page ID: the page's number in the top-left corner
                 # (see page_numbers.py — the single source of truth).
                 # None on popups, confirm screens and API/action
@@ -2246,17 +2254,7 @@ def register_routes(app: Flask) -> None:
                 "sol_price_usd": sol_price,
                 "popup_coin": popup_coin,
                 "trenches_rows": trenches_rows,
-                "trenches_error": trenches_error,
-                # Buy $GATE (2026-11-22): the mint the popup buys
-                # (buyability-gated). "held_gate_mint" is the mint
-                # whose HELD balance counts as fuel — the wallet
-                # fuel strip and the $GATE-first sort use it, so
-                # fuel works on mainnet whether or not buying more
-                # $GATE is currently possible.
-                "gate_mint": gate_fuel_mod.effective_gate_mint(
-                    _cfg(app)),
-                "held_gate_mint": gate_fuel_mod.held_gate_mint(
-                    _cfg(app))}
+                "trenches_error": trenches_error}
 
     @app.route("/dashboard")
     @login_required
@@ -2333,23 +2331,17 @@ def register_routes(app: Flask) -> None:
         $GATE out for a SOL amount (?sol=). Fail-closed: an
         unreadable or complete curve returns available=false and
         the screen disables buying — never a stale, cached, or
-        invented price. Mainnet returns available=false too: the
-        mainnet mint resolves, but no mainnet purchase path exists
-        yet (this screen's purchase flow is not wired for mainnet — the
-        pump.fun executor can trade bonding coins on mainnet now,
-        but this screen still disables buying there), so quoting
-        a price for a buy that cannot execute would be a lie."""
+        invented price. Mainnet quotes now too: the package buy
+        runs through the live executor on mainnet (the pump.fun
+        executor while $GATE is still bonding, Jupiter once it
+        graduates), so quoting a price for a buy that can execute
+        is honest."""
         cfg = _cfg(app)
-        mint = gate_fuel_mod.effective_gate_mint(cfg)
+        mint = gate_fuel_mod.gate_mint(cfg)
         if mint is None:
             return jsonify({"available": False,
                             "reason": "No $GATE mint is buyable on "
                             "this network right now."})
-        if cfg.network != "devnet":
-            return jsonify({"available": False,
-                            "reason": "$GATE cannot be bought on "
-                            "mainnet yet — no mainnet purchase path "
-                            "exists in the app."})
         try:
             rpc = SolanaRpcClient(cfg.rpc_url)
             curve, fee_bps = gate_fuel_mod.read_gate_curve(rpc, mint)
@@ -2378,27 +2370,169 @@ def register_routes(app: Flask) -> None:
                 curve, fee_bps, sol_in)
         return jsonify(quote)
 
-    @app.route("/gate-fuel/enroll", methods=["POST"])
+    def _gate_price_usd(app):
+        """Live $GATE price in USD, or None. Three sources, in order
+        — each is a live price, never a guess:
+        1. The live feed snapshot (on devnet the feed carries the
+           bonding-curve price, source 'curve'; DexScreener has no
+           pair for a bonding-curve token).
+        2. The devnet bonding curve directly (the same source the
+           feed polls) — so a buy works even before the feed's curve
+           poll has ticked.
+        3. The trenches feed (DexScreener) — the path for a
+           graduated / mainnet coin with a real pool.
+        None means no live price anywhere: the buy refuses rather
+        than pricing from a guessed number."""
+        mint = gate_fuel_mod.gate_mint(_cfg(app))
+        feed = app.config.get("LIVE_FEED")
+        if feed is not None:
+            try:
+                entry = (feed.snapshot([mint]) or {}).get(mint) or {}
+                if entry.get("price") is not None \
+                        and not entry.get("stale"):
+                    return float(entry["price"])
+            except (TypeError, ValueError):
+                pass
+        if _cfg(app).network == "devnet":
+            try:
+                from .devnet_watchlist import curve_price_usd
+                sol = _sol_price_usd()
+                if sol is not None:
+                    price, _curve = curve_price_usd(
+                        SolanaRpcClient(_cfg(app).rpc_url), mint, sol)
+                    if price is not None:
+                        return float(price)
+            except Exception:
+                pass
+        _coin, price, _source = _resolve_coin_price(mint)
+        try:
+            return float(price) if price is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _gate_no_fuel_context(app, user):
+        """The $GATE context a no-fuel result page needs: the
+        ledger-truth countdown (0), the bundles, the logo, the direct
+        pump.fun link, and the support ID to quote to tech support."""
+        db = _db(app)
+        return {
+            "gate_no_fuel": True,
+            "gate_fuel": gate_fuel_mod.gatekeeper_status(
+                db, user["id"]),
+            "gate_bundles": gate_fuel_mod.bundles(),
+            "gate_logo_url": gate_fuel_mod.get_gate_logo_url(
+                gate_fuel_mod.gate_mint(_cfg(app))),
+            "gate_pumpfun_url": gate_fuel_mod.pumpfun_url(
+                gate_fuel_mod.gate_mint(_cfg(app))),
+            "support_id": gate_fuel_mod.get_support_id(
+                db, user["id"]),
+        }
+
+    @app.route("/gate/buy", methods=["POST"])
     @login_required
-    def gate_fuel_enroll():
-        """Wallet-page fuel opt-in ("fuel trades with Gate"): enroll
-        held $GATE as fuel (each confirmed real trade then uses
-        10,000 $GATE), or stop fueling. The opt-in is a flag only —
-        no $GATE moves; the gate reads the live held balance on
-        every trade, so topping up resumes trading automatically
-        and running dry stops it, with no manual re-enable."""
+    def gate_buy():
+        """Buy one $GATE package: GATEkeeper swaps SOL for $GATE
+        on-chain straight through the pump.fun program while $GATE
+        is still bonding (Jupiter once it graduates), sends the
+        purchased $GATE straight to the dev wallet, and credits the
+        package's trades automatically once that transfer confirms
+        on-chain. The purchase itself never costs fuel.
+        Success or plain failure is flashed; the user lands back on
+        the homepage where the countdown shows the new balance."""
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
-        enrolled = (request.form.get("enrolled") or "").strip() == "1"
-        gate_fuel_mod.set_fuel_enrolled(db, user["id"], enrolled)
-        if enrolled:
-            flash("Fuel is on — each confirmed real trade will use "
-                  "10,000 $GATE from your held balance.")
+        cfg = _cfg(app)
+        bundle_id = (request.form.get("bundle_id") or "").strip()
+        price_usd = _gate_price_usd(app)
+        sol_price_usd = _sol_price_usd()
+        result = gate_fuel_mod.buy_gate_bundle(
+            db, cfg, user["id"], bundle_id, price_usd, sol_price_usd)
+        if result.get("ok"):
+            flash(f"Package bought — {result['trades_credited']} trades "
+                  f"credited. {result['trades_remaining']} trades left. "
+                  f"Send signature: {result['send_signature']}")
         else:
-            flash("Fuel is off — real trades no longer use your "
-                  "held $GATE.")
+            flash(result.get("error") or "Package purchase failed.")
         return redirect(url_for("wallet"))
+
+    @app.route("/api/gate-fuel")
+    @login_required
+    def api_gate_fuel():
+        """The fuel countdown as JSON, from the ledger truth — the
+        number the pages poll to count down live as trades execute.
+        No key material, ever."""
+        user = _current_user(app)
+        return jsonify(gate_fuel_mod.gatekeeper_status(
+            _db(app), user["id"]))
+
+    @app.route("/api/gate-quote")
+    @login_required
+    def api_gate_quote():
+        """Live SOL estimate for one package (?bundle=bundle_1m),
+        from the ONE pricing rule (gate_fuel.price_bundle_sol) —
+        the same number the buy itself charges. price_available
+        false means no live price: the popup disables Buy instead
+        of showing a guessed price. The CAD price is the package's
+        EXPECTED launch price, reference only; the SOL figure is
+        the live quote and is what the user pays."""
+        user = _current_user(app)
+        db = _db(app)
+        bundle = gate_fuel_mod.get_bundle(
+            (request.args.get("bundle") or "").strip())
+        if bundle is None:
+            return jsonify({"ok": False,
+                            "error": "Unknown package."}), 400
+        price_usd = _gate_price_usd(app)
+        sol_price_usd = _sol_price_usd()
+        sol_estimate = gate_fuel_mod.price_bundle_sol(
+            bundle, price_usd, sol_price_usd)
+        return jsonify({
+            "ok": True,
+            "bundle_id": bundle["id"],
+            "coins": bundle["coins"],
+            "trades": bundle["trades"],
+            # Bonus trades over the 1-trade-per-10,000-$GATE base
+            # (1M: 0, 5M: 50, 10M: 450).
+            "bonus": bundle["trades"] - bundle["coins"] // 10_000,
+            "cad_price": bundle["cad_price"],
+            "cad_price_note": "expected launch price",
+            "label": bundle["label"],
+            "badge": bundle["badge"],
+            "sol_estimate": sol_estimate,
+            "price_available": sol_estimate is not None,
+            "trades_remaining": gate_fuel_mod.get_fuel(
+                db, user["id"])["trades_remaining"],
+        })
+
+    @app.route("/admin/gate-support/<support_id>")
+    @login_required
+    def admin_gate_support(support_id: str):
+        """Admin-only support lookup by the 8-digit support ID:
+        the account, its fuel balance (ledger truth) and its package
+        purchases. Read-only, and it returns NO key material — the
+        ID identifies the account, it never grants access. Support
+        actions still go through the normal admin checks."""
+        user = _current_user(app)
+        if not _is_admin(user):
+            abort(403)
+        found = gate_fuel_mod.lookup_user_by_support_id(
+            _db(app), support_id)
+        if found is None:
+            return jsonify({"ok": False,
+                            "error": "No account holds that support "
+                                     "ID."}), 404
+        purchases = [dict(row) for row in _db(app).execute(
+            "SELECT bundle_id, coins, trades, sol_spent, buy_signature, "
+            "send_signature, status, created_at FROM gate_fuel_purchases "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 20",
+            (found["user_id"],)).fetchall()]
+        return jsonify({"ok": True,
+                        "user_id": found["user_id"],
+                        "username": found["username"],
+                        "support_id": found["support_id"],
+                        "fuel": found["fuel"],
+                        "purchases": purchases})
 
     @app.route("/choose-mode", methods=["POST"])
     @login_required
@@ -2407,8 +2541,9 @@ def register_routes(app: Flask) -> None:
         Real trading (mainnet on mainnet, devnet on devnet). Sets the user's active mode and
         remembers the choice for this session, so the popup does not
         come back on every page — only after the next sign-in (the
-        session is cleared on logout). The user can switch any time
-        from the HUD."""
+        session is cleared on logout). Mode is locked for the
+        session: the user changes it only by signing out in
+        Settings and choosing again at the next sign-in."""
         _csrf_check()
         user = _current_user(app)
         mode = (request.form.get("mode") or "").lower()
@@ -2428,35 +2563,6 @@ def register_routes(app: Flask) -> None:
              f"Trading mode chosen: {_mode_label(mode, _cfg(app))}.")
         flash(f"You are now on {_mode_label(mode, _cfg(app))}.")
         return redirect(url_for("wallet"))
-
-    @app.route("/mode", methods=["POST"])
-    @login_required
-    def mode_switch():
-        """Flip the header balance / buy default between Paper and
-        Devnet. A plain POST form (no JavaScript) so the switch works
-        in any browser, including in-app webviews. Sends the user back
-        to the page they came from when it is a safe same-site path.
-        """
-        _csrf_check()
-        user = _current_user(app)
-        mode = (request.form.get("mode") or "").lower()
-        if mode not in ("paper", "devnet"):
-            flash("That mode is not valid.")
-            return redirect(url_for("wallet"))
-        db = _db(app)
-        db.execute("UPDATE users SET active_mode = ? WHERE id = ?",
-                   (mode, user["id"]))
-        db.commit()
-        # A HUD switch is a mode choice too — the chooser must not
-        # come back while this sign-in lasts.
-        _mark_mode_chosen(db, user["id"])
-        _log(app, user["id"], "mode_switch",
-             f"Balance view switched to {mode}.")
-        ref = request.referrer or ""
-        path = urlparse(ref).path if ref else ""
-        if not path.startswith("/"):
-            path = url_for("wallet")
-        return redirect(path)
 
     # ------------------------------------------------------------------
     # Coin popup: tap a coin on the coins page and get Buy / Sell /
@@ -2759,13 +2865,14 @@ def register_routes(app: Flask) -> None:
                     feed.unsubscribe_mint(coin)
 
     def _coin_result(heading: str, lines: list, ok: bool,
-                     coin_id: str, mode_label: str):
+                     coin_id: str, mode_label: str, **extra):
         """The confirmation page after a popup action: what happened,
         the amounts, and the new balance/position — then back to the
-        coins screen."""
+        coins screen. Extra template context (for example the
+        no-fuel popup context) passes straight through."""
         return render_template(
             "coin_result.html", heading=heading, lines=lines, ok=ok,
-            coin_id=coin_id, mode_label=mode_label)
+            coin_id=coin_id, mode_label=mode_label, **extra)
 
     def _real_bot_for_trade(app, user, bot_id_raw: str):
         """The real bot a manual real trade is governed by. Returns
@@ -2945,19 +3052,24 @@ def register_routes(app: Flask) -> None:
         if error:
             return _coin_result("Nothing was bought", [error], False,
                                 coin_id_resolved, label)
-        # $GATE fuel gate (2026-11-22): when fuel is on, a real
-        # trade needs 10,000 $GATE held — the live balance is read
-        # here, before anything executes. Not enrolled: the gate is
-        # open and nothing is read. Paper trades never reach this
-        # branch, so paper stays free.
-        rpc = rpc_client_for_config(_cfg(app))
-        wallet_row = _wallet(app, user["id"])
-        ok, reason, _held, _left = gate_fuel_mod.fuel_gate_check(
-            db, _cfg(app), rpc,
-            wallet_row["pubkey"] if wallet_row else "", user["id"])
-        if not ok:
-            return _coin_result("Nothing was bought", [reason], False,
-                                coin_id_resolved, label)
+        # $GATE fuel gate (2026-11-23): a real buy costs 1 trade
+        # credit. It sits here — after the bot lookup, before the
+        # executor — so a trade that can never be attempted (no bot)
+        # is refused with its own reason, and a trade that can be
+        # attempted is never placed without fuel. No fuel means no
+        # trade: the page shows the no-fuel popup (logo, countdown
+        # at 0, Buy $GATE button) instead of placing the buy. The
+        # gate also turns the user's real bots off until they
+        # refill. Paper buys never reach this branch.
+        if not gate_fuel_mod.enforce_fuel_gate(db, user["id"]):
+            return _coin_result(
+                "Out of fuel",
+                ["You're out of $GATE fuel — this buy needs 1 trade "
+                 "credit and you have 0 left.",
+                 "Buy a $GATE package to keep trading. Your bots are "
+                 "off until you refill."],
+                False, coin_id_resolved, label,
+                **_gate_no_fuel_context(app, user))
         # The venue is the bonding curve: a graduated coin trades
         # through Jupiter (mainnet, gated behind James's go-ahead);
         # anything still bonding trades through the pump.fun
@@ -2966,6 +3078,7 @@ def register_routes(app: Flask) -> None:
         # the decision price is, the two SOL prices) travels with
         # the buy so the executor can check it against a fresh
         # on-chain read before signing.
+        rpc = rpc_client_for_config(_cfg(app))
         decision_age = _decision_price_age(app, coin_id_resolved)
         sol_price_usd, sol_price_secondary = _trade_sol_prices(app)
         try:
@@ -2999,11 +3112,13 @@ def register_routes(app: Flask) -> None:
                 [f"No buy was placed — "
                  f"{result.get('reason', 'real execution failed')}."],
                 False, coin_id_resolved, label)
-        # Fuel drawdown: the trade executed — 10,000 $GATE from the
-        # held balance, keyed by the confirmed signature. A
-        # bookkeeping failure never breaks the trade result.
-        gate_fuel_mod.consume_gate_fuel(
-            db, user["id"], result.get("signature"))
+        # Fuel drawdown: the trade executed — 1 package credit,
+        # keyed by the confirmed signature. A bookkeeping failure
+        # never breaks the trade result. Manual trades write no
+        # trade_ledger row, so the use row is keyed by signature
+        # only (trade_id None).
+        gate_fuel_mod.consume_fuel(
+            db, user["id"], None, result.get("signature"))
         coin_amount = float(result.get("coin_amount") or 0)
         # Cost basis from the SOL the chain actually took, when the
         # executor reported it — the amount asked for is not what
@@ -3204,20 +3319,24 @@ def register_routes(app: Flask) -> None:
         if error:
             return _coin_result("Nothing was sold", [error], False,
                                 coin_id_resolved, label)
-        # $GATE fuel gate (2026-11-22): same as the buy path — when
-        # fuel is on, a real trade needs 10,000 $GATE held, read
-        # live before anything executes. Not enrolled: open.
-        rpc = rpc_client_for_config(_cfg(app))
-        wallet_row = _wallet(app, user["id"])
-        ok, reason, _held, _left = gate_fuel_mod.fuel_gate_check(
-            db, _cfg(app), rpc,
-            wallet_row["pubkey"] if wallet_row else "", user["id"])
-        if not ok:
-            return _coin_result("Nothing was sold", [reason], False,
-                                coin_id_resolved, label)
+        # $GATE fuel gate (2026-11-23): same as the buy path — a
+        # real sell costs 1 trade credit. No fuel means no trade:
+        # the page shows the no-fuel popup instead of placing the
+        # sell. The gate also turns the user's real bots off until
+        # they refill. Paper sells never reach this branch.
+        if not gate_fuel_mod.enforce_fuel_gate(db, user["id"]):
+            return _coin_result(
+                "Out of fuel",
+                ["You're out of $GATE fuel — this sell needs 1 trade "
+                 "credit and you have 0 left.",
+                 "Buy a $GATE package to keep trading. Your bots are "
+                 "off until you refill."],
+                False, coin_id_resolved, label,
+                **_gate_no_fuel_context(app, user))
         # The venue is the bonding curve (see the buy path
         # above): graduated -> Jupiter, still bonding -> pump.fun,
         # unreadable -> refused plainly.
+        rpc = rpc_client_for_config(_cfg(app))
         try:
             complete = is_curve_complete(rpc, coin_id_resolved)
         except Exception:
@@ -3244,10 +3363,10 @@ def register_routes(app: Flask) -> None:
                 [f"No sell was placed — "
                  f"{result.get('reason', 'real execution failed')}."],
                 False, coin_id_resolved, label)
-        # Fuel drawdown: the trade executed — 10,000 $GATE from the
-        # held balance, keyed by the confirmed signature.
-        gate_fuel_mod.consume_gate_fuel(
-            db, user["id"], result.get("signature"))
+        # Fuel drawdown: the trade executed — 1 package credit,
+        # keyed by the confirmed signature.
+        gate_fuel_mod.consume_fuel(
+            db, user["id"], None, result.get("signature"))
         _remove_real_holding(db, user["id"], coin_id_resolved, amount)
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
@@ -3315,12 +3434,10 @@ def register_routes(app: Flask) -> None:
                                chart_range=chart_range)
         # $GATE at the top of the holdings list (2026-11-22): the
         # fuel coin comes first; everything else keeps its order
-        # (sorted is stable). The fuel strip in wallet.html renders
-        # under that row; the trades-left chip comes from
+        # (sorted is stable). The trades-left chip comes from
         # inject_globals, so no second balance read here. The sort
-        # uses the HELD mint, so $GATE stays first on mainnet
-        # whether or not buying more is currently possible.
-        gate_mint = data.get("held_gate_mint")
+        # uses the package mint.
+        gate_mint = gate_fuel_mod.gate_mint(_cfg(app))
         if gate_mint:
             data["coin_rows"] = sorted(
                 data["coin_rows"],

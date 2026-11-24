@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 import tradingbot.routes as routes
-from helpers import csrf, make_client, signup
+from helpers import csrf, grant_fuel, make_client, signup
 from tradingbot.assistant import parse_message
 from tradingbot.silent_loop import run_once
 
@@ -305,6 +305,9 @@ class TestSilentLoop(SilentBase):
         # app: the loop refuses it up front as an invalid token
         # address (the executor itself still answers "real swap not
         # available in v1" for a non-mint it is handed directly).
+        # Package fuel (2026-11-23): the loop must reach the
+        # address validation, not stop at the fuel gate.
+        grant_fuel(self.db, self.user_id, 100)
         self._insert_bot(silent=1, mode="real")
         outcomes = self._run(make_prices({"SOL": (100.0, 5.0)}),
                              rpc_balance=5_000_000_000)
@@ -327,6 +330,8 @@ class TestSilentLoop(SilentBase):
             return {"status": "executed", "signature": "fakesig1234567890",
                     "coin_amount": 0.001}
 
+        # Package fuel (2026-11-23): the real buy costs 1 credit.
+        grant_fuel(self.db, self.user_id, 100)
         self._insert_bot(silent=1, mode="real", coins=["BTC"])
         outcomes = self._run(make_prices({"BTC": (50000.0, 5.0)}),
                              rpc_balance=5_000_000_000, executor=executor)

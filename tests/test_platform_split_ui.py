@@ -42,7 +42,7 @@ from unittest import mock
 import tradingbot.jupiter as jupiter_mod
 import tradingbot.routes as routes
 import tradingbot.silent_loop as silent_loop
-from helpers import csrf, login, make_client, signup
+from helpers import csrf, grant_fuel, login, make_client, signup
 from tradingbot.silent_loop import default_real_executor, run_once
 from tradingbot.security import wipe_secret
 from tradingbot.wallet_keys import decrypt_wallet_secret
@@ -141,6 +141,9 @@ class SplitBase(unittest.TestCase):
         self.wallet_pubkey = self.db.execute(
             "SELECT pubkey FROM wallets WHERE user_id = ?",
             (self.user_id,)).fetchone()["pubkey"]
+        # Package fuel (2026-11-23): real buys/sells cost 1 trade
+        # credit — the popup/loop tests drive real execution.
+        grant_fuel(self.db, self.user_id, 100)
 
     def tearDown(self):
         for p in reversed(self._patches):
@@ -297,11 +300,18 @@ class TestModeSeparation(SplitBase):
         self.assertNotIn("Platform wallets", details)
 
     def test_mode_switch_in_hud_flips_dashboard(self):
-        self.client.post("/mode", data={
+        # Mode is locked at sign-in now: the chooser flips the
+        # dashboard label (the HUD /mode switch is gone — a POST
+        # to /mode 404s and changes nothing).
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/dashboard"), "mode": "devnet"},
             follow_redirects=True)
         self.assertIn("Real trading — devnet", self._html("/dashboard"))
-        self.client.post("/mode", data={
+        self.assertEqual(self.client.post("/mode", data={
+            "csrf_token": csrf(self.client, "/dashboard"), "mode": "paper"},
+            follow_redirects=True).status_code, 404)
+        self.assertIn("Real trading — devnet", self._html("/dashboard"))
+        self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/dashboard"), "mode": "paper"},
             follow_redirects=True)
         self.assertIn("Demo trading (paper)", self._html("/dashboard"))
@@ -712,7 +722,10 @@ class TestHud(SplitBase):
             # Four-button nav: Home / Bots / Wallet / Settings.
             for label in ("Home", "Bots", "Wallet", "Settings"):
                 self.assertIn(label, html, f"{path} missing {label}")
-            self.assertIn('action="/mode"', html, path)
+            # No mode switch anywhere now (mode is locked at
+            # sign-in): the topbar shows the fuel chip instead.
+            self.assertNotIn('action="/mode"', html, path)
+            self.assertIn("fuel-chip", html, path)
 
     def test_hud_not_on_login_page(self):
         self.client.get("/logout")
