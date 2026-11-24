@@ -354,8 +354,9 @@ class TestCoinRowsFeedFirst(AccuracyBase):
         self.feed.ingest(GATE, 0.05, "curve")
         p1, p2, p3 = self._no_dex()
         with p1, p2, p3:
-            rows = _coin_rows(self.db, self.user_id, "paper",
-                              self._prices(), feed=self.feed)
+            rows, _stale = _coin_rows(
+                self.db, self.user_id, "paper",
+                self._prices(), feed=self.feed)
         row = next(r for r in rows if r["coin_id"] == GATE)
         self.assertEqual(row["price"], 0.05)
         self.assertEqual(row["value"], 5.0)
@@ -366,8 +367,9 @@ class TestCoinRowsFeedFirst(AccuracyBase):
         self.feed.ingest(GATE, 0.05, "curve", now=time.time() - 120)
         p1, p2, p3 = self._no_dex()
         with p1, p2, p3:
-            rows = _coin_rows(self.db, self.user_id, "paper",
-                              self._prices(), feed=self.feed)
+            rows, _stale = _coin_rows(
+                self.db, self.user_id, "paper",
+                self._prices(), feed=self.feed)
         row = next(r for r in rows if r["coin_id"] == GATE)
         self.assertIsNone(row["price"])
         self.assertIsNone(row["value"])

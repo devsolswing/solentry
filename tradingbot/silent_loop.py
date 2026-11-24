@@ -176,6 +176,28 @@ def _live_sol_price_usd(feed, prices_data):
 
 # --- tuning build 2026-11-15: shared-engine guards ---------------------
 
+def _default_rpc_factory(cfg):
+    """rpc_factory for the loop's own RPC reads (top-10 watch, entry
+    gates, buy-path balance check, sell-claim reconcile): clients
+    built with the configured fallback RPC, so one rate-limited
+    endpoint cannot freeze every balance read (2026-11-24: the
+    bare SolanaRpcClient default left the Luna bot skipping every
+    trade with "token balance unavailable" while prices kept
+    moving). References the module-global SolanaRpcClient, so tests
+    patching silent_loop.SolanaRpcClient still intercept it (see
+    the test-mock trap: patch silent_loop.SolanaRpcClient as well
+    as executor.SolanaRpcClient, or the loop silently hits live
+    RPC). An injected rpc_factory (tests, or a future replacement)
+    is used exactly as before."""
+    fallback = (getattr(cfg, "rpc_fallback_url", "") or "").strip() or None
+    if fallback:
+        return lambda url: SolanaRpcClient(
+            url, fallback_rpc_url=fallback)
+    # No fallback configured: build bare, so a client class without
+    # the fallback kwarg (test fakes) still constructs.
+    return lambda url: SolanaRpcClient(url)
+
+
 def _top10_client_for_mint(cfg, mint: str, rpc_factory, cache: dict):
     """The RPC client that can serve a mint's top-10 data: the devnet
     RPC for devnet watchlist mints, the MAINNET RPC for every other
@@ -2990,7 +3012,7 @@ def top10_watch_loop(db_path: str, cfg: Config,
     the next one still runs. `feed` is the live feed, so a fired
     trigger prices from fresh ticks (including devnet curve prices)
     instead of DexScreener alone."""
-    rpc_factory = rpc_factory or SolanaRpcClient
+    rpc_factory = rpc_factory or _default_rpc_factory(cfg)
     while True:
         db = init_db(db_path)
         try:
@@ -3034,7 +3056,7 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
     if not mints:
         return actions
     now_ts = datetime.now(timezone.utc).timestamp()
-    rpc_factory = rpc_factory or SolanaRpcClient
+    rpc_factory = rpc_factory or _default_rpc_factory(cfg)
     real_executor = real_executor or default_real_executor
     for mint in mints:
         try:
@@ -3158,7 +3180,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     exactly as before.
     """
     price_fetcher = price_fetcher or get_prices
-    rpc_factory = rpc_factory or SolanaRpcClient
+    rpc_factory = rpc_factory or _default_rpc_factory(cfg)
     real_executor = real_executor or default_real_executor
     trenches_fetcher = trenches_fetcher or fetch_trenches_scan
     prices_data = price_fetcher()

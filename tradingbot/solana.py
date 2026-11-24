@@ -530,15 +530,47 @@ def sign_message(seed: bytes, message: bytes) -> tuple[str, str]:
     return base64.b64encode(serialized).decode("ascii"), base58_encode(signature)
 
 
+def rpc_client_for_url(cfg, url: str):
+    """RPC client for an arbitrary URL, with the configured fallback.
+
+    The fallback (publicnode) is tried only when the request itself
+    fails (transport error / timeout) — a node error response is
+    raised at once, never retried (see SolanaRpcClient._call).
+    Every balance read in the app must go through this (or
+    rpc_client_for_config): a bare SolanaRpcClient(url) has no
+    fallback, so one rate-limited endpoint freezes every balance
+    the page and the bots read (2026-11-24: the Home amounts froze
+    while prices kept moving, because prices come from DexScreener
+    and balances from this RPC)."""
+    fallback = (getattr(cfg, "rpc_fallback_url", "") or "").strip()
+    return SolanaRpcClient(url,
+                           fallback_rpc_url=fallback or None,
+                           timeout=10)
+
+
 def rpc_client_for_config(cfg):
     """The RPC client for trading reads: primary RPC_URL with the
     configured fallback (mainnet: a second public endpoint), and
     10-second read timeouts. Importing here would be circular, so
     this lives next to the client it builds."""
-    fallback = (getattr(cfg, "rpc_fallback_url", "") or "").strip()
-    return SolanaRpcClient(cfg.rpc_url,
-                           fallback_rpc_url=fallback or None,
-                           timeout=10)
+    return rpc_client_for_url(cfg, cfg.rpc_url)
+
+
+def held_token_balance(client, ata: str) -> int:
+    """Base units held in a token account, or 0 when the account
+    does not exist yet (an address that never held this token has
+    no token account — a normal answer, not an error). Any other
+    RPC failure is raised, so a down RPC is never mistaken for an
+    empty balance. Prefers the client's get_token_account
+    (None-on-missing); a client exposing only
+    get_token_account_balance keeps the old behaviour (a missing
+    account raises there, and the caller reports the balance as
+    unavailable)."""
+    get_acct = getattr(client, "get_token_account", None)
+    if get_acct is not None:
+        acct = get_acct(ata)
+        return int(acct["amount"]) if acct else 0
+    return client.get_token_account_balance(ata)
 
 
 # ---------------------------------------------------------------------------

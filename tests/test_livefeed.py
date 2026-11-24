@@ -382,7 +382,7 @@ class TestLoopSanitization(LiveFeedBase):
                 mock.patch.object(routes, "fetch_mint_1h_changes",
                                   return_value={}):
             # No feed: the spiked price inflates the row value.
-            rows = _coin_rows(self.db, self.user_id, "paper", prices)
+            rows, _stale = _coin_rows(self.db, self.user_id, "paper", prices)
             row = next(r for r in rows if r["coin_id"] == MINT)
             self.assertAlmostEqual(row["value"], 1000.0 * 400.0)
             # Feed seeded at the good price: the validated feed tick
@@ -390,7 +390,7 @@ class TestLoopSanitization(LiveFeedBase):
             # and the row is valued at the feed's $0.002, never at
             # the $400 spike.
             self.feed.ingest(MINT, 0.002, "dexscreener")
-            rows = _coin_rows(self.db, self.user_id, "paper", prices,
+            rows, _stale = _coin_rows(self.db, self.user_id, "paper", prices,
                               feed=self.feed)
             row = next(r for r in rows if r["coin_id"] == MINT)
             self.assertEqual(row["price"], 0.002)

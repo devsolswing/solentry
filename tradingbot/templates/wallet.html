@@ -133,6 +133,7 @@
      $ value. #}
   <h2 class="section-title">HOLDINGS</h2>
   <div class="coin-list-panel holdings-panel">
+    {% if balances_stale %}<p class="muted small">Token balances couldn't be read from the chain right now — the amounts below are the last saved ones, not live.</p>{% endif %}
     <div class="coin-list">
       {% for row in coin_rows %}
       <a class="coin-row holdings-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">

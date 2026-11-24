@@ -218,7 +218,7 @@ class TestHomeRowsEnriched(WiringBase):
         for p in patches:
             p.start()
         try:
-            rows = routes._coin_rows(
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "paper",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}), feed=feed)
         finally:
@@ -242,7 +242,7 @@ class TestHomeRowsEnriched(WiringBase):
         for p in patches:
             p.start()
         try:
-            rows = routes._coin_rows(
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "paper",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}), feed=feed)
         finally:
@@ -267,7 +267,7 @@ class TestHomeRowsEnriched(WiringBase):
                 return_value={"pairs": []}), mock.patch.object(
                 home_holdings, "_default_head",
                 return_value=(404, "text/html")):
-            rows = routes._coin_rows(
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "paper",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}), feed=feed)
         by_id = {r["coin_id"]: r for r in rows}
@@ -296,8 +296,9 @@ class TestGateReconciliation(WiringBase):
                 mock.patch.object(
                     routes, "fetch_prices_for_mints",
                     return_value={GATE_MINT: 0.00001}), \
-                mock.patch.object(routes, "SolanaRpcClient", FakeRpc):
-            rows = routes._coin_rows(
+                mock.patch.object(routes, "rpc_client_for_url",
+                                lambda cfg, url: FakeRpc(url)):
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "devnet",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}),
                 feed=feed, app=self.app)
@@ -318,9 +319,9 @@ class TestGateReconciliation(WiringBase):
         self._hold_real(MINT, 50.0, 0.02)
         feed = FakeFeed()
         with mock.patch.object(
-                routes, "SolanaRpcClient",
-                lambda url: FakeRpc(url, raise_on_call=True)):
-            rows = routes._coin_rows(
+                routes, "rpc_client_for_url",
+                lambda cfg, url: FakeRpc(url, raise_on_call=True)):
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "devnet",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}),
                 feed=feed, app=self.app)
@@ -334,9 +335,9 @@ class TestGateReconciliation(WiringBase):
         self._hold_real(MINT, 50.0, 0.02)
         feed = FakeFeed()
         with mock.patch.object(
-                routes, "SolanaRpcClient",
-                lambda url: FakeRpc(url, gate=False)):
-            rows = routes._coin_rows(
+                routes, "rpc_client_for_url",
+                lambda cfg, url: FakeRpc(url, gate=False)):
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "devnet",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}),
                 feed=feed, app=self.app)
@@ -362,8 +363,8 @@ class TestGateReconciliation(WiringBase):
                     mock.patch.object(
                         routes, "fetch_prices_for_mints",
                         return_value={GATE_MINT: 0.00001}), \
-                    mock.patch.object(routes, "SolanaRpcClient",
-                                      FakeRpc):
+                    mock.patch.object(routes, "rpc_client_for_url",
+                                      lambda cfg, url: FakeRpc(url)):
                 resp = self.client.get("/wallet")
         finally:
             for p in patches:

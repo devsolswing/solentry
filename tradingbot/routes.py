@@ -89,7 +89,7 @@ from .silent_loop import _open_position
 from .solana import (SolanaRpcClient, build_signed_transfer,
                      generate_keypair, is_valid_address,
                      lamports_to_sol, rpc_client_for_config,
-                     sol_to_lamports)
+                     rpc_client_for_url, sol_to_lamports)
 from .trenches import (fetch_mint_1h_changes, fetch_mint_24h_changes,
                        fetch_mint_identities, fetch_prices_for_mints,
                        fetch_trenches_scan)
@@ -353,9 +353,12 @@ def _wallet(app, user_id: int):
 
 
 def _real_balance(app, pubkey: str):
-    """SOL balance or None when the RPC is unreachable (never faked)."""
+    """SOL balance or None when the RPC is unreachable (never faked).
+    Uses the fallback RPC (see rpc_client_for_url): the bare client
+    used to freeze the header balance whenever the primary endpoint
+    rate-limited, while prices kept moving."""
     try:
-        client = SolanaRpcClient(_cfg(app).rpc_url)
+        client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
         return lamports_to_sol(client.get_balance_lamports(pubkey))
     except Exception:
         return None
@@ -435,13 +438,17 @@ def _real_holdings_view(db, user_id: int) -> list:
     return [merged[k] for k in sorted(merged)]
 
 
-def _reconciled_real_holdings(app, db, user_id: int) -> list:
+def _reconciled_real_holdings(app, db, user_id: int) -> tuple[list, bool]:
     """Real holdings with on-chain balances merged in (devnet).
 
     The chain is the truth for the AMOUNT held: a coin the wallet
     holds on-chain but the DB never recorded (its buys were
     recorded as failed, e.g. Gate) appears with avg_price=None and
-    on_chain_only=True. Any failure (no wallet, RPC down, partial
+    on_chain_only=True. Returns (holdings, chain_ok): chain_ok is
+    False only when the wallet exists and the on-chain read failed
+    — then the rows are the DB's last saved amounts and the page
+    MUST say so (balances_stale, shown on Home), never present
+    them as live. Any failure (no wallet, RPC down, partial
     read) falls back to the DB view alone — a chain problem must
     never hide a recorded holding. Nothing here writes to the DB;
     the reconciliation is per-render only."""
@@ -449,12 +456,13 @@ def _reconciled_real_holdings(app, db, user_id: int) -> list:
     try:
         wallet = _wallet(app, user_id)
         if not wallet:
-            return db_rows
-        client = SolanaRpcClient(_cfg(app).rpc_url)
-        chain = fetch_chain_token_balances(client, wallet["pubkey"])
-        return reconcile_holdings(db_rows, chain)
+            return db_rows, True
+        client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
+        chain, chain_ok = fetch_chain_token_balances(
+            client, wallet["pubkey"])
+        return reconcile_holdings(db_rows, chain), chain_ok
     except Exception:
-        return db_rows
+        return db_rows, False
 
 
 def _record_real_holding(db, user_id: int, mint: str, coin_amount: float,
@@ -543,9 +551,13 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
                feed=None, app=None) -> list:
     """The coins list: ONLY the coins the user holds in the ACTIVE
     mode, with name, ticker, current price, P&L and 1-hour % change.
-    Coins the user does not hold are not listed here at all — the
-    trenches list and the quick Buy/Sell popup (with live search)
-    are how new coins are found. P&L is (current price − average
+    Returns (rows, balances_stale): balances_stale is True only in
+    real mode when the on-chain balance read failed, so the amounts
+    shown are the DB's last saved ones — the caller must surface
+    that on the page instead of presenting them as live. Coins the
+    user does not hold are not listed here at all — the trenches
+    list and the quick Buy/Sell popup (with live search) are how
+    new coins are found. P&L is (current price − average
     cost) × amount; a holding with no current price has P&L None
     and is valued at cost — never guessed. A holding with no
     cost basis (on-chain only, e.g. Gate, whose buys were recorded
@@ -576,10 +588,16 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     with no live price — it has no feed any more, so it can never
     be priced, but it is never hidden either."""
     price_map = {c: e.get("price") for c, e in prices["prices"].items()}
+    balances_stale = False
     if mode == "devnet":
         if app is not None:
-            held = {h["coin_id"]: h for h in
-                    _reconciled_real_holdings(app, db, user_id)}
+            held_rows, chain_ok = _reconciled_real_holdings(
+                app, db, user_id)
+            held = {h["coin_id"]: h for h in held_rows}
+            # The chain read failed: the amounts below are the DB's
+            # last saved ones, not live — the page must say so (the
+            # caller puts balances_stale in the template data).
+            balances_stale = not chain_ok
         else:
             held = {h["coin_id"]: h for h in _real_holdings_view(db, user_id)}
     else:
@@ -716,7 +734,7 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     # no history keeps the ticker-initial icon / no sparkline.
     for row in rows:
         enrich_row(row, feed=feed, db=db, rpc_url=rpc_url)
-    return rows
+    return rows, balances_stale
 
 
 # On-chain SOL balances are cached 60 seconds per wallet so the
@@ -1038,7 +1056,7 @@ def _token_send_fee_note(app, wallet_pubkey: str, intent) -> str:
     cannot be checked, the note says the rent may apply instead
     of guessing a number."""
     try:
-        client = SolanaRpcClient(_cfg(app).rpc_url)
+        client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
         inspection = token_send_mod.inspect_token(
             client, wallet_pubkey, intent["mint"], intent["destination"])
     except Exception:
@@ -1084,7 +1102,7 @@ def _confirm_token_send(app, user, intent, return_to, return_coin_id):
     if not wallet:
         _fail("No app wallet.")
         return _done()
-    client = SolanaRpcClient(_cfg(app).rpc_url)
+    client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
     try:
         inspection = token_send_mod.inspect_token(
             client, wallet["pubkey"], mint, intent["destination"])
@@ -2172,7 +2190,9 @@ def register_routes(app: Flask) -> None:
         real_sol = (_real_balance(app, wallet["pubkey"])
                     if wallet and mode == "devnet" else None)
         prices = get_prices()
-        coin_rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
+        coin_rows, balances_stale = _coin_rows(
+            db, user["id"], mode, prices,
+            feed=app.config.get("LIVE_FEED"), app=app)
         # A holding with no live price is valued at cost, like the
         # P&L page — never $0. (A mint the feed cannot price yet
         # still has its cost basis.)
@@ -2209,9 +2229,23 @@ def register_routes(app: Flask) -> None:
         if chart_range not in pnl_mod.RANGES:
             chart_range = "all"
         if mode == "devnet":
-            portfolio_sol = real_sol
-            portfolio_usd = (real_sol * sol_price
-                             if real_sol is not None and sol_price
+            # The header total is the whole portfolio: on-chain SOL
+            # + holdings at the SAME amounts and prices the rows
+            # above show (holdings_value is priced from those rows;
+            # a row with no live price is valued at cost, as the
+            # rows are). Before this fix the total was the SOL
+            # balance alone, so it read 0.0030 SOL while the rows
+            # below it were worth ~$3.94. Without a live SOL price
+            # the holdings cannot be expressed in SOL, so the total
+            # falls back to the SOL balance alone.
+            holdings_sol = (holdings_value / sol_price
+                            if sol_price else None)
+            if real_sol is not None and holdings_sol is not None:
+                portfolio_sol = real_sol + holdings_sol
+            else:
+                portfolio_sol = real_sol
+            portfolio_usd = (portfolio_sol * sol_price
+                             if portfolio_sol is not None and sol_price
                              else None)
             _points, portfolio_has_data = pnl_mod.chart_points_real(
                 db, user["id"], chart_range)
@@ -2221,8 +2255,13 @@ def register_routes(app: Flask) -> None:
             portfolio_has_data = len(_points) > 0
             portfolio_chart_svg = pnl_mod.chart_svg(
                 _points, unit="SOL ")
+            # The 24h % stays on the SOL balance alone: snapshots
+            # record real_sol only, so a holdings-inclusive current
+            # total against a SOL-only baseline would inflate the
+            # %. The % tracks the SOL balance until snapshots
+            # record the full portfolio total (follow-up).
             change_24h = pnl_mod.change_24h(
-                db, user["id"], portfolio_sol, real=True)
+                db, user["id"], real_sol, real=True)
         else:
             portfolio_sol = None
             portfolio_usd = _paper(app, user["id"]) + holdings_value
@@ -2262,6 +2301,7 @@ def register_routes(app: Flask) -> None:
                 "holdings_value": holdings_value, "prices": prices,
                 "bots": bots, "activity": activity,
                 "coin_rows": coin_rows, "mode": mode,
+                "balances_stale": balances_stale,
                 "mode_label": _mode_label(mode, _cfg(app)),
                 "portfolio_sol": portfolio_sol,
                 "portfolio_usd": portfolio_usd,
@@ -2636,7 +2676,7 @@ def register_routes(app: Flask) -> None:
         if coin_id_resolved is None:
             abort(404)
         prices = get_prices()
-        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
+        rows, _balances_stale = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
         if row is None:
@@ -2669,7 +2709,7 @@ def register_routes(app: Flask) -> None:
         if coin_id_resolved is None:
             abort(404)
         prices = get_prices()
-        rows = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
+        rows, _balances_stale = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
         if row is None:
@@ -3563,7 +3603,7 @@ def register_routes(app: Flask) -> None:
         if not wallet:
             flash("No app wallet.")
             return redirect(url_for("wallet_details"))
-        client = SolanaRpcClient(_cfg(app).rpc_url)
+        client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
         try:
             plan = rent_reclaim_mod.plan_reclaim(
                 client, wallet["pubkey"],
@@ -3622,7 +3662,7 @@ def register_routes(app: Flask) -> None:
         if not confirmed:
             flash("Nothing was confirmed to reclaim.")
             return redirect(url_for("wallet_reclaim"))
-        client = SolanaRpcClient(_cfg(app).rpc_url)
+        client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
         try:
             plan = rent_reclaim_mod.plan_reclaim(
                 client, wallet["pubkey"],
@@ -3814,7 +3854,7 @@ def register_routes(app: Flask) -> None:
                 if not wallet:
                     flash("No app wallet yet.")
                     return redirect(url_for("wallet_send"))
-                client = SolanaRpcClient(_cfg(app).rpc_url)
+                client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
                 try:
                     inspection = token_send_mod.inspect_token(
                         client, wallet["pubkey"], token, destination)

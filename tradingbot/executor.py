@@ -92,7 +92,8 @@ from .solana import (ATA_RENT_FALLBACK_LAMPORTS,
                      base58_encode, build_compute_budget_price_instruction,
                      build_message,
                      ed25519_publickey_from_seed, is_valid_address,
-                     lamports_to_sol, priority_fee_from_samples,
+                     held_token_balance, lamports_to_sol,
+                     priority_fee_from_samples,
                      rpc_client_for_config, sign_message,
                      sol_to_lamports)
 
@@ -689,8 +690,8 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
         accts = pumpfun.derive_trade_accounts(
             mint, wallet_pubkey, token_program, buyback_recipients[0])
         try:
-            held = rpc.get_token_account_balance(
-                accts["associated_base_user"])
+            held = held_token_balance(
+                rpc, accts["associated_base_user"])
         except Exception:
             return _skip("token balance unavailable")
         if token_base > held:

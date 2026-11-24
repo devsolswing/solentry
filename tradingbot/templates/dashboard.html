@@ -17,6 +17,7 @@
 {% if support_id %}<p class="muted small">Your signing bot — Support ID: <b>{{ support_id }}</b> (for tech support — this ID cannot be changed)</p>{% endif %}
 
 <h1>Coins</h1>
+{% if balances_stale %}<p class="muted small">Token balances couldn't be read from the chain right now — the amounts below are the last saved ones, not live.</p>{% endif %}
 <div class="coin-list">
   {% for row in coin_rows %}
   <a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">

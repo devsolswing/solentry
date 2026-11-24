@@ -147,7 +147,7 @@ class TestHomeRebuildNavigation(HomeMockupBase):
              "image_url": None, "sparkline_svg": ""},
         ]
         with mock.patch.object(routes, "_coin_rows",
-                               return_value=rows):
+                               return_value=(rows, False)):
             self._choose_mode("paper")
             html = self._html("/wallet")
         self.assertIn("/coins/PEPE/detail", html)
@@ -172,7 +172,7 @@ class TestHomeRebuildNavigation(HomeMockupBase):
              "sparkline_svg": hh.sparkline_svg([9.0, 10.0, 11.0])},
         ]
         with mock.patch.object(routes, "_coin_rows",
-                               return_value=rows):
+                               return_value=(rows, False)):
             self._choose_mode("paper")
             html = self._html("/wallet")
         row = html.split("holdings-row")[1]

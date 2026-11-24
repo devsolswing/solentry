@@ -102,7 +102,7 @@ from .pumpfun import (TOKEN_BASE, bonding_curve_pda, buy_quote,
 from .security import wipe_secret
 from .signing_bot import ensure_signing_bot, is_valid_support_id
 from .solana import (SolanaRpcClient, is_valid_address, lamports_to_sol,
-                     sol_to_lamports)
+                     rpc_client_for_url, sol_to_lamports)
 from . import token_send as token_send_mod
 from .wallet_keys import temporary_wallet_secret
 
@@ -896,7 +896,7 @@ def send_bundle_to_dev_wallet(db: sqlite3.Connection, cfg: Config,
     signed transaction is sent only after the wipe. No key material
     is ever logged, stored, or sent anywhere."""
     rpc = rpc_client if rpc_client is not None \
-        else SolanaRpcClient(cfg.rpc_url)
+        else rpc_client_for_url(cfg, cfg.rpc_url)
 
     def _attempt() -> tuple[str | None, str | None, bool]:
         """One send attempt. Returns (signature, reason, retryable).
@@ -1042,7 +1042,7 @@ def buy_gate_bundle(db: sqlite3.Connection, cfg: Config, user_id: int,
         return {"ok": False, "error": "No app wallet."}
     wallet_pubkey = wallet["pubkey"]
     rpc = rpc_client if rpc_client is not None \
-        else SolanaRpcClient(cfg.rpc_url)
+        else rpc_client_for_url(cfg, cfg.rpc_url)
     try:
         balance_lamports = rpc.get_balance_lamports(wallet_pubkey)
     except Exception:

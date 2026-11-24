@@ -86,7 +86,12 @@ class TestAssistantHttp(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
-        self.rpc_patch = mock.patch.object(routes, "SolanaRpcClient", FakeRpc)
+        # Balance reads go through rpc_client_for_url (with the
+        # fallback) since the 2026-11-24 balance-read fix —
+        # patch the factory, not the client class.
+        self.rpc_patch = mock.patch.object(
+            routes, "rpc_client_for_url",
+            lambda cfg, url: FakeRpc(url))
         self.rpc_patch.start()
         signup(self.client, "alice")
 

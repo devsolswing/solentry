@@ -280,7 +280,8 @@ class TestFetchChainTokenBalances(unittest.TestCase):
                                         "decimals": 9,
                                         "uiAmount": 2.5}}}}}}]},
         })
-        balances = hh.fetch_chain_token_balances(rpc, "WALLET")
+        balances, ok = hh.fetch_chain_token_balances(rpc, "WALLET")
+        self.assertTrue(ok)
         by_mint = {b["mint"]: b for b in balances}
         self.assertEqual(
             by_mint["MINTA"]["ui_amount"], 550340693.346715)
@@ -291,7 +292,8 @@ class TestFetchChainTokenBalances(unittest.TestCase):
     def test_rpc_failure_returns_empty(self):
         rpc = FakeRpc({
             ("getTokenAccountsByOwner", None): RuntimeError("rpc down")})
-        self.assertEqual(hh.fetch_chain_token_balances(rpc, "W"), [])
+        self.assertEqual(hh.fetch_chain_token_balances(rpc, "W"),
+                         ([], False))
 
 
 class TestReconcileHoldings(unittest.TestCase):
@@ -539,7 +541,7 @@ class TestHomeMockupLayout(HomeMockupBase):
                "image_url": "https://assets.coingecko.com/sol.png",
                "sparkline_svg": hh.sparkline_svg([9.0, 10.0, 11.0])}
         with mock.patch.object(routes, "_coin_rows",
-                               return_value=[row]):
+                               return_value=([row], False)):
             self._choose_mode("paper")
             html = self._html("/wallet")
         self.assertIn(
@@ -553,7 +555,7 @@ class TestHomeMockupLayout(HomeMockupBase):
                "price": 10.0, "change_1h": 2.5, "held": 1.0,
                "value": 10.0, "is_mint": False}
         with mock.patch.object(routes, "_coin_rows",
-                               return_value=[row]):
+                               return_value=([row], False)):
             self._choose_mode("paper")
             html = self._html("/wallet")
         self.assertNotIn("coin-img", html)

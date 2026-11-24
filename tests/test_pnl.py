@@ -50,7 +50,9 @@ class PnlBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
-        self.rpc_patch = mock.patch.object(routes, "SolanaRpcClient")
+        # Balance reads go through rpc_client_for_url (with the
+        # fallback) since the 2026-11-24 balance-read fix.
+        self.rpc_patch = mock.patch.object(routes, "rpc_client_for_url")
         fake = self.rpc_patch.start()
         fake.return_value.get_balance_lamports.return_value = 2_000_000_000
         signup(self.client, "alice")

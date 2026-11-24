@@ -104,7 +104,8 @@ from .solana import (ASSOCIATED_TOKEN_PROGRAM,
                      base58_encode, compact_u16_encode,
                      ed25519_publickey_from_seed, ed25519_sign,
                      find_associated_token_address, is_valid_address,
-                     lamports_to_sol, rpc_client_for_config,
+                     held_token_balance, lamports_to_sol,
+                     rpc_client_for_config,
                      sol_to_lamports, SolanaRpcClient)
 
 # A quote that moves the price more than this refuses plainly —
@@ -826,7 +827,7 @@ def _execute_jupiter_sell(bot, user_id, mint, decimals,
         return _skip("amount too small to sell")
     coin_ata = find_associated_token_address(wallet_pubkey, mint)
     try:
-        held = rpc.get_token_account_balance(coin_ata)
+        held = held_token_balance(rpc, coin_ata)
     except Exception:
         return _skip("token balance unavailable")
     if token_base > held:

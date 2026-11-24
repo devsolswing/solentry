@@ -173,7 +173,7 @@ class TestHoldingsRowExact(HomeMockupBase):
                "price": 10.0, "change_1h": 2.5, "held": 1.0,
                "value": 10.0, "is_mint": False}
         with mock.patch.object(routes, "_coin_rows",
-                               return_value=[row]):
+                               return_value=([row], False)):
             self._choose_mode("paper")
             html = self._html("/wallet")
         self.assertIn('data-sparkline-coin="SOL"', html)

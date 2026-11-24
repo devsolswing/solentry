@@ -372,7 +372,7 @@ class TestCoinRowsChange1h(HomeLiftBase):
                 mock.patch.object(
                 routes, "fetch_mint_1h_changes",
                 return_value={MINT: -3.25, GATE_MINT: 4.0}):
-            rows = routes._coin_rows(
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "paper",
                 make_prices({"SOL": (10.0, 5.25, 2.5)}))
         by_id = {r["coin_id"]: r for r in rows}
@@ -394,7 +394,7 @@ class TestCoinRowsChange1h(HomeLiftBase):
                 routes, "fetch_prices_for_mints",
                 return_value={MINT: 0.5}), mock.patch.object(
                 routes, "fetch_mint_1h_changes", return_value={}):
-            rows = routes._coin_rows(
+            rows, _stale = routes._coin_rows(
                 self.db, self.user_id, "paper",
                 make_prices({"SOL": (10.0, 5.25)}))
         by_id = {r["coin_id"]: r for r in rows}

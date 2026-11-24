@@ -233,20 +233,25 @@ def sparkline_points_for_coin(coin_id: str, is_mint: bool = False,
         return []
 
 
-def fetch_chain_token_balances(rpc, pubkey: str) -> list:
+def fetch_chain_token_balances(rpc, pubkey: str) -> tuple[list, bool]:
     """Token balances the wallet actually holds on-chain.
 
     Reads `getTokenAccountsByOwner` (parsed) for the legacy SPL
     Token program and Token-2022, and returns
-    [{mint, amount (base units), decimals, ui_amount}] with zero
-    balances skipped. `rpc` is the app's SolanaRpcClient (anything
+    ([{mint, amount (base units), decimals, ui_amount}], ok) with
+    zero balances skipped. `ok` is False only when BOTH program
+    reads failed (the chain was unreachable) — a partial read still
+    reports ok=True with the balances it could read, and the
+    caller keeps its DB rows for the rest. Total failure returns
+    ([], False). `rpc` is the app's SolanaRpcClient (anything
     with a `_call(method, params)`). A program that errors is
-    skipped; total failure returns []. Amounts come from the chain
-    only — never from the app's DB.
+    skipped. Amounts come from the chain only — never from the
+    app's DB.
     """
     if rpc is None or not pubkey:
-        return []
+        return [], False
     out: dict = {}
+    ok = False
     for program_id in (TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID):
         try:
             result = rpc._call(
@@ -255,6 +260,7 @@ def fetch_chain_token_balances(rpc, pubkey: str) -> list:
                  {"encoding": "jsonParsed"}])
         except Exception:
             continue
+        ok = True
         for acct in (result or {}).get("value") or []:
             try:
                 info = (acct.get("account", {}).get("data", {})
@@ -278,7 +284,7 @@ def fetch_chain_token_balances(rpc, pubkey: str) -> list:
                     entry["amount"] += amount
             except (TypeError, ValueError, AttributeError):
                 continue
-    return [out[k] for k in sorted(out)]
+    return [out[k] for k in sorted(out)], ok
 
 
 def reconcile_holdings(db_rows, chain_balances) -> list:
