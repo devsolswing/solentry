@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Reclaim rent — SolEntry{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Reclaim SOL rent</h1>
+  <p class="muted">Every token account locks about 0.002 SOL in rent. Empty accounts can be closed and the rent comes straight back to your wallet, instantly. Holdings worth $0.00 are burned to the incinerator first, then closed.</p>
+
+  {% if mode != "devnet" %}
+  <p><strong>Preview only.</strong> You are in {{ mode_label }} — reclaim runs on your real wallet. This page shows what would be reclaimed; switch to Real trading to run it.</p>
+  {% endif %}
+
+  {% if plan["skipped_unpriced"] %}
+  <p class="muted">Some holdings could not be priced, so they are not listed for burning — a holding is never burned without a price: {% for s in plan["skipped_unpriced"] %}{{ s["mint"][:8] }}…{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {% endif %}
+
+  {% if not plan["items"] %}
+  <p>Nothing to reclaim right now — no empty token accounts and no $0.00 holdings.</p>
+  {% else %}
+  <table>
+    <tr><th>What</th><th>Token</th><th>Amount</th><th>Value</th><th>Rent back</th></tr>
+    {% for item in plan["items"] %}
+    <tr>
+      <td>{% if item["kind"] == "burn" %}Burn + close{% else %}Close{% endif %}</td>
+      <td>{{ item["mint"][:8] }}…</td>
+      <td>{{ item["display_amount"] }}</td>
+      <td>{% if item["kind"] == "burn" %}${{ "%.2f"|format(item["value_usd"]) }}{% else %}—{% endif %}</td>
+      <td>{{ "%.5f"|format(item["rent_lamports"] / 1000000000) }} SOL</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p>Rent reclaimed: <b>{{ "%.5f"|format(plan["total_rent_sol"]) }} SOL</b></p>
+  {% if plan["ata_creation_lamports"] %}
+  <p class="muted">Less incinerator account rent: −{{ "%.5f"|format(plan["ata_creation_lamports"] / 1000000000) }} SOL (the first burn of a coin needs its incinerator account created)</p>
+  {% endif %}
+  <p class="muted">Less network fees (est.): −{{ "%.5f"|format(plan["estimated_fee_lamports"] / 1000000000) }} SOL</p>
+  <p><b>Net into your wallet: {{ "%.5f"|format(plan["net_sol"]) }} SOL</b></p>
+  {% if mode == "devnet" %}
+  <p class="muted">This burns the listed $0.00 holdings to the incinerator and closes the listed accounts. This cannot be undone. The reclaimed SOL lands in your wallet the moment each close lands.</p>
+  <form method="post" action="{{ url_for('wallet_reclaim_confirm') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for item in plan["items"] %}
+    <input type="hidden" name="account" value="{{ item["account"] }}">
+    <input type="hidden" name="amount" value="{{ item["amount"] }}">
+    {% endfor %}
+    <button class="btn big" type="submit">Reclaim {{ "%.5f"|format(plan["net_sol"]) }} SOL</button>
+  </form>
+  {% endif %}
+  {% endif %}
+
+  <p><a href="{{ url_for('wallet_details') }}">← Back to wallet</a></p>
+</div>
+{% endblock %}

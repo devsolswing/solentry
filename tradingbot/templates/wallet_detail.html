@@ -59,6 +59,12 @@
   </div>
 
   <div class="card">
+    <h2>♻ Reclaim rent</h2>
+    <p>Empty token accounts and coins worth $0.00 lock up SOL in rent. See what you can reclaim — nothing moves until you confirm it.</p>
+    <a class="btn" href="{{ url_for('wallet_reclaim') }}">Reclaim rent</a>
+  </div>
+
+  <div class="card">
     <h2>Send history</h2>
     {% if intents %}
     <table>

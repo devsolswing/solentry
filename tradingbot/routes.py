@@ -48,6 +48,7 @@ from . import pnl as pnl_mod
 from . import wallet_keys as wallet_keys_mod
 from .page_numbers import page_list, page_number_for
 from . import rate_limit as rate_limit_mod
+from . import rent_reclaim as rent_reclaim_mod
 from . import signing_bot as signing_bot_mod
 from . import token_send as token_send_mod
 from .charts import (CHART_RANGES, fetch_market_chart,
@@ -1626,30 +1627,6 @@ def register_routes(app: Flask) -> None:
             passkeys=passkeys,
             support_id=signing_bot["support_id"] if signing_bot else "")
 
-    @app.route("/settings/promo-code", methods=["POST"])
-    @login_required
-    def settings_promo_code():
-        """Redeem a one-time promo code from the coupon box in
-        Settings (James, 2026-11-24). A code works at most
-        max_uses times IN TOTAL across all users — BetaGate1994
-        is one use, first redeemer only. Unknown and already-used
-        codes get the SAME generic error, so the response never
-        hints at which codes exist. On success the flash shows
-        the new trades-left balance (the header chip reads the
-        same ledger number on the redirected page)."""
-        _csrf_check()
-        user = _current_user(app)
-        code = request.form.get("code") or ""
-        result = gate_fuel_mod.redeem_promo_code(_db(app), user["id"],
-                                                 code)
-        if result is None:
-            flash("Invalid or already used code.")
-        else:
-            flash(
-                f"Promo code accepted — {result['trades']} trades "
-                f"added. {result['trades_remaining']} trades left.")
-        return redirect(url_for("settings"))
-
     @app.route("/settings/recovery-question", methods=["POST"])
     @login_required
     def settings_recovery_question():
@@ -2578,8 +2555,7 @@ def register_routes(app: Flask) -> None:
                                      "ID."}), 404
         purchases = [dict(row) for row in _db(app).execute(
             "SELECT bundle_id, coins, trades, sol_spent, buy_signature, "
-            "send_signature, status, source, promo_code, created_at "
-            "FROM gate_fuel_purchases "
+            "send_signature, status, created_at FROM gate_fuel_purchases "
             "WHERE user_id = ? ORDER BY id DESC LIMIT 20",
             (found["user_id"],)).fetchall()]
         return jsonify({"ok": True,
@@ -3540,6 +3516,171 @@ def register_routes(app: Flask) -> None:
         return render_template(
             "wallet_detail.html", **data, intents=intents,
             pumpfun_wallet=pumpfun_wallet)
+
+    @app.route("/wallet/reclaim")
+    @login_required
+    def wallet_reclaim():
+        """Preview what reclaiming SOL rent would do: every empty
+        token account the wallet owns (closed, rent back to the
+        wallet) and every holding worth $0.00 (burned to the
+        incinerator, then closed). Nothing here moves anything —
+        the page only lists what WOULD happen, with the total SOL
+        reclaimed, for the user to confirm on the next step. A
+        holding the price feed cannot price is never listed for
+        burning. In paper mode the same page is a read-only
+        preview: reclaim runs on the real wallet only. NOT a
+        trade: no fuel is charged and the fuel gate never applies
+        to reclaim (see wallet_reclaim_confirm)."""
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        wallet = _wallet(app, user["id"])
+        if not wallet:
+            flash("No app wallet.")
+            return redirect(url_for("wallet_details"))
+        client = SolanaRpcClient(_cfg(app).rpc_url)
+        try:
+            plan = rent_reclaim_mod.plan_reclaim(
+                client, wallet["pubkey"],
+                lambda mint: _resolve_coin_price(mint)[1])
+        except rent_reclaim_mod.ReclaimRefusal as exc:
+            flash(str(exc))
+            return redirect(url_for("wallet_details"))
+        return render_template(
+            "rent_reclaim.html", plan=plan, mode=mode,
+            mode_label=_mode_label(mode, _cfg(app)),
+            wallet_pubkey=wallet["pubkey"])
+
+    @app.route("/wallet/reclaim/confirm", methods=["POST"])
+    @login_required
+    def wallet_reclaim_confirm():
+        """Execute a confirmed reclaim. The confirm is a gate,
+        not a formality: the plan is re-read fresh from the chain
+        and only items the user confirmed AND that still qualify
+        (same account, same balance — still empty, or still worth
+        $0.00 with the same amount) are executed. Anything that
+        changed since the preview is skipped, never executed.
+        Transactions are signed first (seed wiped the moment
+        signing is done, before anything is sent), then sent one
+        at a time, each confirmed before the next — a failure
+        stops the run and what already landed stays landed and is
+        reported. NOT a trade: no fuel is consumed and
+        enforce_fuel_gate is never called here — a user at 0 fuel
+        can still reclaim rent, and reclaiming never turns bots
+        off. Burned holdings leave real_holdings so the coins
+        list no longer shows them."""
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
+        if mode != "devnet":
+            # Paper mode is a preview only: reclaim runs on the
+            # real wallet, never on paper.
+            flash("Reclaim runs on your real wallet — this was a "
+                  "preview only. Switch to Real trading to run it.")
+            return redirect(url_for("wallet_reclaim"))
+        wallet = _wallet(app, user["id"])
+        if not wallet:
+            flash("No app wallet.")
+            return redirect(url_for("wallet_details"))
+        confirmed = {}
+        for account, amount in zip(
+                request.form.getlist("account"),
+                request.form.getlist("amount")):
+            account = (account or "").strip()
+            try:
+                amount = int(amount)
+            except (TypeError, ValueError):
+                continue
+            if account and amount >= 0:
+                confirmed[account] = amount
+        if not confirmed:
+            flash("Nothing was confirmed to reclaim.")
+            return redirect(url_for("wallet_reclaim"))
+        client = SolanaRpcClient(_cfg(app).rpc_url)
+        try:
+            plan = rent_reclaim_mod.plan_reclaim(
+                client, wallet["pubkey"],
+                lambda mint: _resolve_coin_price(mint)[1])
+        except rent_reclaim_mod.ReclaimRefusal as exc:
+            flash(str(exc))
+            return redirect(url_for("wallet_reclaim"))
+        verified = [item for item in plan["items"]
+                    if item["account"] in confirmed
+                    and confirmed[item["account"]] == item["amount"]]
+        if not verified:
+            flash("Nothing left to reclaim — the wallet changed "
+                  "since the preview. Review the list again.")
+            return redirect(url_for("wallet_reclaim"))
+        chunks = rent_reclaim_mod.build_reclaim_transactions(
+            verified, wallet["pubkey"])
+        try:
+            sol_balance = client.get_balance_lamports(wallet["pubkey"])
+        except Exception:
+            flash("Could not check your SOL balance right now — "
+                  "try again.")
+            return redirect(url_for("wallet_reclaim"))
+        if sol_balance < len(chunks) * rent_reclaim_mod.TX_FEE_LAMPORTS:
+            flash("Not enough SOL for the network fees.")
+            return redirect(url_for("wallet_reclaim"))
+        signed = []
+        try:
+            # The key is decrypted into a mutable buffer, used for
+            # signing only, and wiped IN PLACE the moment signing
+            # is done — before any transaction is sent, as in the
+            # SOL / token send flows.
+            with temporary_wallet_secret(
+                    _db(app), user["id"],
+                    _cfg(app).encryption_key) as secret:
+                if secret is None:
+                    raise ValueError("No app wallet.")
+                seed = bytearray(secret[:32])
+                try:
+                    for instructions in chunks:
+                        blockhash = client.get_latest_blockhash()
+                        signed.append(rent_reclaim_mod.sign_reclaim(
+                            seed, wallet["pubkey"], instructions,
+                            blockhash))
+                finally:
+                    wipe_secret(seed)
+        except Exception as exc:
+            flash("Reclaim failed: " + str(exc)[:200])
+            return redirect(url_for("wallet_reclaim"))
+        landed_sigs = []
+        failed_reason = None
+        for signed_b64, signature in signed:
+            tx_sig, reason = send_and_confirm(
+                client, signed_b64, signature)
+            if tx_sig is None:
+                failed_reason = reason or "transaction not confirmed"
+                break
+            landed_sigs.append(tx_sig)
+        landed = verified[:len(landed_sigs)
+                          * rent_reclaim_mod.MAX_ACCOUNTS_PER_TX]
+        reclaimed = sum(i["rent_lamports"] for i in landed)
+        burned = [i for i in landed if i["kind"] == "burn"]
+        for item in burned:
+            _remove_real_holding(db, user["id"], item["mint"],
+                                 item["ui_amount"])
+        if landed:
+            _log(app, user["id"], "rent_reclaim",
+                 f"Reclaimed {lamports_to_sol(reclaimed):.5f} SOL: "
+                 f"closed {len(landed)} token account(s)"
+                 + (f", burned {len(burned)} $0.00 holding(s)"
+                    if burned else "")
+                 + f". Signatures: "
+                 + ", ".join(s[:12] for s in landed_sigs) + ".",
+                 "real")
+            flash(f"Reclaimed {lamports_to_sol(reclaimed):.5f} SOL "
+                  f"into your wallet — closed {len(landed)} "
+                  f"account(s)"
+                  + (f", burned {len(burned)} $0.00 holding(s)"
+                     if burned else "") + ".")
+        if failed_reason is not None:
+            flash("Reclaim stopped part-way: " + failed_reason[:200]
+                  + (f" — {len(landed)} account(s) already closed."
+                     if landed else " Nothing was closed."))
+        return redirect(url_for("wallet_details"))
 
     @app.route("/trenches")
     @login_required

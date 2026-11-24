@@ -346,6 +346,38 @@ def build_token_transfer_instruction(source_ata_b58: str,
     }
 
 
+def build_close_token_account_instruction(
+        account_b58: str, destination_b58: str, authority_b58: str,
+        token_program_b58: str = TOKEN_PROGRAM) -> dict:
+    """One SPL Token `closeAccount` instruction (build_message
+    format): close a token account and send its rent-exempt
+    lamports to `destination`.
+
+    Data: [9] (closeAccount discriminator), no amount. Accounts:
+    the token account to close (writable), the destination for
+    its lamports (writable), then the owner/authority (signer).
+    The program itself refuses to close an account that still
+    holds tokens, so a close can only ever reclaim rent from an
+    account that is already empty — the caller checks first and
+    the program checks again. Works for the legacy Token program
+    and Token-2022 alike — the caller passes the mint's own token
+    program. (A Token-2022 account with withheld transfer fees
+    cannot close until the fees are harvested; that surfaces as a
+    failed transaction, never as a silent partial close.)"""
+    return {
+        "program_id": token_program_b58,
+        "accounts": [
+            {"pubkey": account_b58, "is_signer": False,
+             "is_writable": True},
+            {"pubkey": destination_b58, "is_signer": False,
+             "is_writable": True},
+            {"pubkey": authority_b58, "is_signer": True,
+             "is_writable": False},
+        ],
+        "data": bytes([9]),
+    }
+
+
 def build_create_associated_token_account_instruction(
         payer_b58: str, ata_b58: str, owner_b58: str, mint_b58: str,
         token_program_b58: str = TOKEN_PROGRAM) -> dict:
