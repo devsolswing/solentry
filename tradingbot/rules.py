@@ -100,7 +100,7 @@ from .scanner import (BUY_FILTER_DEFAULT, BUY_FILTER_KEYS, REGIME_DEFAULT,
                       SLOW_LADDER, TRENDING_LADDER)
 
 RULE_VERSION = 1
-RULE_KINDS = ("trenches", "signals", "scanner", "gnat")
+RULE_KINDS = ("trenches", "signals", "scanner", "gnat", "pit")
 RULE_SOURCES = ("pump.fun", "pumpswap", "dexscreener")
 
 # Windows the feeds provide, in seconds -> buy-metric name. The
@@ -126,7 +126,7 @@ _TOP_LEVEL_KEYS = (
     "version", "kind", "scan_sources", "scan_interval_seconds", "buy",
     "sell_ladder", "trailing_stop_pct", "rug_sell", "top10_rug",
     "trending_ladder", "regime", "buy_filter",
-    "max_new_positions_per_scan",
+    "max_new_positions_per_scan", "pit",
 )
 
 # Rug-sell defaults (see the module docstring): sell everything on a
@@ -244,7 +244,8 @@ SCANNER_RULES = {
     "buy_filter": {"min_volume_5m_usd": 5000.0,
                    "require_buy_dominance": True,
                    "min_signal_pct": SCANNER_BUY_GAIN_PCT,
-                   "min_market_cap_usd": 0.0},
+                   "min_market_cap_usd": 0.0,
+                   "max_market_cap_usd": 0.0},
     "max_new_positions_per_scan": SCANNER_MAX_NEW_PER_SCAN,
 }
 
@@ -335,7 +336,8 @@ CLYDE_RULES = {
     "buy_filter": {"min_volume_5m_usd": 5000.0,
                    "require_buy_dominance": True,
                    "min_signal_pct": CLYDE_BUY_THRESHOLD_PCT,
-                   "min_market_cap_usd": CLYDE_MIN_MARKET_CAP},
+                   "min_market_cap_usd": CLYDE_MIN_MARKET_CAP,
+                   "max_market_cap_usd": 0.0},
     "max_new_positions_per_scan": 1,
 }
 
@@ -461,7 +463,8 @@ GNAT_RULES = {
     "buy_filter": {"min_volume_5m_usd": 5000.0,
                    "require_buy_dominance": True,
                    "min_signal_pct": GNAT_BUY_THRESHOLD_PCT,
-                   "min_market_cap_usd": 0.0},
+                   "min_market_cap_usd": 0.0,
+                   "max_market_cap_usd": 0.0},
     "max_new_positions_per_scan": 1,
 }
 
@@ -530,6 +533,232 @@ GNAT_NOTES = [
 ]
 
 
+PIT_CATEGORY = "Pit Sweeper"
+PIT_PRESET_NAME = "Pit Sweeper"
+PIT_PRESET_VERSION_INITIAL = "1.0"
+# Pit Sweeper (James's spec, 2026-11-23) — real-money top-mover
+# sniper, paper-first. The values below are the v1.0 defaults:
+# the stop loss (4.9%), take profit (sell all at +12%), pullback
+# (-2% in 5 min), flat-dead rule, 6.3% trigger, 0.05 SOL size and
+# 0.20 SOL bankroll are JAMES'S numbers; the rest are REMY
+# DEFAULTS awaiting his call (top-10 cap 12% copied from Clyde,
+# daily-loss breaker ~$5 CAD in SOL, flat threshold ±0.5%).
+# A pit bot's thresholds live in its versioned rules_json (the
+# "pit" block below) — the shared brain publishes a new version
+# when the rules change, and every Pit bot adopts it. The module
+# constants are only the v1.0 defaults used to seed that first
+# version; the loop reads the rules dict, never these constants.
+PIT_SCAN_INTERVAL_SECONDS = 10
+PIT_BUY_THRESHOLD_PCT = 6.3
+PIT_BUY_WINDOW_SECONDS = 300
+PIT_STOP_LOSS_PCT = 4.9
+# The 4.9% stop is a TRIGGER, not a guaranteed fill: exits allow
+# up to 5% slippage, so a triggered stop can realize around -9.9%
+# before fees. Never promise "never lose more than the stop."
+PIT_BUY_SIZE_PCT = 25
+PIT_BUY_SIZE_SOL = 0.05
+PIT_BANKROLL_SOL = 0.20
+PIT_MAX_OPEN_TRADES = 1
+PIT_CURVE_MIN_PCT = 15.0
+PIT_CURVE_MAX_PCT = 65.0
+PIT_MIN_BUY_SELL_RATIO = 2.0
+PIT_BREAKEVEN_PLUS_PCT = 6.0
+PIT_TAKE_PROFIT_PCT = 12.0
+PIT_PULLBACK_PCT = 2.0
+PIT_FLAT_PCT = 0.5
+PIT_MAX_HOLD_SECONDS = 600
+# Daily-loss breaker: ~$5 CAD in SOL at the Nov-23 SOL price
+# (~$145 USD, ~$200 CAD → 0.025 SOL). Re-fix when SOL moves
+# materially; there is no CAD price source in the app.
+PIT_MAX_DAILY_LOSS_SOL = 0.025
+PIT_MIN_TOP5_AVG_BUYS_5M = 10
+PIT_MCAP_MIN_USD = 9000.0
+PIT_MCAP_MAX_USD = 25000.0
+PIT_TOP10_CONCENTRATION_PCT = 12.0
+# Auto-widening (James's explicit order, 2026-11-23): after this
+# many missed coins above the mcap cap, the shared brain raises
+# the cap. The audit's safety bar (10+ missed, canary, 24h soak,
+# human approval) is recorded in the build MANIFEST as a flagged
+# risk he accepted — it is NOT what ships.
+PIT_MISSED_COINS_TO_WIDEN = 2
+# A missed coin counts as rugged (negative evidence, logged in the
+# changelog) when its 5-minute change falls this far after the
+# miss was recorded.
+PIT_MISSED_RUG_DROP_PCT = 25.0
+
+# Keys of the "pit" block in a pit rule set, with their allowed
+# ranges. The block is the versioned home of every pit threshold
+# (stop trigger, curve band, size) — never in the module constants
+# above (those are v1.0 defaults only; the loop reads the block).
+# NOTE: the stop is named "stop_trigger_pct", NOT "stop_loss_pct" —
+# the validator rejects "stop_loss_pct" anywhere in a rule set
+# because it is a bot limit (LIMIT_FIELDS), and the pit stop must
+# be versionable. The bot row still carries stop_loss_pct 4.9 as
+# its limit; the loop's pit exits read the versioned trigger.
+# — a new shared-brain version is a new rules_json, so a version
+# change actually changes behaviour (unlike Gnat, whose hard exits
+# read module constants).
+PIT_BLOCK_KEYS = (
+    "buy_ratio_min", "curve_min_pct", "curve_max_pct",
+    "stop_trigger_pct", "breakeven_trigger_pct", "pullback_pct",
+    "flat_pct", "max_hold_seconds", "daily_loss_sol",
+    "min_top5_avg_buys_5m", "buy_size_sol", "bankroll_sol",
+)
+PIT_BLOCK_RANGES = {
+    "buy_ratio_min": (1.0, 10.0),
+    "curve_min_pct": (0.0, 100.0),
+    "curve_max_pct": (0.0, 100.0),
+    "stop_trigger_pct": (0.1, 50.0),
+    "breakeven_trigger_pct": (0.1, 100.0),
+    "pullback_pct": (0.1, 90.0),
+    "flat_pct": (0.1, 5.0),
+    "max_hold_seconds": (60, 3600),
+    "daily_loss_sol": (0.001, 10.0),
+    "min_top5_avg_buys_5m": (0, 1000),
+    "buy_size_sol": (0.001, 10.0),
+    "bankroll_sol": (0.01, 100.0),
+}
+
+PIT_RULES = {
+    "version": 1,
+    "kind": "pit",
+    "scan_sources": ["pump.fun", "pumpswap"],
+    "scan_interval_seconds": PIT_SCAN_INTERVAL_SECONDS,
+    "buy": {"metric": "gain_5m_pct",
+            "window_seconds": PIT_BUY_WINDOW_SECONDS,
+            "threshold_pct": PIT_BUY_THRESHOLD_PCT,
+            "pick": "strongest"},
+    # Take profit is a single sell-all rung: 100% of the position
+    # at +12%. The loop sells ladder rungs as a fraction of the
+    # ORIGINAL position, so this rung closes the position in full.
+    "sell_ladder": [{"pct_of_position": 100.0,
+                     "profit_pct": PIT_TAKE_PROFIT_PCT}],
+    # No trailing stop on Pit: the +12% rung closes the trade.
+    # The trailing value is kept (and must stay inside the
+    # validator's range) only so the shared summary/validation
+    # paths have a number; the pit exits never read it.
+    "trailing_stop_pct": PIT_STOP_LOSS_PCT,
+    "rug_sell": dict(RUG_SELL_DEFAULT),
+    "top10_rug": {"drop_pct": 10.0,
+                  "concentration_pct": PIT_TOP10_CONCENTRATION_PCT,
+                  "slow_climb_sell_pct": 0.0,
+                  "check_interval_seconds": 15.0},
+    "buy_filter": {"min_volume_5m_usd": 0.0,
+                   "require_buy_dominance": True,
+                   "min_signal_pct": PIT_BUY_THRESHOLD_PCT,
+                   "min_market_cap_usd": PIT_MCAP_MIN_USD,
+                   "max_market_cap_usd": PIT_MCAP_MAX_USD},
+    "max_new_positions_per_scan": 1,
+    "pit": {
+        "buy_ratio_min": PIT_MIN_BUY_SELL_RATIO,
+        "curve_min_pct": PIT_CURVE_MIN_PCT,
+        "curve_max_pct": PIT_CURVE_MAX_PCT,
+        "stop_trigger_pct": PIT_STOP_LOSS_PCT,
+        "breakeven_trigger_pct": PIT_BREAKEVEN_PLUS_PCT,
+        "pullback_pct": PIT_PULLBACK_PCT,
+        "flat_pct": PIT_FLAT_PCT,
+        "max_hold_seconds": PIT_MAX_HOLD_SECONDS,
+        "daily_loss_sol": PIT_MAX_DAILY_LOSS_SOL,
+        "min_top5_avg_buys_5m": PIT_MIN_TOP5_AVG_BUYS_5M,
+        "buy_size_sol": PIT_BUY_SIZE_SOL,
+        "bankroll_sol": PIT_BANKROLL_SOL,
+    },
+}
+
+
+def pit_ruleset() -> dict:
+    """A fresh copy of the Pit Sweeper preset (v1.0 rules)."""
+    return copy.deepcopy(PIT_RULES)
+
+
+# Rules Pit Sweeper states that the engine cannot enforce as
+# written. Shown on the preset list, in plain words, next to the
+# enforced rules — never dropped, never pretended to be enforced.
+PIT_NOTES = [
+    "Entry — top 5 watch list: the bot watches the 5 strongest "
+    "5-minute gainers; a coin gaining 6.3% or more in 5 minutes "
+    "goes straight to the top of the list. Re-ranking happens "
+    "once per loop tick (10 seconds) — 'instantly' means on the "
+    "next tick, not between ticks.",
+    "Entry — real signal only: buys outnumber sells by at least "
+    "2:1 in the 5-minute bucket, and the 5-minute volume is at "
+    "least 2x the hourly pace (the volume confirmation). The "
+    "feed gives 5-minute buckets, not real-time ticks — the "
+    "signal is measured on the bucket, never guessed.",
+    "Entry — market cap $9,000-$25,000. A coin above $25,000 "
+    "that gains 6.3% in 5 minutes is a MISSED coin: it is "
+    "logged, and after 2 missed coins the shared brain raises "
+    "the cap so the next one is caught earlier. That is James's "
+    "explicit order — a widening change goes to every Pit bot "
+    "at once, in real time. The audit's safety bar (10+ missed, "
+    "canary user, 24-hour soak, human approval) is recorded in "
+    "the build MANIFEST as a flagged risk he accepted.",
+    "Entry — bonding curve 15-65% filled, read straight from "
+    "the on-chain bonding-curve account. A curve the RPC cannot "
+    "read is never bought.",
+    "Entry — busy market only: the top 5 movers must average at "
+    "least 10 buy transactions in 5 minutes, or the bot sits "
+    "out. That buy-count proxy is the whole slow-time gate — "
+    "the app has no Solana congestion feed and no time-of-day "
+    "rug statistics, so 'slow blockchain times' and 'peak rug "
+    "times' are NOT enforced as written.",
+    "Exits — stop loss 4.9% in any time period, breakeven stop "
+    "once the coin is up 6% (the stop moves to the entry price "
+    "so a winner cannot turn into a loser), sell ALL at +12% "
+    "gain immediately, sell ALL on a 2% or more decline in "
+    "5 minutes, close the position when the price goes flat "
+    "(under 0.5% movement in 5 minutes — the coin is dead), "
+    "and close any trade that has not hit +12% or the stop "
+    "within 10 minutes. The 4.9% stop is a TRIGGER, not a "
+    "guaranteed fill — exits allow up to 5% slippage, so a "
+    "triggered stop can realize around -9.9% before fees.",
+    "Scan — 10 seconds is the live loop floor; James asked for a "
+    "5-second scan, which the loop cannot do. NOT enforced as "
+    "written — the closest version is the 10-second cadence.",
+    "Resistance / dead — closest version: the watch list scrap and "
+    "the pullback/flat exits run on the feed's 5-minute bucket, not "
+    "on live ticks (the fast-exit thread adds a tick-level pullback "
+    "against the last loop mark). A coin is scrapped after 2 "
+    "consecutive resistance votes, never on one tick.",
+    "Sizing — 0.05 SOL per trade, from a 0.20 SOL bankroll cap "
+    "(25%). The loop never sizes from the whole wallet balance. "
+    "Paper trades convert 0.05 SOL at the live SOL price, "
+    "falling back to 25% of the paper bankroll with no live "
+    "price — the fallback is labelled in the log, never silent.",
+    "Daily-loss breaker — down 0.025 SOL in a day (about $5 "
+    "CAD at the Nov-23 SOL price) stops new buys until "
+    "tomorrow. Exits still run. With no live SOL price the "
+    "breaker cannot be evaluated and does NOT trip — the loss "
+    "is still logged, never hidden.",
+    "Fuel — every confirmed real trade costs 10,000 $GATE from "
+    "the held balance (about $0.02 a trade at the Nov-20 $GATE "
+    "price — it rises with the $GATE price; at 100x it would be "
+    "about $2 a trade). Hold 1,000,000 $GATE for 100 trades. A "
+    "Pit bot trades real ONLY while its owner is enrolled in "
+    "fuel ('fuel trades with Gate' on the wallet page) — an "
+    "unenrolled bot is blocked from real buys with a plain "
+    "message, never silently free.",
+    "Versions — the bot's name tag shows its version, starting "
+    "at v1.0, then v1.1, v1.2, and so on after every update. "
+    "Every change is logged with a number in the preset "
+    "changelog, in order, so any change can be pinpointed — and "
+    "any whole update can be scrapped to downgrade to a previous "
+    "version. Win rate and P&L are tracked per version, so v1.1 "
+    "can be compared against v1.0 on real results.",
+    "Anti-rug — top-10: reject if the top 10 non-curve holders "
+    "control 12% or more. ENFORCED twice: the pre-buy scam gate "
+    "rejects a coin at or over 12% concentration, and the top-10 "
+    "watch sells everything when a held coin's share reaches "
+    "12%. The rug sell (sell everything on a 15% drop in about "
+    "a minute, or 25% in 5 minutes) runs first on every price "
+    "update.",
+    "Advanced top-trader tactics and 'which coin will make a "
+    "quick buck': NOT ENFORCED — the engine can only rank by "
+    "measured signals, never predict. Recorded here, never "
+    "faked.",
+]
+
+
 def preset_bots() -> list:
     """The preset bots, in list order — Clyde first, then the
     existing presets. Each entry carries a fresh copy of its rule
@@ -569,6 +798,14 @@ def preset_bots() -> list:
          "rules": gnat_ruleset(),
          "notes": list(GNAT_NOTES),
          "endpoint": "bot_preset_gnat"},
+        {"key": "pit",
+         "name": PIT_PRESET_NAME,
+         "tagline": "Top-mover sniper — 6.3% in 5 minutes, 0.05 SOL "
+                    "a trade, sell all at +12%.",
+         "category": PIT_CATEGORY,
+         "rules": pit_ruleset(),
+         "notes": list(PIT_NOTES),
+         "endpoint": "bot_preset_pit"},
     ]
 
 
@@ -643,17 +880,18 @@ def validate_ruleset(raw, bot=None):
     if kind not in RULE_KINDS:
         return _fail("The rule kind must be 'trenches' (scan pump.fun "
                      "and PumpSwap), 'scanner' (snipe gainers in "
-                     "3 minutes), 'gnat' (curve + buy-pressure sniper) "
+                     "3 minutes), 'gnat' (curve + buy-pressure sniper), "
+                     "'pit' (top-mover sniper) "
                      "or 'signals' (your own coin list).")
     interval = raw.get("scan_interval_seconds")
     if not isinstance(interval, int) or isinstance(interval, bool) \
             or not 10 <= interval <= 3600:
         return _fail("Scan interval must be between 10 and 3600 seconds.")
     sources = raw.get("scan_sources", [])
-    if kind in ("trenches", "scanner", "gnat"):
+    if kind in ("trenches", "scanner", "gnat", "pit"):
         if not isinstance(sources, list) or not sources:
-            return _fail("A trenches, scanner or gnat rule set needs at "
-                         "least one scan source (pump.fun or "
+            return _fail("A trenches, scanner, gnat or pit rule set "
+                         "needs at least one scan source (pump.fun or "
                          "pumpswap).")
         for s in sources:
             if s not in RULE_SOURCES:
@@ -783,10 +1021,10 @@ def validate_ruleset(raw, bot=None):
     top10 = raw.get("top10_rug")
     clean_top10 = None
     if top10 is not None:
-        if kind not in ("scanner", "trenches", "gnat"):
+        if kind not in ("scanner", "trenches", "gnat", "pit"):
             return _fail("The top-10 wallets watch is a memecoin rule — "
-                         "it only applies to scanner, trenches and gnat "
-                         "bots.")
+                         "it only applies to scanner, trenches, gnat "
+                         "and pit bots.")
         if not isinstance(top10, dict):
             return _fail("The top-10 wallets watch must be a set of "
                          "settings (drop %).")
@@ -825,8 +1063,8 @@ def validate_ruleset(raw, bot=None):
     buy_filter = raw.get("buy_filter")
     clean_filter = None
     if buy_filter is not None:
-        if kind not in ("trenches", "scanner", "gnat"):
-            return _fail("The buy filter is a trenches/scanner/gnat "
+        if kind not in ("trenches", "scanner", "gnat", "pit"):
+            return _fail("The buy filter is a trenches/scanner/gnat/pit "
                          "rule — it only applies to bots that scan the "
                          "feed.")
         if not isinstance(buy_filter, dict):
@@ -858,14 +1096,26 @@ def validate_ruleset(raw, bot=None):
                 or not 0 <= float(min_mcap) <= 1000000000000:
             return _fail("The buy filter's minimum market cap must be "
                          "between $0 and $1,000,000,000,000.")
+        max_mcap = buy_filter.get(
+            "max_market_cap_usd",
+            BUY_FILTER_DEFAULT["max_market_cap_usd"])
+        if not _is_number(max_mcap) \
+                or not 0 <= float(max_mcap) <= 1000000000000:
+            return _fail("The buy filter's maximum market cap must be "
+                         "between $0 (no cap) and $1,000,000,000,000.")
+        if float(max_mcap) > 0 and float(max_mcap) < float(min_mcap):
+            return _fail("The buy filter's maximum market cap cannot be "
+                         "below its minimum.")
         clean_filter = {
             "min_volume_5m_usd": float(min_vol),
             "require_buy_dominance": bool(
                 buy_filter.get("require_buy_dominance", True)),
             "min_signal_pct": float(min_signal),
             "min_market_cap_usd": float(min_mcap),
+            "max_market_cap_usd": float(max_mcap),
         }
-    if kind in ("trenches", "scanner", "gnat") and clean_filter is None:
+    if kind in ("trenches", "scanner", "gnat", "pit") \
+            and clean_filter is None:
         # Stored rules from before the filter existed load as the new
         # defaults on the next evaluation — the filter applies to the
         # Scanner, Trenches and Gnat bots already running.
@@ -874,11 +1124,46 @@ def validate_ruleset(raw, bot=None):
     if not isinstance(max_new, int) or isinstance(max_new, bool) \
             or not 1 <= max_new <= 5:
         return _fail("New positions per scan must be between 1 and 5.")
+    # Pit settings (pit kind only): the versioned home of every
+    # Pit threshold. A shared-brain version IS a new rules_json,
+    # so these numbers are what a version change actually changes.
+    pit_block = raw.get("pit")
+    clean_pit = None
+    if pit_block is not None:
+        if kind != "pit":
+            return _fail("The 'pit' settings only apply to pit bots.")
+        if not isinstance(pit_block, dict):
+            return _fail("The 'pit' settings must be a set of "
+                         "settings (stop loss, curve band, size).")
+        for key in pit_block:
+            if key in LIMIT_FIELDS:
+                return _fail(f"'{key}' is a bot limit, not a rule.")
+            if key not in PIT_BLOCK_KEYS:
+                return _fail(f"Unknown 'pit' setting '{key}'.")
+        clean_pit = {}
+        for key in PIT_BLOCK_KEYS:
+            if key not in pit_block:
+                return _fail(f"A pit rule set needs '{key}' — every "
+                             f"pit threshold must be stated, never "
+                             f"guessed.")
+            value = pit_block[key]
+            lo, hi = PIT_BLOCK_RANGES[key]
+            if not _is_number(value) or not lo <= float(value) <= hi:
+                return _fail(f"'{key}' must be between {lo} and {hi}.")
+            clean_pit[key] = float(value)
+        if clean_pit["curve_min_pct"] >= clean_pit["curve_max_pct"]:
+            return _fail("The curve band's minimum must be below its "
+                         "maximum.")
+        if clean_pit["buy_size_sol"] > clean_pit["bankroll_sol"]:
+            return _fail("The buy size cannot exceed the bankroll.")
+    if kind == "pit" and clean_pit is None:
+        return _fail("A pit rule set needs its 'pit' settings — every "
+                     "pit threshold must be stated, never guessed.")
     cleaned = {
         "version": RULE_VERSION,
         "kind": kind,
         "scan_sources": list(sources)
-        if kind in ("trenches", "scanner", "gnat") else [],
+        if kind in ("trenches", "scanner", "gnat", "pit") else [],
         "scan_interval_seconds": interval,
         "buy": {"metric": WINDOW_METRICS[window],
                 "window_seconds": window,
@@ -891,8 +1176,10 @@ def validate_ruleset(raw, bot=None):
     }
     if kind == "scanner" or clean_top10 is not None:
         cleaned["top10_rug"] = clean_top10
-    if kind in ("trenches", "scanner", "gnat"):
+    if kind in ("trenches", "scanner", "gnat", "pit"):
         cleaned["buy_filter"] = clean_filter
+    if kind == "pit":
+        cleaned["pit"] = clean_pit
     if kind == "scanner":
         cleaned["trending_ladder"] = clean_trending
         cleaned["regime"] = clean_regime
@@ -948,6 +1235,12 @@ def summarize_rules(rules) -> str:
             f"Scan {sources} every {rules['scan_interval_seconds']} "
             f"seconds for new tokens, checking the bonding curve "
             f"and buy pressure.")
+    elif rules["kind"] == "pit":
+        sources = " and ".join(rules["scan_sources"])
+        lines.append(
+            f"Scan {sources} every {rules['scan_interval_seconds']} "
+            f"seconds for the top 5 movers, checking the bonding "
+            f"curve and buy pressure.")
     else:
         lines.append(
             f"Watch your own coin list every "
@@ -955,7 +1248,7 @@ def summarize_rules(rules) -> str:
     lines.append(
         f"Buy when a coin gains {buy['threshold_pct']}% in "
         f"{_window_words(buy['window_seconds'])}"
-        f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner', 'gnat') else ''}"
+        f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner', 'gnat', 'pit') else ''}"
         f"{' — the 3-minute gain is tracked from recorded prices, because the feed only gives 5-minute changes' if rules['kind'] in ('scanner', 'gnat') else ''}.")
     if rules["kind"] == "scanner":
         slow = "; ".join(
@@ -989,10 +1282,44 @@ def summarize_rules(rules) -> str:
         lines.append(
             "Sell ladder: none — exits on the rug sense, trailing "
             "stop and stop loss only.")
-    lines.append(
-        f"Sell everything if the price falls "
-        f"{rules['trailing_stop_pct']}% below the highest price since "
-        f"holding.")
+    if rules["kind"] != "pit":
+        # Pit has no trailing stop: its stop is measured from the
+        # entry price, not from the peak — the pit lines below say
+        # so instead.
+        lines.append(
+            f"Sell everything if the price falls "
+            f"{rules['trailing_stop_pct']}% below the highest price since "
+            f"holding.")
+    if rules["kind"] == "pit":
+        pit = rules["pit"]
+        lines.append(
+            f"Pit exits, in order: stop loss {pit['stop_trigger_pct']:.1f}% "
+            f"(a trigger, not a guaranteed fill — with 5% exit "
+            f"slippage it can realize around "
+            f"-{pit['stop_trigger_pct'] + 5.0:.1f}%), then breakeven "
+            f"once the coin is up {pit['breakeven_trigger_pct']:.0f}% "
+            f"(the stop moves to the entry price), then sell all on "
+            f"a {pit['pullback_pct']:.0f}% or worse decline in "
+            f"5 minutes, then the +12% take-profit above, then "
+            f"close a flat coin (under {pit['flat_pct']:.1f}% "
+            f"movement in 5 minutes — dead), then close any trade "
+            f"older than {pit['max_hold_seconds'] // 60} minutes "
+            f"that never hit +12% or the stop.")
+        lines.append(
+            f"Pit sizing: {pit['buy_size_sol']:.2f} SOL per trade "
+            f"from a {pit['bankroll_sol']:.2f} SOL bankroll cap, "
+            f"one coin open at a time. Daily-loss breaker: down "
+            f"{pit['daily_loss_sol']:.3f} SOL in a day (about $5 "
+            f"CAD) stops new buys until tomorrow.")
+        lines.append(
+            f"Pit entry: buys outnumber sells by at least "
+            f"{pit['buy_ratio_min']:.0f}:1, 5-minute volume at "
+            f"least 2x the hourly pace, bonding curve "
+            f"{pit['curve_min_pct']:.0f}-"
+            f"{pit['curve_max_pct']:.0f}% filled, and the top 5 "
+            f"movers averaging at least "
+            f"{pit['min_top5_avg_buys_5m']:.0f} buys in 5 minutes "
+            f"or the bot sits out.")
     if rules["kind"] == "gnat":
         lines.append(
             "Take profit in tiers: sell 35% at +40% profit and move "
@@ -1036,15 +1363,18 @@ def summarize_rules(rules) -> str:
             f"tokens reaches {concentration:.0f}%.{slow_word} "
             f"The proceeds stay in SOL.")
     buy_filter = rules.get("buy_filter")
-    if buy_filter and rules["kind"] in ("trenches", "scanner", "gnat"):
+    if buy_filter and rules["kind"] in ("trenches", "scanner", "gnat",
+                                        "pit"):
         mcap = buy_filter.get("min_market_cap_usd", 0.0)
+        max_mcap = buy_filter.get("max_market_cap_usd", 0.0)
         lines.append(
             f"Buy filter — only buy a real signal: at least "
             f"${buy_filter['min_volume_5m_usd']:,.0f} of volume in the "
             f"last 5 minutes"
             f"{', buys outnumbering sells in the last 5 minutes' if buy_filter['require_buy_dominance'] else ''}, "
             f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%"
-            f"{f', and a market cap of at least ${mcap:,.0f}' if mcap else ''}. "
+            f"{f', and a market cap of at least ${mcap:,.0f}' if mcap else ''}"
+            f"{f', and at most ${max_mcap:,.0f}' if max_mcap else ''}. "
             f"A coin missing any of that is skipped, never bought on a guess.")
     lines.append(
         f"At most {rules['max_new_positions_per_scan']} new position(s) "

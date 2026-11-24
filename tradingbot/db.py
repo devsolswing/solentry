@@ -597,6 +597,66 @@ CREATE TABLE IF NOT EXISTS sell_claims (
     FOREIGN KEY (user_id) REFERENCES users (id),
     FOREIGN KEY (bot_id) REFERENCES bots (id)
 );
+
+-- Pit Sweeper shared brain (2026-11-23): the preset's versioned
+-- rule sets. One row per published version; exactly one row per
+-- preset is active at a time (active = 1) — every Pit bot runs the
+-- active version's rules_json, adopted on its next loop pass. The
+-- version is the name-tag number (1.0, 1.1, 1.2, ...); change_log
+-- is the numbered changelog for that version, in order, so any
+-- change can be pinpointed. Rollback = mark an older version
+-- active again — the newer rows stay as history, nothing is
+-- deleted. source is 'seed' (v1.0), 'auto-widen' (missed coins),
+-- 'rollback', or 'james'.
+CREATE TABLE IF NOT EXISTS preset_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    preset_key TEXT NOT NULL,
+    version TEXT NOT NULL,
+    rules_json TEXT NOT NULL,
+    change_log TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (preset_key, version)
+);
+
+-- Pit Sweeper top-5 watch list (2026-11-23): per-bot memory of
+-- the movers it watches. rank is the current top-5 rank (NULL
+-- when the coin is not in the top 5 this scan); scrap_votes
+-- counts consecutive scans where the coin showed resistance
+-- (5-minute change at or below -2%, or flat under 0.5%) or
+-- vanished from the feed — at 2 votes the coin is dead and the
+-- next mover takes its place. status is 'active' or 'dead'.
+CREATE TABLE IF NOT EXISTS pit_watchlist (
+    bot_id INTEGER NOT NULL,
+    mint TEXT NOT NULL,
+    rank INTEGER,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    scrap_votes INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    dead_reason TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (bot_id, mint),
+    FOREIGN KEY (bot_id) REFERENCES bots (id)
+);
+
+-- Pit Sweeper missed coins (2026-11-23): coins that gained 6.3%
+-- or more in 5 minutes but sat ABOVE the mcap cap, so the bot
+-- could not buy them. Global (the shared brain learns from every
+-- user's misses, not one bot's). After 2 missed coins since the
+-- current version was published, the shared brain raises the cap
+-- to catch the next one earlier. status is 'missed' or 'rugged'
+-- (a missed coin whose 5-minute change later fell 25% or more —
+-- negative evidence, logged in the changelog, never counted as a
+-- reason to widen on its own).
+CREATE TABLE IF NOT EXISTS pit_missed_coins (
+    mint TEXT PRIMARY KEY,
+    mcap_usd REAL NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    peak_gain_5m REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'missed'
+);
 """
 
 
@@ -734,6 +794,19 @@ _MIGRATIONS = (
     # columns, it never touches existing rows.
     ("trade_ledger", "signature", "TEXT"),
     ("trade_ledger", "sol_amount", "REAL"),
+    # Pit Sweeper (2026-11-23): the preset version a bot currently
+    # runs (its name-tag number, e.g. '1.0'), the per-bot bankroll
+    # cap in SOL (0.20 for Pit — the loop never sizes from the
+    # whole wallet balance), the preset version each ledger row ran
+    # under (per-version win rate / P&L), and the per-position
+    # exit-vote state for Pit's pullback / flat-dead exits (2
+    # consecutive ticks before the exit fires — the debounce that
+    # keeps one bad bucket from scrapping a position).
+    ("bots", "preset_version", "TEXT NOT NULL DEFAULT ''"),
+    ("bots", "bankroll_sol", "REAL"),
+    ("trade_ledger", "preset_version", "TEXT"),
+    ("bot_positions", "pit_exit_votes", "INTEGER NOT NULL DEFAULT 0"),
+    ("bot_positions", "pit_exit_kind", "TEXT NOT NULL DEFAULT ''"),
 )
 
 

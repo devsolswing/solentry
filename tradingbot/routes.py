@@ -64,15 +64,20 @@ from .prices import clear_price_cache, get_prices
 from .builderbot import list_adjustments
 from .home_holdings import (enrich_row, fetch_chain_token_balances,
                             reconcile_holdings, sparkline_svg_1h)
-from .ledger import bot_wl_summary, recent_trades
+from .ledger import bot_wl_summary, recent_trades, version_wl_summary
+from .pit import (current_pit_version, ensure_pit_version_1_0,
+                  pit_changelog, pit_version_rules)
 from .rules import (CLYDE_CATEGORY, CLYDE_PRESET_NAME,
                     CLYDE_STOP_LOSS_PCT, GNAT_BUY_SIZE_PCT, GNAT_CATEGORY,
-                    GNAT_PRESET_NAME, GNAT_STOP_LOSS_PCT, RUG_SELL_DEFAULT,
-                    SCANNER_CATEGORY, SCANNER_DISPLAY,
-                    SCANNER_PRESET_NAME, TRENCHES_CATEGORY,
-                    TRENCHES_PRESET_NAME, clyde_ruleset, gnat_ruleset,
-                    load_rules, preset_bots, scanner_ruleset,
-                    summarize_rules, trenches_ruleset, validate_ruleset)
+                    GNAT_PRESET_NAME, GNAT_STOP_LOSS_PCT,
+                    PIT_BANKROLL_SOL, PIT_BUY_SIZE_PCT, PIT_CATEGORY,
+                    PIT_PRESET_NAME, PIT_PRESET_VERSION_INITIAL,
+                    PIT_STOP_LOSS_PCT, RUG_SELL_DEFAULT, SCANNER_CATEGORY,
+                    SCANNER_DISPLAY, SCANNER_PRESET_NAME,
+                    TRENCHES_CATEGORY, TRENCHES_PRESET_NAME, clyde_ruleset,
+                    gnat_ruleset, load_rules, pit_ruleset, preset_bots,
+                    scanner_ruleset, summarize_rules, trenches_ruleset,
+                    validate_ruleset)
 from .security import (decrypt_secret, encrypt_secret, hash_account_password,
                        hash_password, hash_token, new_csrf_token, new_token,
                        verify_account_password, verify_password,
@@ -3956,13 +3961,34 @@ def register_routes(app: Flask) -> None:
             "stop_loss_pct": int(GNAT_STOP_LOSS_PCT),
             "max_open_trades": 3,
         })
+        # Pit Sweeper joined the window 2026-11-23 as a third
+        # button with the same shape: its stats are the values its
+        # create route writes (strategy 'bold', buy size
+        # PIT_BUY_SIZE_PCT, stop loss PIT_STOP_LOSS_PCT, max 1 open
+        # — one trade at a time, 0.05 SOL from the 0.20 SOL
+        # bankroll cap). The button's name tag carries the active
+        # shared-brain version (1.0 first, then 1.1, 1.2...), read
+        # only here — the version row is seeded by the create
+        # route, never by a page view.
+        pit_preset = next(p for p in presets if p["key"] == "pit")
+        pit_preset.update({
+            "strategy": "bold",
+            "buy_size_pct": PIT_BUY_SIZE_PCT,
+            "stop_loss_pct": PIT_STOP_LOSS_PCT,
+            "max_open_trades": 1,
+        })
+        _pit_active = current_pit_version(_db(app))
+        _pit_version = (_pit_active["version"] if _pit_active
+                        else PIT_PRESET_VERSION_INITIAL)
+        pit_preset["name"] = f"{PIT_PRESET_NAME} v{_pit_version}"
         return render_template("bots.html", **data,
                                memecoin_bots=memecoin_bots,
                                signing_tasks=signing_tasks,
                                signing_tx_count=signing_tx_count,
                                presets=presets,
                                clyde_preset=clyde_preset,
-                               gnat_preset=gnat_preset)
+                               gnat_preset=gnat_preset,
+                               pit_preset=pit_preset)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required
@@ -4230,6 +4256,61 @@ def register_routes(app: Flask) -> None:
               f"it only trades within its rules and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
+    @app.route("/bots/preset/pit", methods=["POST"])
+    @login_required
+    def bot_preset_pit():
+        """Create the Pit Sweeper preset bot.
+
+        Paper mode, silent off. One per user — if a Pit bot
+        already exists, go to it instead of making a duplicate.
+        The bot is created on the active shared-brain version
+        (1.0 first, then 1.1, 1.2...) and its name tag carries
+        that version; its stored rules are that version's snapshot.
+        Buy size 25% is the fallback cap — the loop buys a fixed
+        0.05 SOL per trade from the 0.20 SOL bankroll cap when a
+        live SOL price exists. Stop loss 4.9% is the trigger from
+        the versioned rules; the realized loss can reach about
+        -9.9% at 5% exit slippage — that is stated on the preset,
+        never promised away.
+        """
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        existing = db.execute(
+            "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+            "AND name LIKE ?",
+            (user["id"], PIT_CATEGORY, f"{PIT_PRESET_NAME}%")).fetchone()
+        if existing:
+            flash("You already have a Pit Sweeper bot.")
+            return redirect(url_for("bot_detail", bot_id=existing["id"]))
+        # Seed the v1.0 version row (the complete first build) if
+        # the shared brain has no version yet, then create the bot
+        # on the ACTIVE version's rules — never a stale snapshot.
+        version = ensure_pit_version_1_0(db)
+        active_rules = pit_version_rules(db) or pit_ruleset()
+        token = new_token()
+        cur = db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash, category, rules_json, platform, "
+            "preset_version, bankroll_sol) "
+            "VALUES (?, ?, 'bold', '[]', ?, ?, 'paper', 0, 1, ?, ?, ?, "
+            "'pump.fun', ?, ?)",
+            (user["id"], f"{PIT_PRESET_NAME} v{version}",
+             PIT_BUY_SIZE_PCT, PIT_STOP_LOSS_PCT, hash_token(token),
+             PIT_CATEGORY, json.dumps(active_rules),
+             version, PIT_BANKROLL_SOL))
+        db.commit()
+        _log(app, user["id"], "bot_create",
+             f"Created bot '{PIT_PRESET_NAME} v{version}' (Pit Sweeper "
+             f"preset, paper, 0.20 SOL bankroll cap). Silent trading "
+             f"is off.", "paper")
+        flash(f"Created the {PIT_PRESET_NAME} v{version} bot (Pit "
+              f"Sweeper preset, paper). Turn silent trading on when "
+              f"you are ready — it only trades within its rules and "
+              f"limits.")
+        return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
+
     @app.route("/bots/<int:bot_id>")
     @login_required
     def bot_detail(bot_id: int):
@@ -4250,6 +4331,16 @@ def register_routes(app: Flask) -> None:
         wl_summary = bot_wl_summary(_db(app), bot_id)
         trades = recent_trades(_db(app), bot_id)
         adjustments = list_adjustments(_db(app), bot_id)
+        # Pit Sweeper: the per-version win/loss record (every trade
+        # is tagged with the preset version it ran under) and the
+        # shared brain's numbered changelog, so any change can be
+        # pinpointed and any update scrapped to a previous version.
+        version_wl = None
+        pit_change_log = None
+        if rules is not None and rules_error is None \
+                and rules.get("kind") == "pit":
+            version_wl = version_wl_summary(_db(app), bot_id)
+            pit_change_log = pit_changelog(_db(app))
         # The adjustment reason is stored encrypted; only this page
         # (the display layer) decrypts it for the owner. builderBot
         # itself never decrypts anything but its own chat state.
@@ -4265,7 +4356,9 @@ def register_routes(app: Flask) -> None:
                                rules_summary=summarize_rules(rules),
                                rules_error=rules_error,
                                wl_summary=wl_summary, trades=trades,
-                               adjustments=adjustments)
+                               adjustments=adjustments,
+                               version_wl=version_wl,
+                               pit_change_log=pit_change_log)
 
     @app.route("/bots/<int:bot_id>/edit", methods=["GET", "POST"])
     @login_required

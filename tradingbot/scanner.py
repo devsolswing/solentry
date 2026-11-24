@@ -96,9 +96,11 @@ REGIME_DEFAULT = {"volume_surge_x": 2.0, "require_buy_dominance": True,
 BUY_FILTER_DEFAULT = {"min_volume_5m_usd": 1000.0,
                       "require_buy_dominance": True,
                       "min_signal_pct": 5.0,
-                      "min_market_cap_usd": 0.0}
+                      "min_market_cap_usd": 0.0,
+                      "max_market_cap_usd": 0.0}
 BUY_FILTER_KEYS = ("min_volume_5m_usd", "require_buy_dominance",
-                   "min_signal_pct", "min_market_cap_usd")
+                   "min_signal_pct", "min_market_cap_usd",
+                   "max_market_cap_usd")
 
 
 def _gte(a: float, b: float) -> bool:
@@ -204,6 +206,25 @@ def passes_buy_filter(entry, filter_cfg=None,
         if not _gte(mcap, min_mcap):
             return False, (f"market cap ${mcap:,.0f} is below the "
                            f"${min_mcap:,.0f} minimum")
+    try:
+        max_mcap = float(cfg.get("max_market_cap_usd",
+                                 BUY_FILTER_DEFAULT["max_market_cap_usd"]))
+    except (TypeError, ValueError):
+        return False, "buy filter is misconfigured"
+    if max_mcap > 0:
+        # A market-cap maximum is set (Pit): the coin must report a
+        # market cap at or below it. No market-cap data means no
+        # buy — fail-closed, never a guess at the coin's size.
+        mcap = entry.get("market_cap_usd")
+        if mcap is None:
+            return False, "no market cap data"
+        try:
+            mcap = float(mcap)
+        except (TypeError, ValueError):
+            return False, "no market cap data"
+        if not _gte(max_mcap, mcap):
+            return False, (f"market cap ${mcap:,.0f} is above the "
+                           f"${max_mcap:,.0f} maximum")
     return True, ""
 
 
@@ -266,6 +287,22 @@ def _passes_devnet_watchlist_filter(entry, cfg, signal_pct):
         if not _gte(mcap, min_mcap):
             return False, (f"market cap ${mcap:,.0f} is below the "
                            f"${min_mcap:,.0f} minimum")
+    try:
+        max_mcap = float(cfg.get("max_market_cap_usd",
+                                 BUY_FILTER_DEFAULT["max_market_cap_usd"]))
+    except (TypeError, ValueError):
+        return False, "buy filter is misconfigured"
+    if max_mcap > 0:
+        mcap = entry.get("market_cap_usd")
+        if mcap is None:
+            return False, "no market cap data"
+        try:
+            mcap = float(mcap)
+        except (TypeError, ValueError):
+            return False, "no market cap data"
+        if not _gte(max_mcap, mcap):
+            return False, (f"market cap ${mcap:,.0f} is above the "
+                           f"${max_mcap:,.0f} maximum")
     return True, ""
 
 

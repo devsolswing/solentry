@@ -157,11 +157,12 @@ class TestBotsPresets(UiBase):
         self.assertNotIn("presetList", show)
 
     def test_preset_window_is_clyde_and_gnat_buttons_only(self):
-        """Owner (2026-11-11) + Gnat (2026-11-21): the preset view
-        is BUTTONS ONLY — no description, no rules, no notes. Two
-        buttons, Clyde and Gnat, each a carousel item like an
-        active bot card (icon, name, gold Preset pill, stats line),
-        each POSTing to create its preset."""
+        """Owner (2026-11-11) + Gnat (2026-11-21) + Pit Sweeper
+        (2026-11-23): the preset view is BUTTONS ONLY — no
+        description, no rules, no notes. Three buttons, Clyde,
+        Gnat and Pit Sweeper, each a carousel item like an active
+        bot card (icon, name, gold Preset pill, stats line), each
+        POSTing to create its preset."""
         self._choose_mode("paper")
         html = self._html("/bots")
         # No separate preset list element anywhere.
@@ -176,10 +177,11 @@ class TestBotsPresets(UiBase):
         m = re.search(r'<form[^>]*data-preset-item[^>]*>', window)
         self.assertIsNotNone(m, "Clyde form not found")
         self.assertIn("hidden", m.group(0))
-        # Two POST forms, to the Clyde and Gnat create routes.
-        self.assertEqual(window.count("<form"), 2)
+        # Three POST forms, to the Clyde, Gnat and Pit create routes.
+        self.assertEqual(window.count("<form"), 3)
         self.assertIn('action="/bots/preset/clyde"', window)
         self.assertIn('action="/bots/preset/gnat"', window)
+        self.assertIn('action="/bots/preset/pit"', window)
         # The button IS the card: same classes as a bot card.
         m = re.search(r'<button class="([^"]*)" type="submit"',
                       window)
@@ -193,6 +195,10 @@ class TestBotsPresets(UiBase):
         # Gnat's card: 🦟 icon, name, same gold Preset pill.
         self.assertIn("🦟", window)
         self.assertIn("<strong>Gnat</strong>", window)
+        # Pit Sweeper's card: ⛏️ icon, name tag with the active
+        # version, same gold Preset pill.
+        self.assertIn("⛏️", window)
+        self.assertIn("<strong>Pit Sweeper v1.0</strong>", window)
         # Gold Preset pill — never "Active" / "Silent ON": no bot
         # exists yet.
         self.assertIn('badge preset">Preset<', window)
@@ -202,6 +208,8 @@ class TestBotsPresets(UiBase):
         self.assertIn("bold · Buy 15% · Stop 4% · Max 3", window)
         # Gnat's stats line, same format as a bot card.
         self.assertIn("bold · Buy 18% · Stop 18% · Max 3", window)
+        # Pit Sweeper's stats line, same format as a bot card.
+        self.assertIn("bold · Buy 25% · Stop 4.9% · Max 1", window)
         # No bot-yet lines, no description of any kind.
         self.assertNotIn("ID:", window)
         self.assertNotIn("Created:", window)
@@ -281,7 +289,7 @@ class TestBotsPresets(UiBase):
     def test_preset_bots_order(self):
         names = [p["name"] for p in preset_bots()]
         self.assertEqual(names, ["Clyde", "Trenches", "Scanner",
-                                 "Gnat"])
+                                 "Gnat", "Pit Sweeper"])
 
     def test_create_clyde_from_preset(self):
         self._choose_mode("paper")

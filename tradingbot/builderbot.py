@@ -960,11 +960,15 @@ def _review_bot(db, bot, enc_key: bytes):
               f"${summary['net_pnl_usd']:.2f}) — tightening one step.")
     rules, error = load_rules(bot)
     if rules is not None and error is None \
-            and rules.get("kind") == "gnat":
+            and rules.get("kind") in ("gnat", "pit"):
         # Gnat's stops are non-negotiable (James's spec,
         # 2026-11-21) — the auto-tighten must not rewrite its
         # threshold, buy size or stop loss. A Gnat bot's rules
-        # change only when James says so.
+        # change only when James says so. Pit's rules change only
+        # through the shared brain's versioning (2026-11-23) — a
+        # per-bot tighten here would fight the shared version every
+        # Pit bot is supposed to run. (Pit also widens by design —
+        # see tradingbot/pit.py.)
         return None
     threshold = None
     if rules is not None and error is None:

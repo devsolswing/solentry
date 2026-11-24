@@ -550,10 +550,10 @@ class TestGnatRuleset(GnatBase):
         _cleaned, err = validate_ruleset(rules)
         self.assertIsNotNone(err)
 
-    def test_preset_bots_lists_gnat_last(self):
+    def test_preset_bots_lists_pit_last(self):
         names = [p["name"] for p in preset_bots()]
         self.assertEqual(names, ["Clyde", "Trenches", "Scanner",
-                                 "Gnat"])
+                                 "Gnat", "Pit Sweeper"])
         gnat = next(p for p in preset_bots() if p["key"] == "gnat")
         self.assertEqual(gnat["endpoint"], "bot_preset_gnat")
         self.assertEqual(gnat["notes"], GNAT_NOTES)

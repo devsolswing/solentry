@@ -45,7 +45,8 @@ def record_trade(db: sqlite3.Connection, user_id: int,
                  pnl_usd: float | None = None, exit_reason: str | None = None,
                  mode: str = "paper", now: str | None = None,
                  signature: str | None = None,
-                 sol_amount: float | None = None) -> str:
+                 sol_amount: float | None = None,
+                 preset_version: str | None = None) -> str:
     """Insert one ledger row and return its 8-digit trade ID. Retries
     with a fresh ID on a (rare) collision. Never raises for a
     collision — a ledger write that fails would hide a trade, so the
@@ -55,7 +56,15 @@ def record_trade(db: sqlite3.Connection, user_id: int,
     truncated prefix) and `sol_amount` the executed SOL — spent on a
     buy, received on a sell — both from the executor's confirmed
     transaction. Both are None for paper trades (no chain, no
-    signature) and for rows recorded before the columns existed."""
+    signature) and for rows recorded before the columns existed.
+
+    `preset_version` is the preset version the trade ran under
+    (Pit Sweeper name-tag number, e.g. '1.0') — the per-version win
+    rate / P&L tag. When None and the bot has a version on its row,
+    the bot's current version is read instead, so paper buys/sells
+    recorded through paper.py (which never sees a version) are
+    still tagged. None for manual trades and rows from before the
+    column existed."""
     from datetime import datetime, timezone
     now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # The column is NOT NULL: a buy has no exit reason, so store ''.
@@ -66,17 +75,27 @@ def record_trade(db: sqlite3.Connection, user_id: int,
             win = 1
         elif pnl_usd < 0:
             win = 0
+    if preset_version is None and bot_id is not None:
+        try:
+            row = db.execute(
+                "SELECT preset_version FROM bots WHERE id = ?",
+                (bot_id,)).fetchone()
+            if row is not None and row["preset_version"]:
+                preset_version = row["preset_version"]
+        except Exception:
+            preset_version = None
     for _attempt in range(5):
         trade_id = generate_support_id()
         try:
             db.execute(
                 "INSERT INTO trade_ledger (trade_id, user_id, bot_id, "
                 "coin, side, amount, price, total_usd, pnl_usd, win, "
-                "exit_reason, mode, created_at, signature, sol_amount) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "exit_reason, mode, created_at, signature, sol_amount, "
+                "preset_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (trade_id, user_id, bot_id, coin, side, amount, price,
                  total_usd, pnl_usd, win, exit_reason, mode, now,
-                 signature, sol_amount))
+                 signature, sol_amount, preset_version))
             db.commit()
             return trade_id
         except sqlite3.IntegrityError:
@@ -103,6 +122,42 @@ def bot_wl_summary(db: sqlite3.Connection, bot_id: int) -> dict:
         "win_rate": (wins / decided) if decided else None,
         "net_pnl_usd": net,
     }
+
+
+def version_wl_summary(db: sqlite3.Connection, bot_id: int) -> list:
+    """Win rate and net P&L per preset version for one bot, from
+    its closed sells — so v1.1 can be compared against v1.0 on
+    real results. One row per version that has closed sells,
+    oldest version first (by first trade, not by the version
+    string — '1.10' must not sort before '1.2'). Rows with no
+    version (trades from before versions existed) group under
+    'unversioned'. Each row is the bot_wl_summary shape plus the
+    version string."""
+    rows = db.execute(
+        "SELECT COALESCE(NULLIF(preset_version, ''), 'unversioned') "
+        "AS version, pnl_usd, win, id FROM trade_ledger "
+        "WHERE bot_id = ? AND side = 'sell' AND pnl_usd IS NOT NULL",
+        (bot_id,)).fetchall()
+    by_version: dict = {}
+    for r in rows:
+        entry = by_version.setdefault(r["version"], {
+            "version": r["version"], "trades": 0, "wins": 0,
+            "losses": 0, "net_pnl_usd": 0.0, "first_id": r["id"]})
+        entry["trades"] += 1
+        if r["win"] == 1:
+            entry["wins"] += 1
+        elif r["win"] == 0:
+            entry["losses"] += 1
+        entry["net_pnl_usd"] += float(r["pnl_usd"])
+        entry["first_id"] = min(entry["first_id"], r["id"])
+    out = []
+    for entry in sorted(by_version.values(),
+                        key=lambda e: e["first_id"]):
+        decided = entry["wins"] + entry["losses"]
+        entry["win_rate"] = (entry["wins"] / decided) if decided else None
+        del entry["first_id"]
+        out.append(entry)
+    return out
 
 
 def recent_trades(db: sqlite3.Connection, bot_id: int,

@@ -50,6 +50,33 @@
   {% endif %}
 </div>
 
+{% if version_wl is not none %}
+<div class="card">
+  <h2>Record by preset version</h2>
+  <p class="muted small">Every trade is tagged with the Pit Sweeper version it ran under, so a version that loses can be pinpointed and scrapped back to the previous one. The shared brain updates every Pit bot at once — your bot's version is its name tag.</p>
+  {% if version_wl %}
+  <table>
+    <tr><th>Version</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win rate</th><th>Net P&amp;L</th></tr>
+    {% for v in version_wl %}
+    <tr>
+      <td>v{{ v.version }}</td><td>{{ v.trades }}</td><td>{{ v.wins }}</td><td>{{ v.losses }}</td><td>{% if v.win_rate is not none %}{{ (v.win_rate * 100)|round(0) }}%{% else %}—{% endif %}</td><td>${{ "%.2f"|format(v.net_pnl_usd) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No closed trades yet — nothing to record by version.</p>
+  {% endif %}
+  {% if pit_change_log %}
+  <h3>Change log</h3>
+  <ol class="muted small">
+    {% for line in pit_change_log %}
+    <li>{{ line }}</li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Rule adjustments by builderBot</h2>
   {% if adjustments %}

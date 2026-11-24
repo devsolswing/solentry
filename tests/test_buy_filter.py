@@ -59,6 +59,9 @@ class TestBuyFilterUnit(unittest.TestCase):
             # Market-cap minimum, 0 = any size (builderBot sets it
             # when the user asks for one).
             "min_market_cap_usd": 0.0,
+            # Market-cap maximum, 0 = no cap (Pit Sweeper sets
+            # $25,000 so it only buys coins still early).
+            "max_market_cap_usd": 0.0,
         })
 
     def test_strong_signal_passes(self):

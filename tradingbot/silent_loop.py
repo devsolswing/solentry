@@ -53,6 +53,8 @@ from .devnet_watchlist import active_mints, enrich_scan
 from .executor import (_skip, execute_real_trade, is_curve_complete,
                        pending_signature_for, reconcile_pending_trades)
 from . import gate_fuel as gate_fuel_mod
+from . import pit as pit_mod
+from .gate_fuel import is_fuel_enrolled
 from .jupiter_executor import execute_jupiter_swap
 from .ledger import record_trade
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
@@ -71,7 +73,7 @@ from .rules import (GNAT_BREAKEVEN_PLUS_PCT, GNAT_BUY_SIZE_PCT,
                     GNAT_TIER2_PROFIT_PCT, GNAT_TIME_DECAY_MIN_GAIN_PCT,
                     GNAT_TIME_DECAY_SECONDS, GNAT_TRAIL_HIGH_PCT,
                     GNAT_TRAIL_LOW_PCT, GNAT_TRAIL_TIGHTEN_AT_PCT,
-                    load_rules)
+                    PIT_BUY_SIZE_SOL, load_rules)
 from .scanner import (BREAKEVEN_TRIGGER_PCT, check_top10_concentration,
                       check_top10_rug, clear_watches, detect_regime,
                       gain_3m_pct, gain_window_pct, next_ladder_rung,
@@ -1081,6 +1083,191 @@ def _mint_price_map(coins) -> dict:
     return out
 
 
+def _pit_buy_halt(db, bot, now_ts, feed, prices_data, daily_loss_sol):
+    """Pit daily-loss breaker: down the breaker amount (0.025 SOL
+    by default — about $5 CAD at the Nov-23 SOL price) in a day,
+    and the bot buys nothing more until the next day. The breaker
+    reads today's realized sells from the trade ledger; an empty
+    ledger means no losses, so it never fires spuriously. Without
+    a live SOL price the $5 figure has no exchange rate — the
+    breaker then fails open, as documented in the build MANIFEST.
+    Returns (halted, reason)."""
+    if bot["mode"] == "paper":
+        return False, ""
+    # created_at is stored as an ISO string ("2026-11-23T...Z"),
+    # not an epoch — match today's date by prefix, like the Gnat
+    # breaker. DATE(created_at, 'unixepoch') would be NULL here
+    # and the breaker would never fire.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = db.execute(
+        "SELECT pnl_usd FROM trade_ledger WHERE bot_id = ? "
+        "AND side = 'sell' AND pnl_usd IS NOT NULL AND "
+        "substr(created_at, 1, 10) = ?",
+        (bot["id"], today)).fetchall()
+    daily_pnl_usd = sum(float(r["pnl_usd"]) for r in rows)
+    if daily_pnl_usd >= 0.0:
+        return False, ""
+    sol_price = _live_sol_price_usd(feed, prices_data)
+    if sol_price is None or sol_price <= 0:
+        # No live SOL price: the $5 CAD breaker has no exchange
+        # rate, so it cannot be computed honestly. Fail open and
+        # say so — the worst case is one unprotected day, not a
+        # bot stopped by a made-up number.
+        return False, ""
+    loss_sol = -daily_pnl_usd / sol_price
+    if loss_sol >= float(daily_loss_sol):
+        return True, (
+            f"Pit daily-loss breaker: down {loss_sol:.3f} SOL "
+            f"today (limit {float(daily_loss_sol):.3f} SOL) — no new "
+            f"buys until tomorrow")
+    return False, ""
+
+
+def _pit_hard_exit_reason(avg, peak, price, stop_loss_pct,
+                          breakeven_trigger_pct):
+    """Pit hard exits, from the live price: the 4.9% stop loss
+    fires in any time period, and a position that reached +6% has
+    its stop moved to breakeven. This is a TRIGGER — it fires at
+    -4.9% and the position exits at the next available price, so
+    with 5% exit slippage the realized loss can be about -9.9%.
+    The preset summary says so plainly; 'never lose more than the
+    stop loss' is not promised anywhere. Returns a reason string
+    or ''."""
+    if price <= avg * (1.0 - float(stop_loss_pct) / 100.0):
+        return (f"stop loss: -{stop_loss_pct}% in any time period — "
+                f"exit now, worst case about "
+                f"-{stop_loss_pct + 5.0:.1f}% realized at 5% exit "
+                f"slippage")
+    if (peak is not None and peak > 0
+            and peak >= avg * (1.0 + float(breakeven_trigger_pct) / 100.0)
+            and price <= avg):
+        return ("breakeven stop: peak reached "
+                f"+{breakeven_trigger_pct}% and the price fell "
+                f"back to the entry — sell at cost")
+    return ""
+
+
+def _pit_pullback_fires(entry, pit_settings):
+    """Pit pullback, from the 5-minute bucket: the coin fell at or
+    below -2% in the last 5 minutes — the top of the list is a
+    dead coin now, so the position closes. Returns True/False."""
+    change = entry.get("change_5m_pct") if entry else None
+    if change is None:
+        return False
+    try:
+        change = float(change)
+    except (TypeError, ValueError):
+        return False
+    return change <= -float(pit_settings.get("pullback_pct", 2.0))
+
+
+def _pit_flat_fires(entry, pit_settings):
+    """Pit flat-dead, from the 5-minute bucket: the coin moved less
+    than +/-0.5% in the last 5 minutes — no movement, no signal,
+    close it and consider it dead. Returns True/False."""
+    change = entry.get("change_5m_pct") if entry else None
+    if change is None:
+        return False
+    try:
+        change = float(change)
+    except (TypeError, ValueError):
+        return False
+    return abs(change) <= float(pit_settings.get("flat_pct", 0.5))
+
+
+def _pit_debounced_exit(db, bot_id, coin, kind, condition):
+    """The Pit 2-tick debounce: a pullback or flat exit fires only
+    when the condition holds on two consecutive loop ticks (the
+    votes live in bot_positions.pit_exit_votes, the kind in
+    pit_exit_kind, so a pullback vote can never be spent on a
+    flat exit). A condition that clears resets the votes. Returns
+    True when the exit fires on this tick. Hard exits (stop,
+    breakeven, take profit, rug) never go through this — they fire
+    immediately."""
+    pos = db.execute(
+        "SELECT pit_exit_votes, pit_exit_kind FROM bot_positions "
+        "WHERE bot_id = ? AND coin_id = ?",
+        (bot_id, coin)).fetchone()
+    if pos is None:
+        return False
+    votes = int(pos["pit_exit_votes"] or 0)
+    stored_kind = pos["pit_exit_kind"] or ""
+    if not condition:
+        if stored_kind == kind:
+            db.execute(
+                "UPDATE bot_positions SET pit_exit_votes = 0, "
+                "pit_exit_kind = '' WHERE bot_id = ? AND coin_id = ?",
+                (bot_id, coin))
+            db.commit()
+        return False
+    votes = votes + 1 if stored_kind == kind else 1
+    db.execute(
+        "UPDATE bot_positions SET pit_exit_votes = ?, "
+        "pit_exit_kind = ? WHERE bot_id = ? AND coin_id = ?",
+        (votes, kind, bot_id, coin))
+    db.commit()
+    return votes >= 2
+
+
+def _pit_entry_gates(db, cfg, entry, rpc_factory, pit_settings):
+    """Pit entry gates, applied after the shared buy filter: the
+    buys must outnumber the sells at least 2 to 1 in the 5-minute
+    bucket, and the coin must sit between 15% and 65% through its
+    bonding curve (read on-chain). The devnet watchlist carve-out
+    skips both gates for test mints, exactly like Gnat's, so the
+    devnet paper path still exercises the engine. Returns
+    (True, '') or (False, reason)."""
+    mint = entry.get("mint")
+    if not mint:
+        return False, "no mint to check"
+    if entry.get("devnet_watchlist"):
+        # Devnet watchlist mints (the operator's own test coins)
+        # skip both gates: they have no DexScreener txn data and
+        # their curves sit below 15%, so the gates would block
+        # every devnet test buy. The gain, volume, scam and
+        # 2-scan gates still apply to them, so exits stay testable
+        # on devnet.
+        return True, ""
+    buys = entry.get("txns_m5_buys")
+    sells = entry.get("txns_m5_sells")
+    try:
+        buys = int(buys) if buys is not None else None
+        sells = int(sells) if sells is not None else None
+    except (TypeError, ValueError):
+        buys = sells = None
+    ratio = float(pit_settings.get("buy_ratio_min", 2.0))
+    if buys is None or sells is None:
+        return False, ("pit: no 5-minute buy/sell counts — buys "
+                       "must outnumber sells 2 to 1")
+    if sells <= 0:
+        if buys <= 0:
+            return False, ("pit: no 5-minute buys — buys must "
+                           "outnumber sells 2 to 1")
+    elif buys < ratio * sells:
+        return False, (f"pit: buys {buys} vs sells {sells} in the "
+                       f"last 5 minutes — buys must outnumber "
+                       f"sells at least {ratio:g} to 1")
+    if rpc_factory is None:
+        return False, "pit: no RPC connection — curve band unreadable"
+    try:
+        rpc = rpc_factory(cfg.rpc_url)
+        curve_pda, _bump = bonding_curve_pda(mint)
+        account = rpc.get_account_info(curve_pda)
+        if account is None:
+            return False, "pit: no bonding curve found for this mint"
+        curve = parse_bonding_curve(
+            account.get("data") if account else None)
+        progress = curve_progress_pct(curve)
+    except Exception as exc:
+        return False, f"pit: curve read failed — {exc}"
+    lo = float(pit_settings.get("curve_min_pct", 15.0))
+    hi = float(pit_settings.get("curve_max_pct", 65.0))
+    if progress < lo or progress > hi:
+        return False, (f"pit: curve {progress:.0f}% through — outside "
+                       f"the {lo:g}-{hi:g}% band")
+    return True, ""
+
+
 def _positions(db: sqlite3.Connection, bot_id: int) -> dict:
     rows = db.execute(
         "SELECT * FROM bot_positions WHERE bot_id = ?", (bot_id,)).fetchall()
@@ -1390,7 +1577,8 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
               signals: dict | None = None,
               feed=None, prices_data: dict | None = None,
               kind: str | None = None,
-              decision_price_as_of: float | None = None) -> None:
+              decision_price_as_of: float | None = None,
+              pit_settings: dict | None = None) -> None:
     """Buy `coin` for a bot within its limits, or skip with a reason.
 
     `signals` is the buy-time signal snapshot from the feed entry
@@ -1399,8 +1587,11 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
     got bought. None for v1 bots and manual buys. `price` is the live
     mark price; a real position's cost basis is the EXECUTED spend
     when the executor reports it (see below), never the mark.
-    `kind` is the bot's rule kind: only gnat sizes in fixed SOL —
-    every other kind buys a % of the bankroll.
+    `kind` is the bot's rule kind: only gnat and pit size in fixed
+    SOL — every other kind buys a % of the bankroll. `pit_settings`
+    is the bot's versioned 'pit' rules block (the source of the
+    0.05 SOL fixed size); the module constant is only the fallback
+    when the caller did not pass it.
     `decision_price_as_of` is when the decision price was fetched
     (epoch seconds, the scan time): the real executor refuses a
     buy on a price older than the freshness window. None when the
@@ -1419,6 +1610,25 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
             if sol_price is not None and sol_price > 0:
                 buy_usd = GNAT_BUY_SIZE_SOL * sol_price
                 size_note = " (0.25 SOL size)"
+            else:
+                buy_usd = bankroll * float(bot["buy_size_pct"]) / 100.0
+                size_note = (f" (fallback "
+                             f"{float(bot['buy_size_pct']):.0f}% size — "
+                             f"no live SOL price)")
+        elif kind == "pit":
+            # Fixed 0.05 SOL per trade (25% of the 0.20 SOL bankroll
+            # cap — James's spec), converted at the live SOL price.
+            # The size comes from the bot's versioned rules; the
+            # module constant is only the fallback when the caller
+            # did not pass them. No live SOL price → fall back to
+            # the bot row's buy-size % of the bankroll, and say so
+            # on the buy line — the fallback is never silent.
+            pit_size = float((pit_settings or {}).get(
+                "buy_size_sol", PIT_BUY_SIZE_SOL))
+            sol_price = _live_sol_price_usd(feed, prices_data)
+            if sol_price is not None and sol_price > 0:
+                buy_usd = pit_size * sol_price
+                size_note = f" ({pit_size:g} SOL size)"
             else:
                 buy_usd = bankroll * float(bot["buy_size_pct"]) / 100.0
                 size_note = (f" (fallback "
@@ -1493,7 +1703,25 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         actions.append({"action": "skip", "coin": coin,
                         "reason": "real balance unavailable"})
         return
-    amount_sol = balance * float(bot["buy_size_pct"]) / 100.0
+    if kind == "pit":
+        # Fixed 0.05 SOL per trade from the bot's versioned rules
+        # (25% of the 0.20 SOL bankroll cap) — real sizing uses the
+        # cap, never the whole wallet balance. A wallet under the
+        # fixed size buys nothing, instead of shrinking the trade
+        # to whatever is left.
+        amount_sol = float((pit_settings or {}).get(
+            "buy_size_sol", PIT_BUY_SIZE_SOL))
+        if amount_sol > balance:
+            _log(db, bot["user_id"], "silent_skip",
+                 f"Silent bot '{bot['name']}': buy of {coin} skipped "
+                 f"— insufficient real balance ({balance:.4f} SOL — "
+                 f"a Pit trade needs {amount_sol:.4f} SOL).",
+                 bot["mode"])
+            actions.append({"action": "skip", "coin": coin,
+                            "reason": "insufficient real balance"})
+            return
+    else:
+        amount_sol = balance * float(bot["buy_size_pct"]) / 100.0
     if amount_sol <= 0:
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': buy of {coin} skipped — "
@@ -1634,7 +1862,7 @@ def _rug_reason(rug: dict, kind: str, coin: str, price: float,
     triggers on that fall, never on a faked "dev sold" signal.
     """
     drop_5m = float(rug["drop_5m_pct"])
-    if kind in ("trenches", "scanner", "gnat") and price_map:
+    if kind in ("trenches", "scanner", "gnat", "pit") and price_map:
         entry = price_map.get(coin) or {}
         change_5m = entry.get("change_5m_pct")
         if change_5m is not None and float(change_5m) <= -drop_5m:
@@ -1692,11 +1920,13 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     db.commit()
 
     kind = rules["kind"]
-    if kind in ("trenches", "scanner", "gnat"):
+    if kind in ("trenches", "scanner", "gnat", "pit"):
         if not trenches_data or trenches_data.get("error"):
             why = (trenches_data or {}).get("error") or "feed unavailable"
             feed_name = ("scanner" if kind == "scanner"
-                         else ("gnat" if kind == "gnat" else "trenches"))
+                         else ("gnat" if kind == "gnat"
+                               else ("pit" if kind == "pit"
+                                     else "trenches")))
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': {feed_name} feed "
                  f"unavailable — {why[:80]}. No trades this scan.",
@@ -1711,7 +1941,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         price_map = _mint_price_map(json.loads(bot["coins"]))
 
     def _price_for(coin: str):
-        if kind in ("trenches", "scanner", "gnat"):
+        if kind in ("trenches", "scanner", "gnat", "pit"):
             entry = price_map.get(coin)
             return entry["price_usd"] if entry else None
         entry = (price_map or {}).get(coin)
@@ -1805,7 +2035,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         # skipped for this scan — logged once per bot, never faked,
         # and the other exits still apply.
         top10 = rules.get("top10_rug")
-        if kind in ("scanner", "trenches", "gnat") and top10:
+        if kind in ("scanner", "trenches", "gnat", "pit") and top10:
             try:
                 top10_client = _top10_client_for_mint(
                     cfg, coin, rpc_factory, rpc_cache)
@@ -1857,9 +2087,18 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         # Gnat runs its own hard exits: the -18% stop, the breakeven
         # +2% armed at +40%, and the tiered 18%/12% trailing stop
         # on the moonbag — never the shared helper's 10% breakeven
-        # or flat trailing.
+        # or flat trailing. Pit runs its own too: the 4.9% stop in
+        # any time period, and the breakeven stop armed at +6% —
+        # both from the versioned 'pit' block, never the bot row's
+        # stop loss.
         if kind == "gnat":
             hard = _gnat_hard_exit_reason(avg_price, peak, price)
+        elif kind == "pit":
+            pit_settings = rules["pit"]
+            hard = _pit_hard_exit_reason(
+                avg_price, peak, price,
+                float(pit_settings["stop_trigger_pct"]),
+                float(pit_settings["breakeven_trigger_pct"]))
         else:
             hard = _hard_exit_reason(stop_loss_pct, trailing_pct, kind,
                                      avg_price, peak, price)
@@ -1868,6 +2107,22 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                            rpc_factory, real_executor, actions,
                            feed=feed, prices_data=prices_data)
             continue
+        # Pit pullback (pit only): a 2% or worse decline in the
+        # 5-minute bucket sells everything — before the take-profit
+        # rung, so a coin at +11% that dips 2% sells at +9% and
+        # never reaches +12%. Debounced: two consecutive ticks.
+        if kind == "pit":
+            entry = (price_map or {}).get(coin) or {}
+            if _pit_debounced_exit(db, bot["id"], coin, "pullback",
+                                   _pit_pullback_fires(entry,
+                                                       rules["pit"])):
+                _sell_position(
+                    db, cfg, bot, coin, price,
+                    "pullback: 5-minute change -2% or worse — the "
+                    "top of the list is dead",
+                    rpc_factory, real_executor, actions,
+                    feed=feed, prices_data=prices_data)
+                continue
         stage = int(pos["ladder_stage"] or 0)
         ladder_fired = False
         if kind == "scanner" and rules.get("trending_ladder"):
@@ -1942,6 +2197,40 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     rpc_factory, real_executor, actions,
                     feed=feed, prices_data=prices_data)
                 continue
+        # Pit flat-dead + time cap (pit only): a coin that moved
+        # less than +/-0.5% in 5 minutes is dead (debounced, like
+        # the pullback); a trade that has not hit +12% or the stop
+        # within 10 minutes closes at market. They run after the
+        # ladder so a rung that fired this pass still pays out
+        # first. The position may have been closed by the rung
+        # (Pit sells 100% at +12%), so it is re-read before either
+        # fires.
+        if kind == "pit":
+            if _positions(db, bot["id"]).get(coin) is None:
+                continue
+            entry = (price_map or {}).get(coin) or {}
+            if _pit_debounced_exit(db, bot["id"], coin, "flat",
+                                   _pit_flat_fires(entry, rules["pit"])):
+                _sell_position(
+                    db, cfg, bot, coin, price,
+                    "flat: 5-minute change within +/-0.5% — no "
+                    "movement, dead coin",
+                    rpc_factory, real_executor, actions,
+                    feed=feed, prices_data=prices_data)
+                continue
+            opened_at = (pos["opened_at"]
+                         if "opened_at" in pos.keys() else None)
+            opened_ts = (_parse_scan_time(opened_at)
+                         if opened_at else None)
+            if (opened_ts is not None
+                    and now_ts - opened_ts
+                    > float(rules["pit"]["max_hold_seconds"])):
+                _sell_position(
+                    db, cfg, bot, coin, price,
+                    "time cap: 10 minutes without +12% or the stop",
+                    rpc_factory, real_executor, actions,
+                    feed=feed, prices_data=prices_data)
+                continue
         # Signal-death exit (scanner only): the position is held
         # only while the signal keeps coming. When the 5-minute
         # gain, the volume edge and the buyer edge are ALL gone,
@@ -2010,6 +2299,42 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             actions.append({"action": "skip", "coin": "",
                             "reason": halt_reason})
             return actions
+    # Pit circuit breaker (pit only): the daily-loss breaker from
+    # James's spec — down $5 CAD (~0.025 SOL) in a day stops new
+    # buys until tomorrow. Real mode only: a paper loss is play
+    # money, and the paper test measures the rule, not the breaker.
+    if kind == "pit":
+        halted, halt_reason = _pit_buy_halt(
+            db, bot, now_ts, feed, prices_data,
+            float(rules["pit"]["daily_loss_sol"]))
+        if halted:
+            if not _breaker_logged(db, bot["id"],
+                                   "pit daily-loss breaker"):
+                _log(db, bot["user_id"], "silent_breaker",
+                     f"Silent bot '{bot['name']}': {halt_reason}.",
+                     bot["mode"])
+            actions.append({"action": "skip", "coin": "",
+                            "reason": halt_reason})
+            return actions
+    # Pit fuel enrollment (pit real mode only): a Pit bot whose
+    # owner has never opted into $GATE fuel does not trade for free
+    # in the background — it is blocked with a plain message until
+    # the owner taps 'fuel trades with Gate' on the wallet page.
+    # The position exits above already ran; this gates only new
+    # buys. Logged once per day, not once per scan.
+    if kind == "pit" and bot["mode"] == "real":
+        if not is_fuel_enrolled(db, bot["user_id"]):
+            reason = ("Pit real trades need fuel enrollment — tap "
+                      "'fuel trades with Gate' on the wallet page "
+                      "to opt in. No buy this scan.")
+            if not _breaker_logged(db, bot["id"],
+                                   "pit fuel enrollment"):
+                _log(db, bot["user_id"], "silent_skip",
+                     f"Silent bot '{bot['name']}': {reason}",
+                     bot["mode"])
+            actions.append({"action": "skip", "coin": "",
+                            "reason": reason})
+            return actions
 
     # 2. Buys: strongest qualifying gainer, at most max_new per scan.
     bought = 0
@@ -2075,6 +2400,121 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 continue
             ranked.append((gain, entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
+    elif kind == "pit":
+        # Pit ranks by the 5-minute gain from the feed itself — the
+        # feed provides change_5m_pct, so no loop marks are needed.
+        # A coin gaining 6.3% or more in 5 minutes goes to the top
+        # of the watch list; a coin above the mcap cap is logged as
+        # a miss for the shared brain instead of being bought.
+        pit_settings = rules["pit"]
+        threshold = float(rules["buy"]["threshold_pct"])
+        held = set(_positions(db, bot["id"]))
+        movers = []
+        for entry in trenches_data["candidates"]:
+            change = entry.get("change_5m_pct")
+            try:
+                change = float(change) if change is not None else None
+            except (TypeError, ValueError):
+                change = None
+            if change is None or change < threshold:
+                continue
+            movers.append((change, entry))
+        movers.sort(key=lambda item: item[0], reverse=True)
+        # Missed coins: above the mcap cap, so the bot could not
+        # buy them — the shared brain reviews them after the
+        # evaluations and raises the cap when 2 have been seen
+        # since the active version was published.
+        max_cap = float(rules["buy_filter"]["max_market_cap_usd"])
+        for change, entry in movers:
+            mcap = entry.get("market_cap_usd")
+            try:
+                mcap = float(mcap) if mcap is not None else None
+            except (TypeError, ValueError):
+                mcap = None
+            if mcap is not None and max_cap > 0 and mcap > max_cap:
+                pit_mod.record_pit_missed_coin(
+                    db, entry["mint"], mcap, change)
+        # Watch list memory: the top 5 movers, with scrap votes for
+        # coins that show resistance or vanish from the feed.
+        pit_mod.update_pit_watchlist(
+            db, bot["id"], [e for _change, e in movers], price_map,
+            pit_settings, _now())
+        # Slow-time gate: only trade when the market is busy. The
+        # top 5 movers must average 10 or more buys in 5 minutes —
+        # a quiet scan is a skip, not a smaller trade. (Txn count
+        # only: the feed has no chain-congestion or rug-time data,
+        # so the slow-market and rug-time wording is dropped.) When
+        # no top-5 entry carries txn counts at all, the gate cannot
+        # be measured and is skipped — that is the devnet paper
+        # path, whose test mints have no txn data.
+        top5 = movers[:5]
+        top5_buys = []
+        for _change, entry in top5:
+            buys = entry.get("txns_m5_buys")
+            if buys is not None:
+                try:
+                    top5_buys.append(int(buys))
+                except (TypeError, ValueError):
+                    pass
+        slow = (bool(top5_buys)
+                and sum(top5_buys) / len(top5_buys)
+                < float(pit_settings["min_top5_avg_buys_5m"]))
+        if slow:
+            _log(db, bot["user_id"], "silent_skip",
+                 f"Silent bot '{bot['name']}': market too slow — top 5 "
+                 f"movers average "
+                 f"{sum(top5_buys) / len(top5_buys):.1f} buys in 5 "
+                 f"minutes (needs "
+                 f"{float(pit_settings['min_top5_avg_buys_5m']):.0f}). "
+                 f"No buy this scan.", bot["mode"])
+            actions.append({"action": "skip", "coin": "",
+                            "reason": "market too slow — top 5 movers "
+                                      "average under 10 buys in 5 minutes"})
+        else:
+            for change, entry in movers:
+                if entry["mint"] in held:
+                    continue
+                ok, why = passes_buy_filter(
+                    entry, rules.get("buy_filter"), change,
+                    devnet_watchlist_active=(cfg.network == "devnet"))
+                if not ok:
+                    filtered.append((change, entry, why))
+                    continue
+                # Volume confirmation: the 5-minute volume must be
+                # rising — the trending check from detect_regime,
+                # volume surge 2x plus buys outnumbering sells,
+                # with NO 1-hour-gain requirement (a fresh coin
+                # has no 1-hour trend yet). Devnet watchlist test
+                # mints have no volume data, so the check is
+                # skipped for them — the same carve-out as the buy
+                # filter and the entry gates.
+                if not entry.get("devnet_watchlist") and \
+                        detect_regime(entry, {"volume_surge_x": 2.0,
+                                              "require_buy_dominance": True,
+                                              "require_h1_gain": False}) != "trending":
+                    filtered.append((change, entry,
+                                     "volume confirmation: not trending — "
+                                     "5-minute volume below 2x the hourly "
+                                     "pace or buys do not outnumber sells"))
+                    continue
+                # Pit entry gates: buys at least 2x sells, curve
+                # band 15-65% read on-chain.
+                ok, why = _pit_entry_gates(
+                    db, cfg, entry, rpc_factory, pit_settings)
+                if not ok:
+                    filtered.append((change, entry, why))
+                    continue
+                # 2-scan confirmation: the signal must still be
+                # passing on a later scan. A one-scan spike never
+                # buys.
+                if not _signal_confirmed(db, bot["id"], entry["mint"],
+                                         change, now_ts, interval):
+                    filtered.append(
+                        (change, entry,
+                         "signal not yet confirmed — first seen this scan"))
+                    continue
+                ranked.append((change, entry))
+            ranked.sort(key=lambda item: item[0], reverse=True)
     elif kind == "trenches":
         threshold = float(rules["buy"]["threshold_pct"])
         change_key = _BUY_METRIC_TO_CHANGE_KEY[rules["buy"]["metric"]]
@@ -2107,7 +2547,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 continue
             ranked.append((float(change), entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
-    if kind in ("trenches", "scanner", "gnat"):
+    if kind in ("trenches", "scanner", "gnat", "pit"):
         if not ranked and filtered:
             # Every threshold-passing candidate failed the filter —
             # say so once, naming the strongest rejected coin.
@@ -2132,7 +2572,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                                 "reason": "max open trades reached"})
                 max_open_hit = True
                 break
-            if kind in ("scanner", "gnat"):
+            if kind in ("scanner", "gnat", "pit"):
                 # Re-buy cooldown: a coin closed at a loss is not
                 # bought again for 30 minutes.
                 blocked_until = _cooldown_until(
@@ -2162,11 +2602,12 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 "sells_5m": entry.get("txns_m5_sells"),
                 "regime": detect_regime(entry, rules.get("regime")),
             }
-            if kind in ("scanner", "gnat"):
+            if kind in ("scanner", "gnat", "pit"):
                 # The signal features for the signal-outcome log:
-                # the triggering 3-minute gain, the 5-minute volume
-                # ratio vs the hourly pace, the buyer ratio, and
-                # the 1-hour trend.
+                # the triggering gain, the 5-minute volume ratio
+                # vs the hourly pace, the buyer ratio, and the
+                # 1-hour trend. Pit's window is 5 minutes; scanner
+                # and Gnat use 3 minutes.
                 vol_m5 = entry.get("volume_m5_usd")
                 vol_h1 = entry.get("volume_h1_usd")
                 volume_ratio = None
@@ -2186,7 +2627,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 except (TypeError, ValueError):
                     buyer_ratio = None
                 signals["gain_pct"] = float(_change)
-                signals["gain_window"] = "3m"
+                signals["gain_window"] = "5m" if kind == "pit" else "3m"
                 signals["volume_ratio"] = volume_ratio
                 signals["buyer_ratio"] = buyer_ratio
                 signals["trend_1h_pct"] = entry.get("change_1h_pct")
@@ -2195,7 +2636,9 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                       rpc_factory, real_executor, actions,
                       signals=signals, feed=feed, kind=kind,
                       prices_data=prices_data,
-                      decision_price_as_of=decision_price_as_of)
+                      decision_price_as_of=decision_price_as_of,
+                      pit_settings=(rules["pit"]
+                                    if kind == "pit" else None))
             if len(actions) > before and actions[-1]["action"] == "buy":
                 bought += 1
     else:
@@ -2437,7 +2880,7 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
         rules, error = load_rules(bot)
         if rules is None or error is not None:
             continue
-        if rules["kind"] not in ("scanner", "trenches", "gnat"):
+        if rules["kind"] not in ("scanner", "trenches", "gnat", "pit"):
             continue
         top10 = rules.get("top10_rug")
         if not top10:
@@ -2574,12 +3017,16 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
                     real_executor=None) -> list:
     """One fast-exit pass over the mints dirtied by live-feed ticks
     since the last pass: for every open position in a dirtied mint
-    (scanner, signals and gnat kinds — Trenches v2 owns trenches
+    (scanner, signals, gnat and pit kinds — Trenches v2 owns trenches
     exits), check the hard exits (rug sell, stop / breakeven stop,
     trailing stop) at the tick price and sell at once when one
-    fires. The loop is the backstop: if this thread misses a tick,
-    the next loop pass (30s) still fires the same exit through the
-    same shared helper. Returns the actions taken."""
+    fires. Pit also checks the pullback here: a tick 2% or more
+    below the last loop mark closes the position at once — the
+    loop's debounced 5-minute-bucket pullback is the careful
+    backstop, this is the fast one. The loop is the backstop: if
+    this thread misses a tick, the next loop pass (10s for Pit)
+    still fires the same exit through the same shared helper.
+    Returns the actions taken."""
     actions: list = []
     with _TICK_DIRTY_LOCK:
         mints = sorted(_TICK_DIRTY_MINTS)
@@ -2608,7 +3055,7 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
             rules, error = load_rules(bot)
             if rules is None or error is not None:
                 continue
-            if rules["kind"] not in ("scanner", "signals", "gnat"):
+            if rules["kind"] not in ("scanner", "signals", "gnat", "pit"):
                 continue
             pos = _positions(db, bot["id"]).get(mint)
             if not pos:
@@ -2627,6 +3074,12 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
             peak = float(peak) if peak is not None else avg_price
             if rules["kind"] == "gnat":
                 hard = _gnat_hard_exit_reason(avg_price, peak, price)
+            elif rules["kind"] == "pit":
+                pit_settings = rules["pit"]
+                hard = _pit_hard_exit_reason(
+                    avg_price, peak, price,
+                    float(pit_settings["stop_trigger_pct"]),
+                    float(pit_settings["breakeven_trigger_pct"]))
             else:
                 hard = _hard_exit_reason(float(bot["stop_loss_pct"]),
                                          float(rules["trailing_stop_pct"]),
@@ -2636,6 +3089,31 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
                 _sell_position(db, cfg, bot, mint, price, hard,
                                rpc_factory, real_executor, actions,
                                feed=feed)
+                continue
+            # Pit tick-level pullback: a tick 2% or more below the
+            # last loop mark (at most 5 minutes old) closes the
+            # position at once. The loop's debounced 5-minute-bucket
+            # pullback is the careful backstop — this is the fast
+            # one, and a single noisy tick is caught by the bucket
+            # check if this thread does not fire.
+            if rules["kind"] == "pit":
+                last = (pos["last_price"]
+                        if "last_price" in pos.keys() else None)
+                last_at = (pos["last_price_at"]
+                           if "last_price_at" in pos.keys() else None)
+                last_ts = (_parse_scan_time(last_at)
+                           if last_at else None)
+                if (last is not None and float(last) > 0
+                        and last_ts is not None
+                        and now_ts - last_ts <= 300
+                        and price <= float(last) * (1.0 - float(
+                            rules["pit"]["pullback_pct"]) / 100.0)):
+                    _sell_position(
+                        db, cfg, bot, mint, price,
+                        "pullback: 2% or more below the last loop "
+                        "mark — the top of the list is dead",
+                        rpc_factory, real_executor, actions, feed=feed)
+                    continue
     return actions
 
 
@@ -2697,7 +3175,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     for bot in bots:
         rules, err = load_rules(bot)
         if rules is not None and rules["kind"] in ("trenches", "scanner",
-                                                  "gnat"):
+                                                  "gnat", "pit"):
             needs_trenches = True
             break
     if needs_trenches:
@@ -2736,6 +3214,18 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     outcomes = []
     for bot in bots:
         try:
+            # Pit shared brain (2026-11-23): a Pit bot running an
+            # older version adopts the active one before it
+            # evaluates — rule changes reach every Pit user in real
+            # time, on the next loop pass. Adoption never fails the
+            # evaluation: a bot that cannot adopt trades on its
+            # stored rules this pass.
+            try:
+                rules, _err = load_rules(bot)
+                if rules is not None and rules.get("kind") == "pit":
+                    bot = pit_mod.maybe_adopt_pit_version(db, bot) or bot
+            except Exception:
+                pass
             actions = _evaluate_bot(db, cfg, bot, prices_data, rpc_factory,
                                     real_executor,
                                     trenches_data=trenches_data, feed=feed,
@@ -2765,6 +3255,18 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
                 review_bot(db, bot, cfg.encryption_key)
         except Exception:
             pass
+    # Pit shared brain, missed-coin review (2026-11-23): after the
+    # evaluations, count the missed coins since the active version
+    # was published — 2 or more raises the mcap cap and publishes
+    # a new version, which every Pit bot adopts on its next pass.
+    # A review failure never breaks the loop.
+    try:
+        note = pit_mod.pit_review_missed_coins(
+            db, (trenches_data or {}).get("prices"))
+        if note:
+            print(f"[silent-loop] {note}", flush=True)
+    except Exception:
+        pass
     return outcomes
 
 

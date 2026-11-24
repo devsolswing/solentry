@@ -96,6 +96,24 @@
           <span class="bot-arrow" aria-hidden="true">›</span>
         </button>
       </form>
+      {# Pit Sweeper preset button (2026-11-23): same shape as
+         Clyde's and Gnat's — a carousel item alongside the active
+         bot cards, hidden until Presets is tapped. Button ONLY: no
+         description, no rules, no notes. It POSTs to create Pit
+         Sweeper on the active shared-brain version (the name tag
+         carries it, e.g. "Pit Sweeper v1.0"), landing on the bot
+         details page. The ⛏️ icon is the pit. #}
+      <form method="post" action="{{ pit_preset.create_url }}" data-preset-item hidden>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="card bot-card" type="submit" aria-label="Create the Pit Sweeper bot">
+          <span class="bot-ico" aria-hidden="true">⛏️</span>
+          <span class="bot-info">
+            <span class="bot-name"><strong>{{ pit_preset.name }}</strong> <span class="badge preset">Preset</span></span>
+            <span class="muted small">{{ pit_preset.strategy }} · Buy {{ pit_preset.buy_size_pct }}% · Stop {{ pit_preset.stop_loss_pct }}% · Max {{ pit_preset.max_open_trades }}</span>
+          </span>
+          <span class="bot-arrow" aria-hidden="true">›</span>
+        </button>
+      </form>
     </div>
   </div>
 
