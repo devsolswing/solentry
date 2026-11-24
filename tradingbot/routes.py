@@ -66,18 +66,22 @@ from .prices import clear_price_cache, get_prices
 from .builderbot import list_adjustments
 from .home_holdings import (enrich_row, fetch_chain_token_balances,
                             reconcile_holdings, sparkline_svg_1h)
-from .ledger import bot_wl_summary, recent_trades, version_wl_summary
+from .ledger import (bot_wl_summary, kind_wl_summary, recent_trades,
+                     version_wl_summary)
 from .pit import (current_pit_version, ensure_pit_version_1_0,
                   pit_changelog, pit_version_rules)
 from .rules import (CLYDE_CATEGORY, CLYDE_PRESET_NAME,
                     CLYDE_STOP_LOSS_PCT, GNAT_BUY_SIZE_PCT, GNAT_CATEGORY,
                     GNAT_PRESET_NAME, GNAT_STOP_LOSS_PCT,
-                    PIT_BANKROLL_SOL, PIT_BUY_SIZE_PCT, PIT_CATEGORY,
+                    MIDDY_BUY_SIZE_PCT, MIDDY_CATEGORY, MIDDY_PRESET_NAME,
+                    MIDDY_STOP_LOSS_PCT, PIT_BANKROLL_SOL, PIT_BUY_SIZE_PCT,
+                    PIT_CATEGORY,
                     PIT_PRESET_NAME, PIT_PRESET_VERSION_INITIAL,
                     PIT_STOP_LOSS_PCT, RUG_SELL_DEFAULT, SCANNER_CATEGORY,
                     SCANNER_DISPLAY, SCANNER_PRESET_NAME,
                     TRENCHES_CATEGORY, TRENCHES_PRESET_NAME, clyde_ruleset,
-                    gnat_ruleset, load_rules, pit_ruleset, preset_bots,
+                    gnat_ruleset, load_rules, middy_ruleset, pit_ruleset,
+                    preset_bots,
                     scanner_ruleset, summarize_rules, trenches_ruleset,
                     validate_ruleset)
 from .security import (decrypt_secret, encrypt_secret, hash_account_password,
@@ -4496,6 +4500,23 @@ def register_routes(app: Flask) -> None:
         _pit_version = (_pit_active["version"] if _pit_active
                         else PIT_PRESET_VERSION_INITIAL)
         pit_preset["name"] = f"{PIT_PRESET_NAME} v{_pit_version}"
+        # Middy joined the window 2026-11-24 as a fourth button
+        # with the same shape: its stats are the values its create
+        # route writes (strategy 'bold', buy size 20%, stop loss
+        # 5.5%, max 2 open). The card also shows Middy's VERIFIED
+        # PAPER results from the trade ledger (site-wide, paper
+        # mode only) — proof on card, paper results never presented
+        # as real profit. No paper trades yet means no numbers,
+        # never a guess.
+        middy_preset = next(p for p in presets if p["key"] == "middy")
+        middy_preset.update({
+            "strategy": "bold",
+            "buy_size_pct": MIDDY_BUY_SIZE_PCT,
+            "stop_loss_pct": MIDDY_STOP_LOSS_PCT,
+            "max_open_trades": 2,
+            "paper_wl": kind_wl_summary(
+                _db(app), MIDDY_CATEGORY, mode="paper"),
+        })
         return render_template("bots.html", **data,
                                memecoin_bots=memecoin_bots,
                                signing_tasks=signing_tasks,
@@ -4503,7 +4524,8 @@ def register_routes(app: Flask) -> None:
                                presets=presets,
                                clyde_preset=clyde_preset,
                                gnat_preset=gnat_preset,
-                               pit_preset=pit_preset)
+                               pit_preset=pit_preset,
+                               middy_preset=middy_preset)
 
     @app.route("/bots/create", methods=["GET", "POST"])
     @login_required
@@ -4826,6 +4848,49 @@ def register_routes(app: Flask) -> None:
               f"limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
+    @app.route("/bots/preset/middy", methods=["POST"])
+    @login_required
+    def bot_preset_middy():
+        """Create the Middy preset bot.
+
+        Paper mode, silent off. One per user — if a Middy bot
+        already exists, go to it instead of making a duplicate.
+        Stop loss 5.5% (Middy's hard number, on the bot row), buy
+        size 20% of balance per trade and max 2 open trades (the
+        preset defaults). Paper first: the $20 of real money
+        James set aside stays put until paper results verify
+        actual profit — nothing here funds or enables real
+        trading.
+        """
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        existing = db.execute(
+            "SELECT id FROM bots WHERE user_id = ? AND category = ? "
+            "AND name = ?",
+            (user["id"], MIDDY_CATEGORY, MIDDY_PRESET_NAME)).fetchone()
+        if existing:
+            flash("You already have a Middy bot.")
+            return redirect(url_for("bot_detail", bot_id=existing["id"]))
+        token = new_token()
+        cur = db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash, category, rules_json, platform) "
+            "VALUES (?, ?, 'bold', '[]', ?, ?, 'paper', 0, 2, ?, ?, ?, "
+            "'pump.fun')",
+            (user["id"], MIDDY_PRESET_NAME, MIDDY_BUY_SIZE_PCT,
+             MIDDY_STOP_LOSS_PCT, hash_token(token), MIDDY_CATEGORY,
+             json.dumps(middy_ruleset())))
+        db.commit()
+        _log(app, user["id"], "bot_create",
+             f"Created bot '{MIDDY_PRESET_NAME}' (Middy preset, "
+             f"paper). Silent trading is off.", "paper")
+        flash(f"Created the {MIDDY_PRESET_NAME} bot (Middy preset, "
+              f"paper). Turn silent trading on when you are ready — "
+              f"it only trades within its rules and limits.")
+        return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
+
     @app.route("/bots/<int:bot_id>")
     @login_required
     def bot_detail(bot_id: int):
@@ -4856,6 +4921,14 @@ def register_routes(app: Flask) -> None:
                 and rules.get("kind") == "pit":
             version_wl = version_wl_summary(_db(app), bot_id)
             pit_change_log = pit_changelog(_db(app))
+        # Middy: the site-wide win/loss aggregate across every
+        # Middy copy, all users summed — shown beside the bot's own
+        # record. Counts only, from the trade ledger (real sells
+        # carry the signer bot's executed-transaction records);
+        # no other user's individual results are ever shown.
+        kind_wl = None
+        if bot["category"] == MIDDY_CATEGORY:
+            kind_wl = kind_wl_summary(_db(app), MIDDY_CATEGORY)
         # The adjustment reason is stored encrypted; only this page
         # (the display layer) decrypts it for the owner. builderBot
         # itself never decrypts anything but its own chat state.
@@ -4873,6 +4946,7 @@ def register_routes(app: Flask) -> None:
                                wl_summary=wl_summary, trades=trades,
                                adjustments=adjustments,
                                version_wl=version_wl,
+                               kind_wl=kind_wl,
                                pit_change_log=pit_change_log)
 
     @app.route("/bots/<int:bot_id>/edit", methods=["GET", "POST"])

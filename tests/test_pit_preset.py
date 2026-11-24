@@ -361,10 +361,10 @@ class TestPitRuleset(PitBase):
     def test_preset_bots_order(self):
         names = [p["name"] for p in preset_bots()]
         self.assertEqual(names, ["Clyde", "Trenches", "Scanner",
-                                 "Gnat", "Pit Sweeper"])
-        pit = preset_bots()[-1]
-        self.assertEqual(pit["key"], "pit")
+                                 "Gnat", "Pit Sweeper", "Middy"])
+        pit = next(p for p in preset_bots() if p["key"] == "pit")
         self.assertEqual(pit["endpoint"], "bot_preset_pit")
+        self.assertEqual(preset_bots()[-1]["key"], "middy")
 
     def test_summary_states_the_worst_case(self):
         # The summary never promises "never lose more than the

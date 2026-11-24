@@ -72,7 +72,14 @@ from .rules import (GNAT_BREAKEVEN_PLUS_PCT, GNAT_BUY_SIZE_PCT,
                     GNAT_TIER2_PROFIT_PCT, GNAT_TIME_DECAY_MIN_GAIN_PCT,
                     GNAT_TIME_DECAY_SECONDS, GNAT_TRAIL_HIGH_PCT,
                     GNAT_TRAIL_LOW_PCT, GNAT_TRAIL_TIGHTEN_AT_PCT,
-                    PIT_BUY_SIZE_SOL, load_rules)
+                    MIDDY_BUY_DOMINANCE_RATIO, MIDDY_CATEGORY,
+                    MIDDY_COOLDOWN_SECONDS, MIDDY_DAILY_LOSS_BREAKER_PCT,
+                    MIDDY_MAX_BUYS_PER_HOUR, MIDDY_MID_HOLD_BUY_RATIO,
+                    MIDDY_MIN_BUYS_PER_HOUR, MIDDY_MIN_GAIN_5M_PCT, MIDDY_SLOW_FLAT_PCT,
+                    MIDDY_SLOW_SECONDS, MIDDY_STOP_LOSS_PCT,
+                    MIDDY_TP_CEILING_PCT, MIDDY_TP_MID_PCT,
+                    MIDDY_TP_SMALL_PCT,
+                    MIDDY_TRAILING_STOP_PCT, PIT_BUY_SIZE_SOL, load_rules)
 from .scanner import (BREAKEVEN_TRIGGER_PCT, check_top10_concentration,
                       check_top10_rug, clear_watches, detect_regime,
                       gain_3m_pct, gain_window_pct, next_ladder_rung,
@@ -477,13 +484,15 @@ def _cooldown_until(db, bot_id: int, mint: str,
 
 
 def _set_cooldown(db, bot_id: int, mint: str, reason: str,
-                  now_ts: float) -> None:
-    """Block re-buying (bot, mint) for REBUY_COOLDOWN_SECONDS after
-    a losing close. Never raises — a failed write simply means no
-    cooldown is recorded."""
+                  now_ts: float, seconds: float | None = None) -> None:
+    """Block re-buying (bot, mint) for `seconds` after a losing
+    close (default REBUY_COOLDOWN_SECONDS, 30 minutes — Middy
+    passes its own 5 minutes). Never raises — a failed write
+    simply means no cooldown is recorded."""
     try:
         until = datetime.fromtimestamp(
-            now_ts + REBUY_COOLDOWN_SECONDS,
+            now_ts + (REBUY_COOLDOWN_SECONDS if seconds is None
+                      else float(seconds)),
             tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         db.execute(
             "INSERT INTO bot_buy_cooldowns "
@@ -899,6 +908,254 @@ def _gnat_momentum_exhausted(entry: dict, peak_price: float,
         return float(change_5m) <= -GNAT_EXHAUST_DROP_5M_PCT
     except (TypeError, ValueError):
         return False
+
+
+# --- Middy preset (2026-11-24): James's spec, honest-mapped ------
+# Mid-exposure, paper-first. Every threshold below is James's
+# number unless the comment says REMY DEFAULT (the 1% gain floor,
+# the $1,000 volume floor, the +/-0.5% slow band, the 21% top-10
+# cap) or REMY PROPOSAL (the past-+55% moon test). The sub-second
+# entry is NOT enforced as written — entries run on the 10-second
+# loop with a second confirming scan; only the hard exits also
+# run on the tick-driven fast-exit thread (see MIDDY_NOTES).
+
+def _middy_hard_exit_reason(avg_price: float, peak_price: float,
+                            price: float) -> str | None:
+    """Middy's hard exits at `price`: the -5.5% hard stop from
+    entry and the -8% trailing stop from the highest price since
+    holding. No breakeven move — James ordered none. Pure — no
+    DB, so the loop and the tick-driven fast-exit thread share
+    exactly this logic. Returns the reason string or None."""
+    if avg_price <= 0 or price <= 0:
+        return None
+    peak = max(float(peak_price), price)
+    if _lte(price, avg_price * (1.0 - MIDDY_STOP_LOSS_PCT / 100.0)):
+        return "stop_loss"
+    if _lte(price, peak * (1.0 - MIDDY_TRAILING_STOP_PCT / 100.0)):
+        return "trailing stop"
+    return None
+
+
+def _middy_mid_hold(entry: dict) -> bool:
+    """The mid-level hold test: hold for the mid level ONLY while
+    the coin is still gaining AND buys beat sells 75/25 (3:1) in
+    the 5-minute bucket. JAMES'S NUMBER (2026-11-24 ~12:34) — a
+    stricter buy flow than the 1.35x entry dominance gate, because
+    holding for MORE profit demands a stronger flow than entering
+    did. Missing or unusable data fails closed — a hold that cannot
+    be verified is a sell. Pure — no DB."""
+    if not entry:
+        return False
+    change_5m = entry.get("change_5m_pct")
+    try:
+        change_5m = float(change_5m) if change_5m is not None else None
+    except (TypeError, ValueError):
+        return False
+    if change_5m is None or change_5m <= 0:
+        return False
+    buys = entry.get("txns_m5_buys")
+    sells = entry.get("txns_m5_sells")
+    try:
+        buys = int(buys) if buys is not None else None
+        sells = int(sells) if sells is not None else None
+    except (TypeError, ValueError):
+        return False
+    if buys is None or sells is None or buys <= 0:
+        return False
+    if sells <= 0:
+        return True
+    return buys >= MIDDY_MID_HOLD_BUY_RATIO * sells
+
+
+def _middy_take_profit_reason(entry: dict, avg_price: float,
+                              peak_price: float,
+                              price: float) -> str | None:
+    """Middy's two-tier take profit, in plain words — James's
+    numbers (2026-11-24 ~12:48): SMALL is 5%-25% (take the small
+    profit on coins Middy is done with, exit, forget the coin);
+    the HIGHER window is 25% to no more than 37% (hold for more
+    profit ONLY while the mid-level hold test passes — still
+    gaining AND buys beating sells 75/25); AT 37% the profit is
+    secured IMMEDIATELY and Middy moves on. The 37% cap is the
+    HARD CEILING: never hold past it, no exceptions — going
+    higher exposes Middy to rugs and to others securing their
+    profit, and Middy wants a clean exit before traders lock
+    profit (James, 2026-11-24 ~12:35). Below +5% there is no take
+    profit. peak_price is unused — the ceiling does not need the
+    peak, it only needs the profit from entry. Pure — no DB."""
+    if avg_price <= 0 or price <= 0:
+        return None
+    profit = (price - avg_price) / avg_price * 100.0
+    if profit < MIDDY_TP_SMALL_PCT:
+        return None
+    if profit >= MIDDY_TP_CEILING_PCT:
+        return (f"take profit: +{profit:.1f}% at/above the "
+                f"{MIDDY_TP_CEILING_PCT:.0f}% ceiling — secure the "
+                f"profit immediately and move on, never hold past it")
+    if _middy_mid_hold(entry):
+        return None
+    if profit >= MIDDY_TP_MID_PCT:
+        return (f"take profit: +{profit:.1f}% in the higher window "
+                f"(25%-37%) and the hold test failed — buys no "
+                f"longer beating sells 75/25 with the coin still "
+                f"gaining")
+    return (f"take profit: +{profit:.1f}% at the small take-profit "
+            f"level (+{MIDDY_TP_SMALL_PCT:.0f}%) and the mid-level "
+            f"hold test failed — buys no longer beating sells 75/25 "
+            f"with the coin still gaining")
+
+
+def _middy_slow_reason(opened_ts: float | None, entry: dict,
+                       now_ts: float) -> str | None:
+    """Middy slow coins: a flat coin sells all after 120 seconds.
+    Flat is the 5-minute change within +/-0.5% (the same band as
+    Pit). A position with no recorded open time, or no 5-minute
+    change, never fires — missing data exits nothing. Pure — no
+    DB."""
+    if opened_ts is None:
+        return None
+    if now_ts - opened_ts < MIDDY_SLOW_SECONDS:
+        return None
+    change_5m = (entry or {}).get("change_5m_pct")
+    if change_5m is None:
+        return None
+    try:
+        change_5m = float(change_5m)
+    except (TypeError, ValueError):
+        return None
+    if abs(change_5m) <= MIDDY_SLOW_FLAT_PCT:
+        return (f"slow coin: flat within +/-{MIDDY_SLOW_FLAT_PCT:.1f}% "
+                f"for {MIDDY_SLOW_SECONDS}s — selling all")
+    return None
+
+
+def _middy_already_bought(db, bot_id: int, mint: str) -> bool:
+    """True when this bot copy already bought `mint` once — paper
+    or real, open or closed. The trade ledger is the record: every
+    fill, paper and real, writes a buy row. A coin bought once is
+    never bought again by the same bot, even if the last trade
+    profited (James, 2026-11-24 ~12:22 MST: repeat buys would be
+    deemed a scam and avoided). Another bot copy buying the same
+    coin is unaffected — the check is per bot, not per coin."""
+    try:
+        row = db.execute(
+            "SELECT 1 FROM trade_ledger WHERE bot_id = ? AND coin = ? "
+            "AND side = 'buy' LIMIT 1",
+            (bot_id, mint)).fetchone()
+        return row is not None
+    except Exception:
+        # A ledger failure is a fail-CLOSED buy: without a
+        # trustworthy record, the coin is treated as already
+        # bought rather than risking a repeat buy.
+        return True
+
+
+def _middy_entry_gates(db, cfg, entry: dict, rpc_factory,
+                       rpc_cache: dict) -> tuple[bool, str]:
+    """Middy's own entry gate, after the gain + buy-filter +
+    momentum checks: buys must beat sells by at least 35% in the
+    5-minute bucket (1.35 to 1). The spec's window is the feed's
+    5-minute bucket — transaction counts, not unique wallets, and
+    no sub-5-minute flow exists in the app's data. Fail-closed:
+    a coin whose counts are missing is never bought. Devnet
+    watchlist mints skip the gate, exactly like Gnat's and Pit's,
+    so the devnet paper path still exercises the engine."""
+    mint = entry.get("mint")
+    if not mint:
+        return False, "no mint to check"
+    if entry.get("devnet_watchlist"):
+        return True, ""
+    buys = entry.get("txns_m5_buys")
+    sells = entry.get("txns_m5_sells")
+    try:
+        buys = int(buys) if buys is not None else None
+        sells = int(sells) if sells is not None else None
+    except (TypeError, ValueError):
+        return False, "middy buy dominance: txn counts unreadable"
+    if buys is None or sells is None:
+        return False, "middy buy dominance: no 5-minute txn data"
+    if buys <= 0:
+        return False, "middy buy dominance: no 5-minute buys"
+    if sells > 0 and buys < MIDDY_BUY_DOMINANCE_RATIO * sells:
+        return False, (
+            f"middy buy dominance: buys {buys} vs sells {sells} in "
+            f"the last 5 minutes — buys must beat sells by at least "
+            f"35%")
+    return True, ""
+
+
+def _middy_buy_halt(db, bot, now_ts: float, feed,
+                    prices_data: dict | None) -> tuple[bool, str]:
+    """Middy's daily-loss breaker on NEW BUYS. Exits still run —
+    a halted bot can still stop out, it just cannot open anything
+    new. Returns (halted, reason).
+
+    James's spec: down 20% of the total balance the user started
+    with. The starting balance is the day-start capital (the
+    user's total balance at the start of the UTC day, from the
+    portfolio snapshots — paper portfolio value, or the app
+    wallet's SOL priced live). Today's realized P&L comes from
+    the trade ledger. When the day-start capital cannot be
+    determined the breaker cannot be evaluated and does NOT trip
+    — the loss is still logged by the caller, never hidden.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        row = db.execute(
+            "SELECT COALESCE(SUM(pnl_usd), 0) FROM trade_ledger "
+            "WHERE bot_id = ? AND side = 'sell' AND pnl_usd IS NOT NULL "
+            "AND substr(created_at, 1, 10) = ?",
+            (bot["id"], today)).fetchone()
+        daily_realized = float(row[0]) if row else 0.0
+    except Exception:
+        daily_realized = 0.0
+    if daily_realized >= 0:
+        return False, ""
+    start = _day_start_capital(db, bot, feed, prices_data)
+    if start is None or start <= 0:
+        return False, ""
+    limit = MIDDY_DAILY_LOSS_BREAKER_PCT / 100.0 * float(start)
+    if daily_realized <= -limit:
+        return True, (
+            f"middy daily-loss breaker: realized "
+            f"${daily_realized:.2f} today is at or beyond -20% of the "
+            f"${float(start):.2f} starting balance "
+            f"(${limit:.2f}) — no new buys until tomorrow")
+    return False, ""
+
+
+def _middy_buys_last_hour(db, bot_id: int, now_ts: float) -> int:
+    """Executed buys from the trade ledger in the rolling 60
+    minutes (paper and real alike — every fill counts). A ledger
+    failure returns 0 and fails open for the count only — the
+    callers that gate on it treat a missing count as no halt."""
+    try:
+        hour_ago = datetime.fromtimestamp(
+            now_ts - 3600.0, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        row = db.execute(
+            "SELECT COUNT(*) FROM trade_ledger WHERE bot_id = ? "
+            "AND side = 'buy' AND created_at >= ?",
+            (bot_id, hour_ago)).fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _middy_pace_halt(db, bot, now_ts: float) -> tuple[bool, str]:
+    """Middy's buy pace on NEW BUYS: at most
+    MIDDY_MAX_BUYS_PER_HOUR buys in a rolling 60 minutes. Counts
+    executed buys from the trade ledger (paper and real alike —
+    every fill counts, including a position since closed). Exits
+    still run — a halted bot can still stop out, it just cannot
+    open anything new. Returns (halted, reason)."""
+    count = _middy_buys_last_hour(db, bot["id"], now_ts)
+    if count >= MIDDY_MAX_BUYS_PER_HOUR:
+        return True, (
+            f"middy buy pace: {count} buys in the last hour "
+            f"(max {MIDDY_MAX_BUYS_PER_HOUR}) — waiting for the "
+            f"window to slide before the next buy")
+    return False, ""
 
 
 def _gnat_buy_halt(db, bot, now_ts: float, feed,
@@ -1361,13 +1618,22 @@ def _close_position(db: sqlite3.Connection, bot, coin: str,
 def _after_sell(db, bot, coin: str, sold_amount: float,
                 full_amount: float, pnl_usd: float | None) -> None:
     """Post-sell bookkeeping (tuning build 2026-11-15): a losing
-    close sets the 30-minute re-buy cooldown for (bot, coin); a
-    full close fills in the signal-log outcome for the trade.
+    close sets the re-buy cooldown for (bot, coin); a full close
+    fills in the signal-log outcome for the trade. Middy cools
+    down for 5 minutes (its spec), every other kind for 30.
     Never raises."""
     try:
         if pnl_usd is not None and pnl_usd < 0:
+            try:
+                category = bot["category"]
+            except Exception:
+                category = None
+            seconds = (MIDDY_COOLDOWN_SECONDS
+                       if category == MIDDY_CATEGORY
+                       else REBUY_COOLDOWN_SECONDS)
             _set_cooldown(db, bot["id"], coin, "losing close",
-                          datetime.now(timezone.utc).timestamp())
+                          datetime.now(timezone.utc).timestamp(),
+                          seconds=seconds)
         if sold_amount >= full_amount:
             _record_signal_outcome(db, bot["id"], coin)
     except Exception:
@@ -2069,7 +2335,7 @@ def _rug_reason(rug: dict, kind: str, coin: str, price: float,
     triggers on that fall, never on a faked "dev sold" signal.
     """
     drop_5m = float(rug["drop_5m_pct"])
-    if kind in ("trenches", "scanner", "gnat", "pit") and price_map:
+    if kind in ("trenches", "scanner", "gnat", "pit", "middy") and price_map:
         entry = price_map.get(coin) or {}
         change_5m = entry.get("change_5m_pct")
         if change_5m is not None and float(change_5m) <= -drop_5m:
@@ -2127,13 +2393,14 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
     db.commit()
 
     kind = rules["kind"]
-    if kind in ("trenches", "scanner", "gnat", "pit"):
+    if kind in ("trenches", "scanner", "gnat", "pit", "middy"):
         if not trenches_data or trenches_data.get("error"):
             why = (trenches_data or {}).get("error") or "feed unavailable"
             feed_name = ("scanner" if kind == "scanner"
                          else ("gnat" if kind == "gnat"
                                else ("pit" if kind == "pit"
-                                     else "trenches")))
+                                     else ("middy" if kind == "middy"
+                                           else "trenches"))))
             _log(db, bot["user_id"], "silent_skip",
                  f"Silent bot '{bot['name']}': {feed_name} feed "
                  f"unavailable — {why[:80]}. No trades this scan.",
@@ -2148,7 +2415,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         price_map = _mint_price_map(json.loads(bot["coins"]))
 
     def _price_for(coin: str):
-        if kind in ("trenches", "scanner", "gnat", "pit"):
+        if kind in ("trenches", "scanner", "gnat", "pit", "middy"):
             entry = price_map.get(coin)
             return entry["price_usd"] if entry else None
         entry = (price_map or {}).get(coin)
@@ -2242,7 +2509,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         # skipped for this scan — logged once per bot, never faked,
         # and the other exits still apply.
         top10 = rules.get("top10_rug")
-        if kind in ("scanner", "trenches", "gnat", "pit") and top10:
+        if kind in ("scanner", "trenches", "gnat", "pit", "middy") and top10:
             try:
                 top10_client = _top10_client_for_mint(
                     cfg, coin, rpc_factory, rpc_cache)
@@ -2306,6 +2573,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 avg_price, peak, price,
                 float(pit_settings["stop_trigger_pct"]),
                 float(pit_settings["breakeven_trigger_pct"]))
+        elif kind == "middy":
+            hard = _middy_hard_exit_reason(avg_price, peak, price)
         else:
             hard = _hard_exit_reason(stop_loss_pct, trailing_pct, kind,
                                      avg_price, peak, price)
@@ -2378,6 +2647,33 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     rpc_factory, real_executor, actions, amount=amount,
                     ladder_stage=stage + 1,
                     feed=feed, prices_data=prices_data)
+        # Middy take profit + slow coins (middy only): the
+        # momentum-gated sell-all and the 120-second flat exit.
+        # They run after the ladder so the +1000% backstop rung —
+        # which only fires on a 10x — still pays out first on the
+        # one path where it can fire. The position may have been
+        # closed by the rung, so it is re-read before either fires.
+        if kind == "middy":
+            if _positions(db, bot["id"]).get(coin) is None:
+                continue
+            entry = (price_map or {}).get(coin) or {}
+            tp_reason = _middy_take_profit_reason(
+                entry, avg_price, peak, price)
+            if tp_reason:
+                _sell_position(db, cfg, bot, coin, price, tp_reason,
+                               rpc_factory, real_executor, actions,
+                               feed=feed, prices_data=prices_data)
+                continue
+            opened_at = (pos["opened_at"]
+                         if "opened_at" in pos.keys() else None)
+            opened_ts = (_parse_scan_time(opened_at)
+                         if opened_at else None)
+            slow_reason = _middy_slow_reason(opened_ts, entry, now_ts)
+            if slow_reason:
+                _sell_position(db, cfg, bot, coin, price, slow_reason,
+                               rpc_factory, real_executor, actions,
+                               feed=feed, prices_data=prices_data)
+                continue
         # Gnat time decay + momentum exhaustion (gnat only): the
         # time decay fires on age + peak, the exhaustion on peak +
         # the 5-minute change — both exit the rest of the position
@@ -2523,6 +2819,65 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             actions.append({"action": "skip", "coin": "",
                             "reason": halt_reason})
             return actions
+    # Middy daily-loss breaker (middy only): down 20% of the
+    # starting balance (day-start capital) in realized losses
+    # stops new buys until tomorrow, paper and real alike — the
+    # paper test measures the rule, and the $20 of real money
+    # stays put until paper proves profit. Exits still run.
+    if kind == "middy":
+        halted, halt_reason = _middy_buy_halt(
+            db, bot, now_ts, feed, prices_data)
+        if halted:
+            if not _breaker_logged(db, bot["id"],
+                                   "middy daily-loss breaker"):
+                _log(db, bot["user_id"], "silent_breaker",
+                     f"Silent bot '{bot['name']}': {halt_reason}.",
+                     bot["mode"])
+            actions.append({"action": "skip", "coin": "",
+                            "reason": halt_reason})
+            return actions
+    # Middy buy pace (middy only): a few coins an hour, never
+    # forced — when the rolling 60-minute window already holds
+    # the maximum, no new buys until the window slides. The halt
+    # is logged at most once an hour, not once per scan. Exits
+    # still run.
+    if kind == "middy":
+        halted, halt_reason = _middy_pace_halt(db, bot, now_ts)
+        if halted:
+            hour_ago = datetime.fromtimestamp(
+                now_ts - 3600.0, tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+            if not _breaker_logged(db, bot["id"], "middy buy pace",
+                                   since=hour_ago):
+                _log(db, bot["user_id"], "silent_breaker",
+                     f"Silent bot '{bot['name']}': {halt_reason}.",
+                     bot["mode"])
+            actions.append({"action": "skip", "coin": "",
+                            "reason": halt_reason})
+            return actions
+        # 1-an-hour minimum (James, 2026-11-24 ~12:43): a TARGET,
+        # never a quota. When the bot has open capacity and no buy
+        # in the last hour, the miss is LOGGED (at most once an
+        # hour), never forced — NO BLIND TRADES is still the hard
+        # rule, so a buy is never made to meet the minimum.
+        if _middy_buys_last_hour(db, bot["id"], now_ts) < \
+                MIDDY_MIN_BUYS_PER_HOUR and len(
+                    _positions(db, bot["id"])) < int(
+                        bot["max_open_trades"]):
+            hour_ago = datetime.fromtimestamp(
+                now_ts - 3600.0, tz=timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+            if not _breaker_logged(db, bot["id"],
+                                   "middy minimum missed",
+                                   since=hour_ago):
+                _log(db, bot["user_id"], "silent_breaker",
+                     f"Silent bot '{bot['name']}': middy minimum "
+                     f"missed — no buy in the last hour (target "
+                     f"{MIDDY_MIN_BUYS_PER_HOUR}/hour, max "
+                     f"{MIDDY_MAX_BUYS_PER_HOUR}/hour); no coin "
+                     f"passed the safety gates and entry "
+                     f"confirmation, so nothing was forced.",
+                     bot["mode"])
     # Pit fuel (pit real mode only, 2026-11-23): a Pit bot trades
     # real only while the owner holds package fuel credits — the
     # package gate is the fuel check now (the old enrollment
@@ -2720,6 +3075,67 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                     continue
                 ranked.append((change, entry))
             ranked.sort(key=lambda item: item[0], reverse=True)
+    elif kind == "middy":
+        # Middy ranks by the 5-minute gain from the feed itself —
+        # the feed provides change_5m_pct, so no loop marks are
+        # needed. A coin gaining at least 1% in 5 minutes is a
+        # candidate; the buy filter, the four-part momentum gate,
+        # the dominance gate and the scam gate then decide, and
+        # the signal must still be passing on a second scan —
+        # NO BLIND TRADES.
+        threshold = float(rules["buy"]["threshold_pct"])
+        held = set(_positions(db, bot["id"]))
+        for entry in trenches_data["candidates"]:
+            change = entry.get("change_5m_pct")
+            try:
+                change = float(change) if change is not None else None
+            except (TypeError, ValueError):
+                change = None
+            if change is None or change < threshold:
+                continue
+            if entry["mint"] in held:
+                continue
+            ok, why = passes_buy_filter(
+                entry, rules.get("buy_filter"), change,
+                devnet_watchlist_active=(cfg.network == "devnet"))
+            if not ok:
+                filtered.append((change, entry, why))
+                continue
+            # Momentum-only entry: the four-part signal gate. A
+            # coin gaining on one short window but flat/falling on
+            # the others, or spiking without volume, is not a
+            # signal — it is never bought.
+            ok, why = passes_momentum_gate(entry, db, bot["id"],
+                                           now_ts)
+            if not ok:
+                filtered.append((change, entry, f"momentum gate: {why}"))
+                continue
+            # Middy entry gate: buys beat sells by 35%+ in the
+            # 5-minute bucket.
+            ok, why = _middy_entry_gates(
+                db, cfg, entry, rpc_factory, rpc_cache)
+            if not ok:
+                filtered.append((change, entry, why))
+                continue
+            # Never rebuy: a coin this bot already bought once is
+            # never bought again — even if the last trade
+            # profited. Once traded, that coin is done; move on.
+            if _middy_already_bought(db, bot["id"], entry["mint"]):
+                filtered.append(
+                    (change, entry,
+                     "never rebuy: this bot already bought this "
+                     "coin once — done, move on"))
+                continue
+            # 2-scan confirmation: the signal must still be passing
+            # on a later scan. A one-scan spike never buys.
+            if not _signal_confirmed(db, bot["id"], entry["mint"],
+                                     change, now_ts, interval):
+                filtered.append(
+                    (change, entry,
+                     "signal not yet confirmed — first seen this scan"))
+                continue
+            ranked.append((change, entry))
+        ranked.sort(key=lambda item: item[0], reverse=True)
     elif kind == "trenches":
         threshold = float(rules["buy"]["threshold_pct"])
         change_key = _BUY_METRIC_TO_CHANGE_KEY[rules["buy"]["metric"]]
@@ -2752,7 +3168,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 continue
             ranked.append((float(change), entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
-    if kind in ("trenches", "scanner", "gnat", "pit"):
+    if kind in ("trenches", "scanner", "gnat", "pit", "middy"):
         if not ranked and filtered:
             # Every threshold-passing candidate failed the filter —
             # say so once, naming the strongest rejected coin.
@@ -2777,9 +3193,9 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                                 "reason": "max open trades reached"})
                 max_open_hit = True
                 break
-            if kind in ("scanner", "gnat", "pit"):
+            if kind in ("scanner", "gnat", "pit", "middy"):
                 # Re-buy cooldown: a coin closed at a loss is not
-                # bought again for 30 minutes.
+                # bought again for 30 minutes (5 minutes for Middy).
                 blocked_until = _cooldown_until(
                     db, bot["id"], entry["mint"], now_ts)
                 if blocked_until is not None:
@@ -2807,12 +3223,12 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 "sells_5m": entry.get("txns_m5_sells"),
                 "regime": detect_regime(entry, rules.get("regime")),
             }
-            if kind in ("scanner", "gnat", "pit"):
+            if kind in ("scanner", "gnat", "pit", "middy"):
                 # The signal features for the signal-outcome log:
                 # the triggering gain, the 5-minute volume ratio
                 # vs the hourly pace, the buyer ratio, and the
-                # 1-hour trend. Pit's window is 5 minutes; scanner
-                # and Gnat use 3 minutes.
+                # 1-hour trend. Pit's and Middy's window is 5 minutes;
+                # scanner and Gnat use 3 minutes.
                 vol_m5 = entry.get("volume_m5_usd")
                 vol_h1 = entry.get("volume_h1_usd")
                 volume_ratio = None
@@ -2832,7 +3248,8 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 except (TypeError, ValueError):
                     buyer_ratio = None
                 signals["gain_pct"] = float(_change)
-                signals["gain_window"] = "5m" if kind == "pit" else "3m"
+                signals["gain_window"] = ("5m" if kind in ("pit", "middy")
+                                          else "3m")
                 signals["volume_ratio"] = volume_ratio
                 signals["buyer_ratio"] = buyer_ratio
                 signals["trend_1h_pct"] = entry.get("change_1h_pct")
@@ -3085,7 +3502,8 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
         rules, error = load_rules(bot)
         if rules is None or error is not None:
             continue
-        if rules["kind"] not in ("scanner", "trenches", "gnat", "pit"):
+        if rules["kind"] not in ("scanner", "trenches", "gnat", "pit",
+                                 "middy"):
             continue
         top10 = rules.get("top10_rug")
         if not top10:
@@ -3222,7 +3640,7 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
                     real_executor=None) -> list:
     """One fast-exit pass over the mints dirtied by live-feed ticks
     since the last pass: for every open position in a dirtied mint
-    (scanner, signals, gnat and pit kinds — Trenches v2 owns trenches
+    (scanner, signals, gnat, pit and middy kinds — Trenches v2 owns trenches
     exits), check the hard exits (rug sell, stop / breakeven stop,
     trailing stop) at the tick price and sell at once when one
     fires. Pit also checks the pullback here: a tick 2% or more
@@ -3260,7 +3678,8 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
             rules, error = load_rules(bot)
             if rules is None or error is not None:
                 continue
-            if rules["kind"] not in ("scanner", "signals", "gnat", "pit"):
+            if rules["kind"] not in ("scanner", "signals", "gnat", "pit",
+                                     "middy"):
                 continue
             pos = _positions(db, bot["id"]).get(mint)
             if not pos:
@@ -3285,6 +3704,8 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
                     avg_price, peak, price,
                     float(pit_settings["stop_trigger_pct"]),
                     float(pit_settings["breakeven_trigger_pct"]))
+            elif rules["kind"] == "middy":
+                hard = _middy_hard_exit_reason(avg_price, peak, price)
             else:
                 hard = _hard_exit_reason(float(bot["stop_loss_pct"]),
                                          float(rules["trailing_stop_pct"]),
@@ -3381,7 +3802,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     for bot in bots:
         rules, err = load_rules(bot)
         if rules is not None and rules["kind"] in ("trenches", "scanner",
-                                                  "gnat", "pit"):
+                                                  "gnat", "pit", "middy"):
             needs_trenches = True
             break
     if needs_trenches:

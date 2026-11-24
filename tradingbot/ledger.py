@@ -124,6 +124,45 @@ def bot_wl_summary(db: sqlite3.Connection, bot_id: int) -> dict:
     }
 
 
+def kind_wl_summary(db: sqlite3.Connection, category: str,
+                    mode: str | None = None) -> dict:
+    """Site-wide wins, losses, win rate and net P&L for one preset
+    kind — every copy of that preset, all users summed. Counts
+    only: no user ids, no per-user rows, no keys, no personal
+    data — the aggregate can never be traced back to one user's
+    bot. `mode` narrows to 'paper' or 'real' when given (the
+    Middy card shows paper only — verified paper results, never
+    presented as real profit). A win/loss counts when a position
+    closes: the ledger row for a real sell carries the signer
+    bot's executed-transaction record (the on-chain signature and
+    the SOL actually spent/received), so the counts come from the
+    signer bot's executed transactions, not from any preset bot's
+    own bookkeeping. Paper rows are ledger math (no chain, no
+    signature). A break-even sell counts as neither."""
+    query = (
+        "SELECT t.pnl_usd, t.win, t.bot_id FROM trade_ledger t "
+        "JOIN bots b ON b.id = t.bot_id "
+        "WHERE b.category = ? AND t.side = 'sell' "
+        "AND t.pnl_usd IS NOT NULL")
+    params: list = [category]
+    if mode is not None:
+        query += " AND t.mode = ?"
+        params.append(mode)
+    rows = db.execute(query, params).fetchall()
+    wins = sum(1 for r in rows if r["win"] == 1)
+    losses = sum(1 for r in rows if r["win"] == 0)
+    net = sum(float(r["pnl_usd"]) for r in rows)
+    decided = wins + losses
+    return {
+        "trades": len(rows),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": (wins / decided) if decided else None,
+        "net_pnl_usd": net,
+        "bots": len({r["bot_id"] for r in rows}),
+    }
+
+
 def version_wl_summary(db: sqlite3.Connection, bot_id: int) -> list:
     """Win rate and net P&L per preset version for one bot, from
     its closed sells — so v1.1 can be compared against v1.0 on

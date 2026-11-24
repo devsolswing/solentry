@@ -158,11 +158,12 @@ class TestBotsPresets(UiBase):
 
     def test_preset_window_is_clyde_and_gnat_buttons_only(self):
         """Owner (2026-11-11) + Gnat (2026-11-21) + Pit Sweeper
-        (2026-11-23): the preset view is BUTTONS ONLY — no
-        description, no rules, no notes. Three buttons, Clyde,
-        Gnat and Pit Sweeper, each a carousel item like an active
-        bot card (icon, name, gold Preset pill, stats line), each
-        POSTing to create its preset."""
+        (2026-11-23) + Middy (2026-11-24): the preset view is
+        BUTTONS ONLY — no description, no rules, no notes. Four
+        buttons, Clyde, Gnat, Pit Sweeper and Middy, each a
+        carousel item like an active bot card (icon, name, gold
+        Preset pill, stats line), each POSTing to create its
+        preset."""
         self._choose_mode("paper")
         html = self._html("/bots")
         # No separate preset list element anywhere.
@@ -177,11 +178,13 @@ class TestBotsPresets(UiBase):
         m = re.search(r'<form[^>]*data-preset-item[^>]*>', window)
         self.assertIsNotNone(m, "Clyde form not found")
         self.assertIn("hidden", m.group(0))
-        # Three POST forms, to the Clyde, Gnat and Pit create routes.
-        self.assertEqual(window.count("<form"), 3)
+        # Four POST forms, to the Clyde, Gnat, Pit and Middy
+        # create routes.
+        self.assertEqual(window.count("<form"), 4)
         self.assertIn('action="/bots/preset/clyde"', window)
         self.assertIn('action="/bots/preset/gnat"', window)
         self.assertIn('action="/bots/preset/pit"', window)
+        self.assertIn('action="/bots/preset/middy"', window)
         # The button IS the card: same classes as a bot card.
         m = re.search(r'<button class="([^"]*)" type="submit"',
                       window)
@@ -289,7 +292,7 @@ class TestBotsPresets(UiBase):
     def test_preset_bots_order(self):
         names = [p["name"] for p in preset_bots()]
         self.assertEqual(names, ["Clyde", "Trenches", "Scanner",
-                                 "Gnat", "Pit Sweeper"])
+                                 "Gnat", "Pit Sweeper", "Middy"])
 
     def test_create_clyde_from_preset(self):
         self._choose_mode("paper")

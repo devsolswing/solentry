@@ -38,6 +38,13 @@
   {% else %}
   <p class="muted">No closed trades yet — nothing to win or lose on.</p>
   {% endif %}
+  {% if kind_wl is not none %}
+  {# Middy (2026-11-24): the site-wide win/loss aggregate across
+     every Middy copy, all users summed — counts only, from the
+     trade ledger. Nobody sees another user's individual results;
+     this is the sum, not a leaderboard. #}
+  <p class="muted small">All Middy bots site-wide: {% if kind_wl.trades %}<strong>{{ kind_wl.wins }} wins · {{ kind_wl.losses }} losses</strong>{% if kind_wl.win_rate is not none %} · win rate {{ (kind_wl.win_rate * 100)|round(0) }}%{% endif %} · net P&amp;L ${{ "%.2f"|format(kind_wl.net_pnl_usd) }} across {{ kind_wl.bots }} bot{% if kind_wl.bots != 1 %}s{% endif %}{% else %}no closed trades yet{% endif %}</p>
+  {% endif %}
   {% if trades %}
   <table>
     <tr><th>Trade ID</th><th>When</th><th>Coin</th><th>Side</th><th>Amount</th><th>Price</th><th>P&amp;L</th><th>W/L</th></tr>

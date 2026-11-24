@@ -114,6 +114,25 @@
           <span class="bot-arrow" aria-hidden="true">›</span>
         </button>
       </form>
+      {# Middy preset button (2026-11-24): same shape as the other
+         preset buttons, plus one line the others do not carry —
+         Middy's VERIFIED PAPER results from the trade ledger
+         (site-wide, paper mode only), because James ordered proof
+         on the card. No paper trades yet shows "No paper trades
+         yet" — never a guess, never presented as real profit.
+         The 🎯 icon is the target: mid-exposure, careful aim. #}
+      <form method="post" action="{{ middy_preset.create_url }}" data-preset-item hidden>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="card bot-card" type="submit" aria-label="Create the Middy bot">
+          <span class="bot-ico" aria-hidden="true">🎯</span>
+          <span class="bot-info">
+            <span class="bot-name"><strong>{{ middy_preset.name }}</strong> <span class="badge preset">Preset</span></span>
+            <span class="muted small">{{ middy_preset.strategy }} · Buy {{ middy_preset.buy_size_pct }}% · Stop {{ middy_preset.stop_loss_pct }}% · Max {{ middy_preset.max_open_trades }}</span>
+            <span class="muted small">{% if middy_preset.paper_wl.trades %}Paper: {{ middy_preset.paper_wl.wins }}W · {{ middy_preset.paper_wl.losses }}L{% if middy_preset.paper_wl.win_rate is not none %} · {{ (middy_preset.paper_wl.win_rate * 100)|round(0) }}%{% endif %} · ${{ "%.2f"|format(middy_preset.paper_wl.net_pnl_usd) }}{% else %}No paper trades yet — results show here once paper trading verifies{% endif %}</span>
+          </span>
+          <span class="bot-arrow" aria-hidden="true">›</span>
+        </button>
+      </form>
     </div>
   </div>
 

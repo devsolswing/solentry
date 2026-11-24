@@ -100,7 +100,7 @@ from .scanner import (BUY_FILTER_DEFAULT, BUY_FILTER_KEYS, REGIME_DEFAULT,
                       SLOW_LADDER, TRENDING_LADDER)
 
 RULE_VERSION = 1
-RULE_KINDS = ("trenches", "signals", "scanner", "gnat", "pit")
+RULE_KINDS = ("trenches", "signals", "scanner", "gnat", "pit", "middy")
 RULE_SOURCES = ("pump.fun", "pumpswap", "dexscreener")
 
 # Windows the feeds provide, in seconds -> buy-metric name. The
@@ -758,6 +758,260 @@ PIT_NOTES = [
 ]
 
 
+MIDDY_CATEGORY = "Middy"
+MIDDY_PRESET_NAME = "Middy"
+# Middy (James's spec, 2026-11-24) — the mid-exposure preset,
+# paper-first. His numbers: buys beat sells by 35%+, min mcap
+# $20k CAD, buy 20% of balance per trade, max 2 coins open, take
+# profit sells ALL in two tiers with a HARD CEILING at 37%
+# (small TP 5%-25% on coins Middy is done with; higher window
+# 25%-37% only while still gaining and buys beat sells 75/25 —
+# at 37% secure the profit immediately and move on), trailing stop -8% from the peak, HARD stop
+# 5.5% from entry, slow coins out after 120 seconds, daily-loss
+# breaker 20% of the starting balance, 5-minute re-buy cooldown
+# after a losing close, and NO BLIND TRADES — every entry
+# confirms on a second scan first.
+# Paper first: the preset creates a paper bot, silent off, and the
+# $20 of real money James set aside stays put until paper results
+# verify actual profit (his order, 2026-11-24 ~11:34 MST).
+MIDDY_SCAN_INTERVAL_SECONDS = 10
+MIDDY_BUY_DOMINANCE_RATIO = 1.35
+# The coin must actually be moving: a 1% 5-minute gain floor.
+# REMY DEFAULT — James gave no gain threshold; the momentum gate
+# also requires a positive 5-minute gain.
+MIDDY_MIN_GAIN_5M_PCT = 1.0
+# Min mcap $20,000 CAD, stored in the engine's USD field — the
+# closest version (Clyde precedent): $20,000 USD is a STRICTER
+# bar than $20,000 CAD (about $14,600 USD), so a coin under
+# $20,000 CAD can never pass. The app has no CAD price source.
+MIDDY_MIN_MCAP_USD = 20000.0
+# Min 5-minute volume $1,000 — REMY DEFAULT, the engine's standard
+# minimum (same as the scanner default). James gave no floor.
+MIDDY_MIN_VOLUME_5M_USD = 1000.0
+MIDDY_BUY_SIZE_PCT = 20
+MIDDY_MAX_OPEN_TRADES = 2
+MIDDY_STOP_LOSS_PCT = 5.5
+MIDDY_TRAILING_STOP_PCT = 8.0
+# Two-tier take profit, mid level is the HARD CEILING (James,
+# 2026-11-24 ~12:35): a small take profit on coins Middy is done
+# with, and a mid level to secure MORE profit — never hold past
+# the mid level, no exceptions, no chasing higher. Rationale, his
+# words: going higher exposes Middy to rugs and to others securing
+# their profit. The percentages are JAMES'S NUMBERS (2026-11-24
+# ~12:48): small is 5%-25%, the higher window is 25% to no more
+# than 37%, and at 37% the profit is secured immediately and
+# Middy moves on. The earlier higher holds (+26-55% momentum
+# hold, past-+55% "bitcoin Jr." hold) are REMOVED — superseded
+# by this ceiling. (Remy's earlier +10%/+25% proposal is
+# superseded by James's numbers.)
+MIDDY_TP_SMALL_PCT = 5.0
+MIDDY_TP_MID_PCT = 25.0
+MIDDY_TP_CEILING_PCT = 37.0
+# Mid-level hold test: hold for the mid level ONLY while the coin
+# is still gaining AND buys beat sells 75/25 (3:1). JAMES'S NUMBER
+# (2026-11-24 ~12:34) — a stricter buy flow than the 1.35x entry
+# dominance gate.
+MIDDY_MID_HOLD_BUY_RATIO = 3.0
+# Slow coins: 120 seconds of slowness sells all. "Slow" is a flat
+# coin — the 5-minute change within +/-0.5%, the same flat band
+# as Pit. REMY DEFAULT for the band; James gave the 120 seconds.
+MIDDY_SLOW_SECONDS = 120
+MIDDY_SLOW_FLAT_PCT = 0.5
+# Daily-loss breaker: 20% of the starting balance (the day-start
+# capital — the user's total balance at the start of the UTC day).
+MIDDY_DAILY_LOSS_BREAKER_PCT = 20.0
+# Re-buy cooldown after a losing close on the same coin.
+MIDDY_COOLDOWN_SECONDS = 300
+# Buy pace: at most 6 coins bought in any rolling 60 minutes —
+# JAMES'S EXACT NUMBER (2026-11-24 ~12:22 MST, superseding the
+# 3/hour builder default): "Too many trades in a short period is
+# bad design let's say 6 coins per hr only". The bot does NOT
+# have to hold all six — the cap is on BUYS per hour, and the
+# maximum held at once is 2 (MIDDY_MAX_OPEN_TRADES). A cap,
+# never a quota: nothing is ever bought to fill it. Rationale,
+# his words: "If we slow down the amount of trades per hr it
+# will reduce loss in theory" + "If we slow down it will give
+# more room for rewards."
+MIDDY_MAX_BUYS_PER_HOUR = 6
+# Buy minimum: at least 1 coin bought per hour — JAMES'S NUMBER,
+# CONFIRMED 2026-11-24 ~12:43 MST ("Keep the 1-an-hour minimum").
+# A TARGET, never a quota: it is met only from coins that pass
+# the safety gates and entry confirmation — NO BLIND TRADES is
+# still the hard rule, so a buy is never forced to meet it. When
+# nothing qualified in an hour, the miss is LOGGED (once an
+# hour, in the silent loop), never forced.
+MIDDY_MIN_BUYS_PER_HOUR = 1
+# Top-10 concentration cap: the engine's standard default (same as
+# Scanner, 21%). REMY DEFAULT — James gave no number for Middy.
+MIDDY_TOP10_CONCENTRATION_PCT = 21.0
+MIDDY_MAX_NEW_PER_SCAN = 1
+
+MIDDY_RULES = {
+    "version": 1,
+    "kind": "middy",
+    "scan_sources": ["pump.fun", "pumpswap"],
+    "scan_interval_seconds": MIDDY_SCAN_INTERVAL_SECONDS,
+    "buy": {"metric": "gain_5m_pct",
+            "window_seconds": 300,
+            "threshold_pct": MIDDY_MIN_GAIN_5M_PCT,
+            "pick": "strongest"},
+    # Take profit is momentum-gated (the custom exit in the loop),
+    # NOT the ladder: at +10% or more the position sells ALL unless
+    # the momentum test holds it. The single rung below is the
+    # validator's required backstop — it only fires at +1000%,
+    # long after the take-profit / slow / stop exits have closed
+    # any real position.
+    "sell_ladder": [{"pct_of_position": 100.0, "profit_pct": 1000.0}],
+    "trailing_stop_pct": MIDDY_TRAILING_STOP_PCT,
+    "rug_sell": dict(RUG_SELL_DEFAULT),
+    "top10_rug": {"drop_pct": 10.0,
+                  "concentration_pct": MIDDY_TOP10_CONCENTRATION_PCT,
+                  "slow_climb_sell_pct": 0.0,
+                  "check_interval_seconds": 15.0},
+    "buy_filter": {"min_volume_5m_usd": MIDDY_MIN_VOLUME_5M_USD,
+                   "require_buy_dominance": True,
+                   "min_signal_pct": MIDDY_MIN_GAIN_5M_PCT,
+                   "min_market_cap_usd": MIDDY_MIN_MCAP_USD,
+                   "max_market_cap_usd": 0.0},
+    "max_new_positions_per_scan": MIDDY_MAX_NEW_PER_SCAN,
+}
+
+
+def middy_ruleset() -> dict:
+    """A fresh copy of the Middy preset."""
+    return copy.deepcopy(MIDDY_RULES)
+
+
+# Rules Middy states that the engine cannot enforce as written.
+# Shown on the preset list, in plain words, next to the enforced
+# rules — never dropped, never pretended to be enforced.
+MIDDY_NOTES = [
+    "Entry — buys beat sells by 35%+ in the 5-minute bucket "
+    "(buys at least 1.35x sells). Closest version: the feed gives "
+    "5-minute transaction buckets, not real-time ticks — the ratio "
+    "is measured on the bucket, never guessed.",
+    "Entry — NO BLIND TRADES: the signal must still be passing "
+    "on a second scan before any buy — a one-scan spike never "
+    "buys. The buy filter, the four-part momentum gate, the "
+    "dominance gate and the scam gate are all re-checked on the "
+    "confirming scan.",
+    "Entry — market cap at least $20,000 CAD. Closest version: "
+    "the engine's market-cap field is USD and the app has no CAD "
+    "price source, so the bar is stored as $20,000 USD — a "
+    "stricter bar than $20,000 CAD (about $14,600 USD). A coin "
+    "under $20,000 CAD can never pass.",
+    "Entry — minimum 5-minute gain 1% and minimum 5-minute "
+    "volume $1,000. REMY DEFAULTS — James gave no gain floor or "
+    "volume floor; the momentum gate also requires a positive "
+    "5-minute gain and rising volume.",
+    "Entry — standard safety gates: the pre-buy scam gate rejects "
+    "a coin when the top 10 holders own 21% or more (the "
+    "engine's standard default, same as Scanner — James gave no "
+    "number), when the mint or freeze authority is still "
+    "enabled, or when the coin has no usable metadata (no name "
+    "or symbol). The top-10 watch sells everything when a held "
+    "coin's top-10 share drops 10% from its peak.",
+    "Exits — take profit sells ALL, in two tiers with a HARD "
+    "CEILING: a small take profit (5%-25%) on coins Middy is done "
+    "with (take the small profit, exit, forget the coin — never "
+    "rebuy); a higher window (25% to no more than 37%) to secure "
+    "MORE profit, held ONLY while the coin is still gaining AND "
+    "buys beat sells 75/25 (3:1). The +37% cap is the ceiling — "
+    "Middy NEVER holds past it, no exceptions, no chasing higher "
+    "(James, 2026-11-24 ~12:35: going higher exposes Middy to "
+    "rugs and to others securing their profit). The percentages "
+    "are JAMES'S NUMBERS (2026-11-24 ~12:48): small is 5%-25%, "
+    "the higher window is 25% to no more than 37%, and at 37% "
+    "the profit is secured "
+    "immediately and Middy moves on. The earlier higher holds "
+    "(+26-55% momentum hold, past-+55% 'bitcoin Jr.' hold) are "
+    "REMOVED. When a tier is reached the position sells in full, "
+    "never in part.",
+    "Exits — trailing stop -8% from the highest price since "
+    "holding, hard stop -5.5% from entry (a trigger, not a "
+    "guaranteed fill — exits allow up to 5% slippage, so a "
+    "triggered stop can realize around -10.5% before fees). "
+    "Slow coins: a flat coin (5-minute change within +/-0.5% — "
+    "Remy's default band, same as Pit) sells all after 120 "
+    "seconds; the hard stop fires first if it is hit.",
+    "Speed — decide + send within 1 second of the live tick. "
+    "NOT enforced as written: the loop runs on a 10-second "
+    "floor and entries need a second confirming scan, so an "
+    "entry decision lands on a loop tick, not on the tick. "
+    "Closest version: the hard exits (stop, trailing, rug sell) "
+    "also run on the tick-driven fast-exit thread, which wakes "
+    "on a live-feed tick (or every 5 seconds) — a stop fires "
+    "within seconds of the tick, and the loop is the backstop. "
+    "On-chain confirmation still takes ~1-2 seconds — chain "
+    "time, never guaranteed under 1 second.",
+    "Daily-loss breaker — down 20% of the starting balance "
+    "(the user's total balance at the start of the UTC day) in "
+    "realized losses stops new buys until tomorrow. Exits still "
+    "run. When the day-start capital cannot be determined the "
+    "breaker cannot be evaluated and does NOT trip — the loss "
+    "is still logged, never hidden.",
+    "Cooldown — after a losing close, the same coin cannot be "
+    "re-bought for 5 minutes. Paper first: the preset creates "
+    "a paper bot, silent off, and the $20 of real money James "
+    "set aside stays put until paper results verify actual "
+    "profit. Paper results are paper — never presented as real "
+    "profit.",
+    "Buy pace — only a few coins an hour, at most 6 coins bought "
+    "in any rolling 60 minutes (JAMES'S EXACT NUMBER, 2026-11-24 "
+    "~12:22 MST — '6 coins per hr only'), and at least 1 an hour "
+    "as a target (JAMES'S NUMBER, CONFIRMED 2026-11-24 ~12:43 MST "
+    "— 'Keep the 1-an-hour minimum'). The bot does NOT have "
+    "to hold all six: the cap is on buys per hour, and the "
+    "maximum held at once is 2. The pace is a CAP, never a quota: "
+    "nothing is ever bought to fill it — no buy unless every "
+    "entry check confirms. The minimum is a TARGET, never a "
+    "quota either: it is met only from coins that pass the safety "
+    "gates and entry confirmation, and a missed hour is LOGGED, "
+    "never forced with a blind buy. Exits still run while the "
+    "pace is hit. Rationale, his words: slowing down reduces "
+    "loss in theory and gives more room for rewards.",
+    "Never rebuy — the bot NEVER buys the same coin twice, per "
+    "bot copy, even if a previous buy of that coin profited. Once "
+    "traded, that coin is done — move on. Reason, his words: "
+    "repeat buys would be deemed a scam and avoided. ENFORCED: "
+    "the loop checks the trade ledger for a past buy of (bot, "
+    "coin) before any buy, paper and real alike.",
+    "The profit aim — try to aim for $10-300 a day, and do "
+    "everything possible to keep that window as the proof Middy "
+    "can make a profit. $20 a day inside that window is enough "
+    "to be well off and happy. The window is the paper-proof bar: "
+    "paper must show Middy can make $10-300 a day before real "
+    "money goes in. It is NOT a cap: Middy never stops trading "
+    "when it hits $20 profit in a day, and there is no cap above "
+    "$300 a day either — if it can make more, it makes more. NO "
+    "daily profit cap exists anywhere in this build, and none is "
+    "ever added without his word.",
+    "Selectivity — each buy must be the right coin, the one the "
+    "market is going crazy for. ENFORCED by composition: the loop "
+    "ranks by the strongest 5-minute gain and buys at most one "
+    "coin per scan — the strongest gainer that passes the buy "
+    "filter, the four-part momentum gate (rising volume, buyers "
+    "over sellers, positive 1-hour trend), the 35% buy-dominance "
+    "gate, the scam gate and the 2-scan confirmation. A coin the "
+    "market is not going crazy for never passes those gates — a "
+    "big price spike with weak buys is filtered, never bought.",
+    "Proof on card — the Middy card shows its verified paper "
+    "results (wins, losses, win rate, net P&L) from the trade "
+    "ledger, and the bot details page shows the site-wide "
+    "aggregate across all Middy copies. Counts only — no other "
+    "user's individual results are ever shown.",
+    "Fuel — every confirmed real trade costs 1 trade credit "
+    "from a $GATE package bought in the app (1M $GATE = 100 "
+    "trades, 5M = 550, 10M = 1450). $GATE bought outside the "
+    "app can never be fuel. A Middy bot trades real ONLY while "
+    "its owner holds package credits.",
+    "The 80% goal — James wants 80% of overall trades to flow "
+    "through Middy. NOT enforced: it cannot be forced, it has "
+    "to be earned by results. Nothing in the engine steers "
+    "other bots' trades to Middy.",
+]
+
+
 def preset_bots() -> list:
     """The preset bots, in list order — Clyde first, then the
     existing presets. Each entry carries a fresh copy of its rule
@@ -805,6 +1059,14 @@ def preset_bots() -> list:
          "rules": pit_ruleset(),
          "notes": list(PIT_NOTES),
          "endpoint": "bot_preset_pit"},
+        {"key": "middy",
+         "name": MIDDY_PRESET_NAME,
+         "tagline": "Mid-exposure sniper — buys beat sells 35%+, "
+                    "20% a trade, sell all at +10-25%, 5.5% stop.",
+         "category": MIDDY_CATEGORY,
+         "rules": middy_ruleset(),
+         "notes": list(MIDDY_NOTES),
+         "endpoint": "bot_preset_middy"},
     ]
 
 
@@ -880,14 +1142,15 @@ def validate_ruleset(raw, bot=None):
         return _fail("The rule kind must be 'trenches' (scan pump.fun "
                      "and PumpSwap), 'scanner' (snipe gainers in "
                      "3 minutes), 'gnat' (curve + buy-pressure sniper), "
-                     "'pit' (top-mover sniper) "
+                     "'pit' (top-mover sniper), 'middy' (mid-exposure "
+                     "sniper) "
                      "or 'signals' (your own coin list).")
     interval = raw.get("scan_interval_seconds")
     if not isinstance(interval, int) or isinstance(interval, bool) \
             or not 10 <= interval <= 3600:
         return _fail("Scan interval must be between 10 and 3600 seconds.")
     sources = raw.get("scan_sources", [])
-    if kind in ("trenches", "scanner", "gnat", "pit"):
+    if kind in ("trenches", "scanner", "gnat", "pit", "middy"):
         if not isinstance(sources, list) or not sources:
             return _fail("A trenches, scanner, gnat or pit rule set "
                          "needs at least one scan source (pump.fun or "
@@ -1020,10 +1283,10 @@ def validate_ruleset(raw, bot=None):
     top10 = raw.get("top10_rug")
     clean_top10 = None
     if top10 is not None:
-        if kind not in ("scanner", "trenches", "gnat", "pit"):
+        if kind not in ("scanner", "trenches", "gnat", "pit", "middy"):
             return _fail("The top-10 wallets watch is a memecoin rule — "
-                         "it only applies to scanner, trenches, gnat "
-                         "and pit bots.")
+                         "it only applies to scanner, trenches, gnat, "
+                         "pit and middy bots.")
         if not isinstance(top10, dict):
             return _fail("The top-10 wallets watch must be a set of "
                          "settings (drop %).")
@@ -1062,10 +1325,10 @@ def validate_ruleset(raw, bot=None):
     buy_filter = raw.get("buy_filter")
     clean_filter = None
     if buy_filter is not None:
-        if kind not in ("trenches", "scanner", "gnat", "pit"):
-            return _fail("The buy filter is a trenches/scanner/gnat/pit "
-                         "rule — it only applies to bots that scan the "
-                         "feed.")
+        if kind not in ("trenches", "scanner", "gnat", "pit", "middy"):
+            return _fail("The buy filter is a trenches/scanner/gnat/pit/"
+                         "middy rule — it only applies to bots that scan "
+                         "the feed.")
         if not isinstance(buy_filter, dict):
             return _fail("The buy filter must be a set of settings "
                          "(minimum 5-minute volume, buy dominance, "
@@ -1113,7 +1376,7 @@ def validate_ruleset(raw, bot=None):
             "min_market_cap_usd": float(min_mcap),
             "max_market_cap_usd": float(max_mcap),
         }
-    if kind in ("trenches", "scanner", "gnat", "pit") \
+    if kind in ("trenches", "scanner", "gnat", "pit", "middy") \
             and clean_filter is None:
         # Stored rules from before the filter existed load as the new
         # defaults on the next evaluation — the filter applies to the
@@ -1162,7 +1425,7 @@ def validate_ruleset(raw, bot=None):
         "version": RULE_VERSION,
         "kind": kind,
         "scan_sources": list(sources)
-        if kind in ("trenches", "scanner", "gnat", "pit") else [],
+        if kind in ("trenches", "scanner", "gnat", "pit", "middy") else [],
         "scan_interval_seconds": interval,
         "buy": {"metric": WINDOW_METRICS[window],
                 "window_seconds": window,
@@ -1175,7 +1438,7 @@ def validate_ruleset(raw, bot=None):
     }
     if kind == "scanner" or clean_top10 is not None:
         cleaned["top10_rug"] = clean_top10
-    if kind in ("trenches", "scanner", "gnat", "pit"):
+    if kind in ("trenches", "scanner", "gnat", "pit", "middy"):
         cleaned["buy_filter"] = clean_filter
     if kind == "pit":
         cleaned["pit"] = clean_pit
@@ -1240,6 +1503,12 @@ def summarize_rules(rules) -> str:
             f"Scan {sources} every {rules['scan_interval_seconds']} "
             f"seconds for the top 5 movers, checking the bonding "
             f"curve and buy pressure.")
+    elif rules["kind"] == "middy":
+        sources = " and ".join(rules["scan_sources"])
+        lines.append(
+            f"Scan {sources} every {rules['scan_interval_seconds']} "
+            f"seconds for gainers whose buys beat sells by 35% or "
+            f"more, checking the safety gates.")
     else:
         lines.append(
             f"Watch your own coin list every "
@@ -1247,7 +1516,7 @@ def summarize_rules(rules) -> str:
     lines.append(
         f"Buy when a coin gains {buy['threshold_pct']}% in "
         f"{_window_words(buy['window_seconds'])}"
-        f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner', 'gnat', 'pit') else ''}"
+        f"{' (strongest gainer wins)' if rules['kind'] in ('trenches', 'scanner', 'gnat', 'pit', 'middy') else ''}"
         f"{' — the 3-minute gain is tracked from recorded prices, because the feed only gives 5-minute changes' if rules['kind'] in ('scanner', 'gnat') else ''}.")
     if rules["kind"] == "scanner":
         slow = "; ".join(
@@ -1272,6 +1541,15 @@ def summarize_rules(rules) -> str:
                 f"otherwise slow. (There is no social-media feed: "
                 f"trending is judged from the price feed's volume and "
                 f"buyers, never guessed.)")
+    elif rules["kind"] == "middy":
+        # The +1000% rung is the validator's required backstop, not
+        # the take-profit — the momentum-gated exit below is the
+        # real TP. Say so plainly instead of printing the rung as
+        # if it were the profit plan.
+        lines.append(
+            "Sell ladder: none in effect — take profit is the "
+            "momentum-gated exit below; the +1000% rung is a "
+            "backstop that never fires first.")
     elif rules["sell_ladder"]:
         ladder = "; ".join(
             f"sell {r['pct_of_position']:.0f}% at +{r['profit_pct']:.0f}% profit"
@@ -1332,6 +1610,28 @@ def summarize_rules(rules) -> str:
             "breakers: no new buys for the rest of the day after "
             "2.0 SOL of realized losses, or after 4 losing trades "
             "in a row.")
+    if rules["kind"] == "middy":
+        lines.append(
+            "Take profit sells ALL, in two tiers with a hard "
+            "ceiling: a small take profit (5%-25%) on coins Middy "
+            "is done with; a higher window (25% to no more than "
+            "37%) to secure more profit, held only while the coin "
+            "is still gaining and buys beat sells 75/25 (3:1). "
+            "At 37% the profit is secured immediately and Middy "
+            "moves on — the ceiling, never hold past it, no "
+            "exceptions: going higher exposes Middy to rugs and "
+            "to others securing their profit.")
+        lines.append(
+            "Slow coins: a flat coin (5-minute change within +/-0.5%) "
+            "sells all after 120 seconds; the hard stop fires first "
+            "if it is hit. Daily-loss breaker: down 20% of the "
+            "starting balance in realized losses stops new buys "
+            "until tomorrow. Cooldown: after a losing close, the "
+            "same coin cannot be re-bought for 5 minutes. Buy "
+            "pace: at most 6 coins bought in any rolling hour — a "
+            "cap, never a quota. Never rebuy: a coin this bot "
+            "already bought once is never bought again, even if "
+            "the last trade profited.")
     rug = rules.get("rug_sell")
     if rug:
         window_words = _window_words(rug["window_seconds"])
@@ -1363,7 +1663,7 @@ def summarize_rules(rules) -> str:
             f"The proceeds stay in SOL.")
     buy_filter = rules.get("buy_filter")
     if buy_filter and rules["kind"] in ("trenches", "scanner", "gnat",
-                                        "pit"):
+                                        "pit", "middy"):
         mcap = buy_filter.get("min_market_cap_usd", 0.0)
         max_mcap = buy_filter.get("max_market_cap_usd", 0.0)
         lines.append(
