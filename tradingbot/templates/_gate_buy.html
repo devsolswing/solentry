@@ -104,6 +104,10 @@
     popup.hidden = true;
     stopQuoteTimer();
   }
+  // The popup opens ONLY from an explicit Buy $GATE tap below —
+  // no timer, poll, or page load ever opens it, so a dismissed
+  // popup can never come back on its own, and it never appears
+  // on the login page to block sign-in.
   document.querySelectorAll('[data-gate-buy-open]').forEach(function (b) {
     b.addEventListener('click', function () {
       popup.hidden = false;
@@ -115,6 +119,11 @@
     b.addEventListener('click', closeAll);
   });
   popup.addEventListener('click', function (e) { if (e.target === popup) closeAll(); });
+  // Escape closes too (desktop keyboards): the popup must always
+  // close on demand, never trap the user behind it.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !popup.hidden) closeAll();
+  });
 
   // The trades-left countdown: every page with the popup polls
   // /api/gate-fuel every 30s so the chip and the popup show the

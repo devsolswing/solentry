@@ -850,5 +850,187 @@ class TestGateFuelMigration(unittest.TestCase):
         tmp.cleanup()
 
 
+class TestPopupCloseOnDemand(unittest.TestCase):
+    """The Buy $GATE popup must close on demand, every time
+    (2026-11-23 lockout: the X did nothing and the popup covered
+    every page including login, because .gate-popup is display:flex
+    and that beat the browser's [hidden] rule — hidden=true never
+    hid anything)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app, self.client = make_client(self.tmp.name)
+        _start_route_mocks(self)
+        signup(self.client, "alice")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _css(self):
+        root = os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))
+        with open(os.path.join(root, "tradingbot", "static",
+                               "style.css")) as fh:
+            return fh.read()
+
+    def test_popup_renders_hidden_with_close_button(self):
+        html = self.client.get("/wallet").get_data(as_text=True)
+        self.assertIn(
+            '<div id="gate-buy-popup" class="gate-popup" hidden>', html)
+        self.assertIn("data-gate-buy-close", html)
+        self.assertIn('aria-label="Close"', html)
+
+    def test_login_page_popup_is_hidden(self):
+        """A logged-out user must always be able to log in: the
+        popup markup on /login carries hidden, so it can never
+        cover the sign-in fields."""
+        anon = self.app.test_client()
+        html = anon.get("/login").get_data(as_text=True)
+        self.assertIn(
+            '<div id="gate-buy-popup" class="gate-popup" hidden>', html)
+
+    def test_popup_script_closes_on_escape_and_backdrop(self):
+        html = self.client.get("/wallet").get_data(as_text=True)
+        self.assertIn("Escape", html)
+        self.assertIn("keydown", html)
+        self.assertIn("e.target === popup", html)
+
+    def test_popup_opens_only_from_opener_click(self):
+        """No timer, poll, or page load ever opens the popup: the
+        only place the script clears hidden is the Buy $GATE tap
+        handler. A dismissed popup can never come back on its
+        own."""
+        html = self.client.get("/wallet").get_data(as_text=True)
+        self.assertEqual(html.count("popup.hidden = false"), 1)
+
+    def test_css_hidden_rule_beats_the_flex_display(self):
+        """The regression itself: .gate-popup is display:flex, so
+        the stylesheet must carry an explicit [hidden] override
+        or hidden=true hides nothing."""
+        css = self._css()
+        start = css.index(".gate-popup[hidden]")
+        block = css[start:css.index("}", start)]
+        self.assertIn("display: none", block)
+
+    def test_close_button_is_a_real_tap_target(self):
+        """The X must be tappable on an iPhone: 44px minimum."""
+        css = self._css()
+        start = css.index(".gate-close {")
+        block = css[start:css.index("}", start)]
+        self.assertIn("min-width: 44px", block)
+        self.assertIn("min-height: 44px", block)
+
+
+class TestGateQuoteAllBundles(unittest.TestCase):
+    """GET /api/gate-quote with no ?bundle=: all three packages at
+    once, the shape the popup's script reads (ok + prices[] +
+    sol_price_usd). The shipped build fetched this URL with no
+    bundle and got a 400, so the popup's prices stayed "—" and Buy
+    stayed disabled forever."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app, self.client = make_client(self.tmp.name)
+        _start_route_mocks(self)
+        signup(self.client, "alice")
+        self.rpc = _FakeRpc(curves=_rpc_curves(_gate_curve()))
+        self.patch = mock.patch.object(
+            routes, "SolanaRpcClient", lambda url, **kwargs: self.rpc)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_quote_without_bundle_returns_all_three_prices(self):
+        data = self.client.get("/api/gate-quote").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["prices"]), 3)
+        by_id = {p["bundle_id"]: p for p in data["prices"]}
+        self.assertEqual(set(by_id),
+                         {"bundle_1m", "bundle_5m", "bundle_10m"})
+        for bundle_id in by_id:
+            self.assertGreater(by_id[bundle_id]["sol_amount"], 0)
+        self.assertEqual(data["sol_price_usd"], 10.0)
+        # Best value is the 10M package (most trades per SOL);
+        # exactly one bundle carries the flag.
+        best = [p for p in data["prices"] if p["best_value"]]
+        self.assertEqual(len(best), 1)
+        self.assertEqual(best[0]["bundle_id"], "bundle_10m")
+
+    def test_quote_without_bundle_fails_closed_when_no_price(self):
+        """No live price anywhere: every amount is null, so the
+        popup shows "Price unavailable" and Buy stays disabled —
+        never a guessed price."""
+        self.rpc._curves = _rpc_curves(None)
+        with mock.patch.object(routes, "fetch_prices_for_mints",
+                               lambda mints: {}):
+            data = self.client.get("/api/gate-quote").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["prices"]), 3)
+        self.assertTrue(all(p["sol_amount"] is None
+                            for p in data["prices"]))
+        self.assertTrue(all(not p["best_value"]
+                            for p in data["prices"]))
+
+    def test_single_bundle_shape_still_works(self):
+        data = self.client.get(
+            "/api/gate-quote?bundle=bundle_1m").get_json()
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["price_available"])
+        self.assertGreater(data["sol_estimate"], 0)
+
+
+class TestReconcileLogThrottle(unittest.TestCase):
+    """reconcile_fuel runs on every fuel read: with 0 purchased and
+    12 confirmed trades it logged a reconcile + overdrawn row on
+    EVERY read, flooding the activity log and pushing real trade
+    history out of view. Each anomaly is now logged once per
+    depth."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app, self.client = make_client(self.tmp.name)
+        signup(self.client, "alice")
+        self.user_id = _user_id(self.app)
+        self.db = self.app.config["DB"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _counts(self):
+        rows = self.db.execute(
+            "SELECT kind, COUNT(*) AS n FROM activity WHERE user_id = ? "
+            "AND kind IN ('gate_fuel_reconcile', 'gate_fuel_overdrawn') "
+            "GROUP BY kind", (self.user_id,)).fetchall()
+        return {r["kind"]: r["n"] for r in rows}
+
+    def test_overdrawn_and_reconcile_logged_once_per_depth(self):
+        for i in range(12):
+            self.db.execute(
+                "INSERT INTO gate_fuel_uses (user_id, trade_id, "
+                "signature) VALUES (?, ?, ?)",
+                (self.user_id, None, f"sig-over-{i}"))
+        self.db.commit()
+        for _ in range(3):
+            fuel = gate_fuel_mod.get_fuel(self.db, self.user_id)
+            self.assertEqual(fuel["trades_remaining"], 0)
+            self.assertEqual(fuel["total_used"], 12)
+        counts = self._counts()
+        self.assertEqual(counts.get("gate_fuel_reconcile"), 1)
+        self.assertEqual(counts.get("gate_fuel_overdrawn"), 1)
+        # One more confirmed trade deepens the overdraw: exactly
+        # one more row of each kind, then silence again.
+        self.db.execute(
+            "INSERT INTO gate_fuel_uses (user_id, trade_id, signature) "
+            "VALUES (?, ?, ?)", (self.user_id, None, "sig-over-12"))
+        self.db.commit()
+        for _ in range(3):
+            gate_fuel_mod.get_fuel(self.db, self.user_id)
+        counts = self._counts()
+        self.assertEqual(counts.get("gate_fuel_reconcile"), 2)
+        self.assertEqual(counts.get("gate_fuel_overdrawn"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

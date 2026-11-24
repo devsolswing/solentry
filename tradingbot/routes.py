@@ -2469,22 +2469,52 @@ def register_routes(app: Flask) -> None:
     @app.route("/api/gate-quote")
     @login_required
     def api_gate_quote():
-        """Live SOL estimate for one package (?bundle=bundle_1m),
-        from the ONE pricing rule (gate_fuel.price_bundle_sol) —
-        the same number the buy itself charges. price_available
-        false means no live price: the popup disables Buy instead
-        of showing a guessed price. The CAD price is the package's
-        EXPECTED launch price, reference only; the SOL figure is
-        the live quote and is what the user pays."""
+        """Live SOL estimates for the packages, from the ONE pricing
+        rule (gate_fuel.price_bundle_sol) — the same number the buy
+        itself charges. Two shapes, one endpoint:
+        - No ?bundle=: all three packages at once, the shape the
+          Buy popup's script reads — {"ok", "prices": [{bundle_id,
+          label, trades, sol_amount, best_value}], sol_price_usd}.
+          (Before this fix the popup fetched this URL with no
+          bundle and got a 400, so its prices stayed "—" and Buy
+          stayed disabled forever.)
+        - ?bundle=bundle_1m: the single-package shape (sol_estimate
+          + price_available). price_available false means no live
+          price: the popup disables Buy instead of showing a
+          guessed price. The CAD price is the package's EXPECTED
+          launch price, reference only; the SOL figure is the live
+          quote and is what the user pays."""
         user = _current_user(app)
         db = _db(app)
-        bundle = gate_fuel_mod.get_bundle(
-            (request.args.get("bundle") or "").strip())
+        bundle_id = (request.args.get("bundle") or "").strip()
+        price_usd = _gate_price_usd(app)
+        sol_price_usd = _sol_price_usd()
+        if not bundle_id:
+            prices = []
+            for b in gate_fuel_mod.bundles():
+                prices.append({
+                    "bundle_id": b["id"],
+                    "label": b["label"],
+                    "trades": b["trades"],
+                    "sol_amount": gate_fuel_mod.price_bundle_sol(
+                        b, price_usd, sol_price_usd),
+                    "best_value": False,
+                })
+            available = [p for p in prices
+                         if p["sol_amount"] is not None]
+            if available:
+                best = min(available,
+                           key=lambda p: p["sol_amount"] / p["trades"])
+                best["best_value"] = True
+            return jsonify({
+                "ok": True,
+                "prices": prices,
+                "sol_price_usd": sol_price_usd,
+            })
+        bundle = gate_fuel_mod.get_bundle(bundle_id)
         if bundle is None:
             return jsonify({"ok": False,
                             "error": "Unknown package."}), 400
-        price_usd = _gate_price_usd(app)
-        sol_price_usd = _sol_price_usd()
         sol_estimate = gate_fuel_mod.price_bundle_sol(
             bundle, price_usd, sol_price_usd)
         return jsonify({

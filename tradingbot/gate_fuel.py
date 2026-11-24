@@ -87,6 +87,7 @@ never hardcoded here either.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import urllib.request
@@ -487,6 +488,27 @@ def _first_purchase_at(db: sqlite3.Connection,
     return row["first_at"] if row else None
 
 
+def _overdrawn_depth_changed(db: sqlite3.Connection, user_id: int,
+                             depth: int) -> bool:
+    """True when this overdraw depth is new: the last logged
+    overdrawn flag for this user names a different depth (or there
+    is none). reconcile_fuel runs on every fuel read, so logging
+    the same flag on every read flooded the activity log and pushed
+    real trade history out of view. A parse failure fails open to
+    logging — the anomaly is never silently dropped."""
+    try:
+        row = db.execute(
+            "SELECT detail FROM activity WHERE user_id = ? "
+            "AND kind = 'gate_fuel_overdrawn' ORDER BY id DESC "
+            "LIMIT 1", (user_id,)).fetchone()
+        if row is None:
+            return True
+        match = re.search(r"flag: (\d+) more", row["detail"])
+        return match is None or int(match.group(1)) != depth
+    except Exception:
+        return True
+
+
 def reconcile_fuel(db: sqlite3.Connection, user_id: int) -> dict:
     """Recompute the fuel balance from the persisted ledger and fix
     the cached counter when it drifted. The ledger wins, always.
@@ -563,7 +585,12 @@ def reconcile_fuel(db: sqlite3.Connection, user_id: int) -> dict:
         _ensure_fuel_row(db, user_id)
         cached = {"trades_remaining": 0, "total_purchased": 0,
                   "total_used": 0}
-    if int(cached["trades_remaining"]) != truth or \
+    # The cached counter stores the CLAMPED truth (never below 0),
+    # so compare against the clamped value: comparing the raw truth
+    # (-12 when confirmed trades outran purchases) against a cached
+    # 0 mismatched on EVERY read, logging a reconcile row each time
+    # and flooding the activity log.
+    if int(cached["trades_remaining"]) != max(0, truth) or \
             int(cached["total_purchased"]) != int(purchased) or \
             int(cached["total_used"]) != int(used):
         db.execute(
@@ -578,7 +605,7 @@ def reconcile_fuel(db: sqlite3.Connection, user_id: int) -> dict:
             f"{cached['trades_remaining']} did not match the ledger "
             f"(purchased {purchased}, used {used}) — ledger wins, "
             f"balance set to {max(0, truth)}.")
-    if truth < 0:
+    if truth < 0 and _overdrawn_depth_changed(db, user_id, abs(truth)):
         _log_activity(
             db, user_id, "gate_fuel_overdrawn",
             f"GATEkeeper flag: {abs(truth)} more confirmed real trade(s) "
