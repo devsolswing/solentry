@@ -2182,6 +2182,10 @@ def register_routes(app: Flask) -> None:
                              else None)
             _points, portfolio_has_data = pnl_mod.chart_points_real(
                 db, user["id"], chart_range)
+            # Glitch guard: a single wild snapshot must not flatten
+            # the chart or poison the 24h baseline (see pnl).
+            _points = pnl_mod.sane_points(_points)
+            portfolio_has_data = len(_points) > 0
             portfolio_chart_svg = pnl_mod.chart_svg(
                 _points, unit="SOL ")
             change_24h = pnl_mod.change_24h(
@@ -2191,6 +2195,10 @@ def register_routes(app: Flask) -> None:
             portfolio_usd = _paper(app, user["id"]) + holdings_value
             _points, portfolio_has_data = pnl_mod.chart_points(
                 db, user["id"], chart_range)
+            # Glitch guard: a single wild snapshot must not flatten
+            # the chart or poison the 24h baseline (see pnl).
+            _points = pnl_mod.sane_points(_points)
+            portfolio_has_data = len(_points) > 0
             portfolio_chart_svg = pnl_mod.chart_svg(_points)
             change_24h = pnl_mod.change_24h(
                 db, user["id"], portfolio_usd)

@@ -13,6 +13,7 @@ answers; otherwise it is NULL and shown as "unavailable".
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -50,16 +51,171 @@ def _parse_ts(value) -> float | None:
         return None
 
 
+# --- glitch-snapshot guard -------------------------------------------------
+# A single wild snapshot (the $709,599.60 All-time-chart point) used to
+# poison both the home headline and the chart: change_24h picked
+# whatever snapshot was nearest the 24-hour mark, and chart_svg scaled
+# to the min/max of all points, so one bad row flattened everything.
+# The live feed already rejects absurd single ticks before the silent
+# loop records a snapshot, but a bad price can still arrive through
+# the manual-trade path (no feed check there) or a first tick with no
+# reference yet — so the read path must not trust any single point.
+# The rule walks the series with a running reference (the last
+# accepted value, mirroring the feed's bad-tick rule): a point within
+# GLITCH_FACTOR of the reference is accepted; a point that jumps away
+# is a genuine step only when the next two points confirm the new
+# level (three agreeing points, like the feed's 3-tick re-base) —
+# otherwise it is a spike-and-revert and is dropped. The first point
+# has no history, so it is judged against the level that follows it:
+# when the next two points agree with each other at a level more than
+# GLITCH_FACTOR away, the first point is the odd one out and is
+# dropped (this also covers a glitch landing just inside a ranged
+# window, where it becomes the window's first point). A jump with
+# fewer than two points after it cannot be judged yet and is kept.
+# A wrong level sustained for 3+ snapshots is treated as genuine,
+# matching the feed. Dropping a point never invents history — the
+# page shows the remaining recorded points, or "no data yet". Known
+# cost: a genuine step of more than GLITCH_FACTOR immediately after
+# the first point drops that first point; the baseline then falls
+# back to the next point (or "—"), which is the safe error — a
+# missing figure, never a poisoned one.
+GLITCH_FACTOR = 10.0
+
+
+def _is_finite_number(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _absurd_flags(values: list, factor: float = GLITCH_FACTOR) -> set:
+    """Indices of single-point spikes in a time-ordered value list.
+
+    A value is flagged when it jumps more than `factor` away from the
+    running reference and the next two points do not confirm the new
+    level, when the first value disagrees by more than `factor` with
+    the next two points (which agree with each other), or when the
+    value itself is not a finite number. A jump with fewer than two
+    points after it cannot be judged yet and is never flagged.
+    """
+    flags = set()
+    for i, value in enumerate(values):
+        if not _is_finite_number(value):
+            flags.add(i)
+    pts = [(i, float(v)) for i, v in enumerate(values)
+           if _is_finite_number(v)]
+    if not pts:
+        return flags
+    ref = pts[0][1]
+    start = 1
+    if len(pts) >= 3:
+        _i1, nxt = pts[1]
+        _i2, nxt2 = pts[2]
+        if (nxt <= factor * nxt2 and nxt >= nxt2 / factor
+                and (ref > factor * nxt or ref < nxt / factor)):
+            # First point is the odd one out against the level that
+            # follows it (also covers a glitch just inside a ranged
+            # window, where it is the window's first point).
+            flags.add(pts[0][0])
+            ref = nxt
+            start = 2
+    k = start
+    while k < len(pts):
+        idx, v = pts[k]
+        if v > factor * ref or v < ref / factor:
+            followers = [w for _, w in pts[k + 1:k + 3]]
+            if len(followers) < 2:
+                # Tail of the series: cannot judge yet, keep.
+                k += 1
+                continue
+            if all(w <= factor * v and w >= v / factor
+                   for w in followers):
+                # Genuine step: the new level persists, re-base.
+                ref = v
+                k += 1
+                continue
+            flags.add(idx)
+            k += 1
+            continue
+        ref = v
+        k += 1
+    return flags
+
+
+def sane_points(points: list, factor: float = GLITCH_FACTOR) -> list:
+    """Recorded points with single-point spikes removed, order kept.
+
+    `points` are {"created_at", "total_value_usd"} dicts (the
+    chart_points / chart_points_real shape). The raw rows are
+    untouched — this is a read-time filter only, so displaying the
+    history never rewrites it.
+    """
+    values = []
+    for p in points or []:
+        try:
+            values.append(float(p["total_value_usd"]))
+        except (KeyError, TypeError, ValueError):
+            values.append(None)
+    flags = _absurd_flags(values, factor)
+    return [p for i, p in enumerate(points or []) if i not in flags]
+
+
+def purge_absurd_snapshots(db: sqlite3.Connection, user_id: int | None = None,
+                           factor: float = GLITCH_FACTOR,
+                           dry_run: bool = True) -> list:
+    """One-time cleanup for glitch rows already recorded.
+
+    Returns the flagged rows as [{"id", "user_id", "created_at",
+    "total_value_usd"}]. With dry_run=True (the default) nothing is
+    deleted. With dry_run=False the flagged rows are deleted and the
+    change committed. Rows are judged per user, oldest first, by the
+    same running-reference rule as sane_points — a genuine step change
+    is never flagged, so the cleanup cannot delete real history.
+    """
+    if user_id is None:
+        users = [r["user_id"] for r in db.execute(
+            "SELECT DISTINCT user_id FROM portfolio_snapshots"
+            ).fetchall()]
+    else:
+        users = [user_id]
+    flagged = []
+    for uid in users:
+        rows = db.execute(
+            "SELECT id, created_at, total_value_usd "
+            "FROM portfolio_snapshots WHERE user_id = ? "
+            "ORDER BY created_at ASC, id ASC", (uid,)).fetchall()
+        values = [r["total_value_usd"] for r in rows]
+        for i in sorted(_absurd_flags(values, factor)):
+            flagged.append({"id": rows[i]["id"], "user_id": uid,
+                            "created_at": rows[i]["created_at"],
+                            "total_value_usd": float(
+                                rows[i]["total_value_usd"])})
+    if not dry_run and flagged:
+        db.executemany(
+            "DELETE FROM portfolio_snapshots WHERE id = ?",
+            [(f["id"],) for f in flagged])
+        db.commit()
+    return flagged
+
+
 def record_snapshot(db: sqlite3.Connection, user_id: int, cash_usd: float,
                     holdings_value_usd: float, real_sol: float | None,
                     now: str | None = None) -> None:
-    """Insert one portfolio snapshot row. Never invents a value."""
+    """Insert one portfolio snapshot row. Never invents a value. A
+    non-finite total (inf/nan from a bad price) is refused — both
+    callers already tolerate a failed snapshot, and a poisoned row
+    must never reach the table."""
+    cash = float(cash_usd)
+    holdings = float(holdings_value_usd)
+    if not (math.isfinite(cash) and math.isfinite(holdings)
+            and math.isfinite(cash + holdings)):
+        raise ValueError("refusing non-finite snapshot total")
     db.execute(
         "INSERT INTO portfolio_snapshots (user_id, cash_usd, "
         "holdings_value_usd, total_value_usd, real_sol, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, float(cash_usd), float(holdings_value_usd),
-         float(cash_usd) + float(holdings_value_usd), real_sol,
+        (user_id, cash, holdings, cash + holdings, real_sol,
          now or _now()))
     db.commit()
 
@@ -180,7 +336,10 @@ def change_24h(db: sqlite3.Connection, user_id: int,
     to 24 hours ago — not the oldest snapshot in the window, which
     may be an account-start or thin-data moment and would explode
     the percentage (the +25,548% home-screen figure came from a
-    ~$2.48 early-window baseline). Returns {"delta": ..., "pct": ...}
+    ~$2.48 early-window baseline). Single-point glitch snapshots
+    are filtered out first (sane_points): one wild row nearest the
+    mark used to poison the headline the same way (a $709,599.60
+    row would read as −99.96%). Returns {"delta": ..., "pct": ...}
     or None when there is no usable baseline: no snapshot within 3
     hours of the 24-hour mark, a zero/negative baseline, or no
     current total. Never invents a figure — a missing baseline means
@@ -192,6 +351,7 @@ def change_24h(db: sqlite3.Connection, user_id: int,
         points, _has = chart_points_real(db, user_id, "1d")
     else:
         points, _has = chart_points(db, user_id, "1d")
+    points = sane_points(points)
     if not points:
         return None
     target = (datetime.now(timezone.utc)
@@ -262,3 +422,41 @@ def chart_svg(points: list, width: int = 640, height: int = 200,
         f'<text x="{pad_x}" y="{height - 2}" fill="#aaa" font-size="11">'
         f'{unit}{v0:,.2f}</text>'
         f'</svg>')
+
+
+def _main(argv=None) -> int:
+    """One-time cleanup CLI (dry-run by default — deletes nothing):
+
+    python -m tradingbot.pnl --db PATH [--user ID] [--apply]
+
+    Lists the glitch snapshot rows the neighbour rule flags; --apply
+    deletes them. Run from the repo root; the DB path is the live
+    database file.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="List (or --apply: delete) glitch snapshot rows.")
+    parser.add_argument("--db", required=True,
+                        help="path to the SQLite database file")
+    parser.add_argument("--user", type=int, default=None,
+                        help="only this user id (default: all users)")
+    parser.add_argument("--apply", action="store_true",
+                        help="delete the flagged rows (default: dry-run)")
+    args = parser.parse_args(argv)
+    conn = sqlite3.connect(args.db)
+    try:
+        flagged = purge_absurd_snapshots(
+            conn, user_id=args.user, dry_run=not args.apply)
+    finally:
+        conn.close()
+    for f in flagged:
+        print(f"user {f['user_id']} id {f['id']} "
+              f"{f['created_at']} total {f['total_value_usd']:,.2f}")
+    print(f"{len(flagged)} glitch row(s) "
+          f"{'deleted' if args.apply else 'flagged (dry-run, nothing deleted)'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
