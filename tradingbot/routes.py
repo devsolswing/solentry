@@ -1626,6 +1626,30 @@ def register_routes(app: Flask) -> None:
             passkeys=passkeys,
             support_id=signing_bot["support_id"] if signing_bot else "")
 
+    @app.route("/settings/promo-code", methods=["POST"])
+    @login_required
+    def settings_promo_code():
+        """Redeem a one-time promo code from the coupon box in
+        Settings (James, 2026-11-24). A code works at most
+        max_uses times IN TOTAL across all users — BetaGate1994
+        is one use, first redeemer only. Unknown and already-used
+        codes get the SAME generic error, so the response never
+        hints at which codes exist. On success the flash shows
+        the new trades-left balance (the header chip reads the
+        same ledger number on the redirected page)."""
+        _csrf_check()
+        user = _current_user(app)
+        code = request.form.get("code") or ""
+        result = gate_fuel_mod.redeem_promo_code(_db(app), user["id"],
+                                                 code)
+        if result is None:
+            flash("Invalid or already used code.")
+        else:
+            flash(
+                f"Promo code accepted — {result['trades']} trades "
+                f"added. {result['trades_remaining']} trades left.")
+        return redirect(url_for("settings"))
+
     @app.route("/settings/recovery-question", methods=["POST"])
     @login_required
     def settings_recovery_question():
@@ -2554,7 +2578,8 @@ def register_routes(app: Flask) -> None:
                                      "ID."}), 404
         purchases = [dict(row) for row in _db(app).execute(
             "SELECT bundle_id, coins, trades, sol_spent, buy_signature, "
-            "send_signature, status, created_at FROM gate_fuel_purchases "
+            "send_signature, status, source, promo_code, created_at "
+            "FROM gate_fuel_purchases "
             "WHERE user_id = ? ORDER BY id DESC LIMIT 20",
             (found["user_id"],)).fetchall()]
         return jsonify({"ok": True,

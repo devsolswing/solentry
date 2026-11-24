@@ -717,6 +717,113 @@ def credit_purchase(db: sqlite3.Connection, user_id: int, bundle: dict,
         f"the dev wallet). Send signature: {send_signature[:12]}...")
 
 
+def redeem_promo_code(db: sqlite3.Connection, user_id: int,
+                      code: str) -> dict | None:
+    """Redeem a one-time promo code from the coupon box in
+    Settings (James, 2026-11-24). Returns {"trades",
+    "trades_remaining"} on success, None when the code is unknown
+    or already used up — the caller shows the same generic error
+    either way, so the response never hints at which codes exist.
+
+    Two scopes (promo_codes.scope):
+    - 'global_once': usable at most max_uses times IN TOTAL
+      across all users (BetaGate1994: max_uses 1). Enforced by
+      ONE conditional UPDATE (uses = uses + 1 WHERE code = ? AND
+      uses < max_uses) — the rowcount decides.
+    - 'per_account_once': every account can use it once ("Still
+      on the gate": the signup code, 50 trades). Enforced by the
+      UNIQUE(user_id, code) row in promo_redemptions — the
+      INSERT fails when this account already redeemed it.
+    Both guards run inside one BEGIN IMMEDIATE transaction, so
+    two simultaneous redeems cannot both succeed: the second
+    writer re-evaluates after the first commits and finds either
+    uses == max_uses or the duplicate redemption row. No account
+    can ever redeem the same code twice, whatever the scope.
+    The match is EXACT (case-sensitive, no trimming, spaces
+    significant): the code is BetaGate1994 as written — and
+    "Still on the gate" is lowercase gate, no $ and no
+    question mark.
+
+    The grant lands in gate_fuel_purchases as a completed
+    purchase with source 'promo' and promo_code set — visible
+    promo credit, never disguised as a paid package — so the
+    ledger (purchases minus uses) stays the truth, the
+    trades-left chip reads it, and reconcile_fuel never flags it
+    as overdraw. No SOL moves, no $GATE moves: promo credit is
+    testing fuel only, strictly to test mainnet before using
+    money to test."""
+    if not code:
+        return None
+    _ensure_fuel_row(db, user_id)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT trades, scope, max_uses FROM promo_codes "
+            "WHERE code = ?", (code,)).fetchone()
+        if row is None:
+            db.rollback()
+            return None
+        trades = int(row["trades"])
+        scope = row["scope"]
+        if scope == "global_once":
+            cur = db.execute(
+                "UPDATE promo_codes SET uses = uses + 1 "
+                "WHERE code = ? AND uses < max_uses", (code,))
+            if cur.rowcount != 1:
+                db.rollback()
+                return None
+        elif scope == "per_account_once":
+            pass  # the UNIQUE redemption row below is the guard
+        else:
+            db.rollback()
+            return None
+        try:
+            db.execute(
+                "INSERT INTO promo_redemptions (code, user_id, "
+                "trades) VALUES (?, ?, ?)", (code, user_id, trades))
+        except sqlite3.IntegrityError:
+            db.rollback()
+            return None
+        if scope == "per_account_once":
+            db.execute(
+                "UPDATE promo_codes SET uses = uses + 1 "
+                "WHERE code = ?", (code,))
+        db.execute(
+            "INSERT INTO gate_fuel_purchases (user_id, bundle_id, "
+            "coins, trades, sol_spent, buy_signature, send_signature, "
+            "status, source, promo_code) VALUES (?, 'promo', 0, ?, 0, "
+            "NULL, ?, 'completed', 'promo', ?)",
+            (user_id, trades, f"promo:{code}", code))
+        anchor_row = db.execute(
+            "SELECT ledger_rowid_at_first_purchase FROM gate_fuel "
+            "WHERE user_id = ?", (user_id,)).fetchone()
+        if anchor_row is None or anchor_row[0] is None:
+            max_rowid = db.execute(
+                "SELECT COALESCE(MAX(rowid), 0) AS m FROM trade_ledger "
+                "WHERE user_id = ?", (user_id,)).fetchone()["m"]
+            db.execute(
+                "UPDATE gate_fuel SET ledger_rowid_at_first_purchase "
+                "= ? WHERE user_id = ?", (int(max_rowid), user_id))
+        db.execute(
+            "UPDATE gate_fuel SET trades_remaining = trades_remaining "
+            "+ ?, total_purchased = total_purchased + ?, "
+            "updated_at = datetime('now') WHERE user_id = ?",
+            (trades, trades, user_id))
+        db.commit()
+    except sqlite3.Error:
+        db.rollback()
+        raise
+    scope_note = ("one-time code, now used"
+                  if scope == "global_once" else
+                  "once-per-account code, this account has used it")
+    _log_activity(
+        db, user_id, "gate_fuel_promo",
+        f"GATEkeeper credited {trades} trades (promo code {code} — "
+        f"{scope_note}).")
+    return {"trades": trades,
+            "trades_remaining": get_fuel(db, user_id)["trades_remaining"]}
+
+
 def enforce_fuel_gate(db: sqlite3.Connection, user_id: int) -> bool:
     """The fuel gate: True when the user has fuel to trade. When
     the ledger truth is zero, ALL of the user's real bots are turned

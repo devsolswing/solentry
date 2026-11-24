@@ -42,6 +42,14 @@
   <button class="btn" type="button" id="passkey-register-btn">Register a passkey</button>
   <p class="muted" id="passkey-status"></p>
 
+  <h2>Promo code</h2>
+  <p class="muted">Have a promo code? Enter it here to add its trades to your balance.</p>
+  <form method="post" action="{{ url_for('settings_promo_code') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Coupon code<input name="code" maxlength="64" autocomplete="off" placeholder="e.g. BetaGate1994"></label>
+    <button class="btn big" type="submit">Redeem code</button>
+  </form>
+
   <h2>Signing bot</h2>
   <p class="muted">Your account has one dedicated signing bot — it signs your real trades for you, on {{ network }}, only for trades your bots' rules allow. Give this ID to tech support if you ever need help with your account.</p>
   {% if support_id %}

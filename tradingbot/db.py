@@ -568,6 +568,14 @@ CREATE TABLE IF NOT EXISTS gate_fuel_purchases (
     send_signature TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'completed',
     error TEXT,
+    -- source is 'package' for a paid $GATE package, 'promo' for a
+    -- one-time promo code grant (James, 2026-11-24). promo_code
+    -- names the code that granted it. A promo grant is visible
+    -- promo credit in the ledger — never disguised as a paid
+    -- package — and its send_signature is the literal
+    -- 'promo:<code>', never a real on-chain signature.
+    source TEXT NOT NULL DEFAULT 'package',
+    promo_code TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
@@ -583,6 +591,43 @@ CREATE TABLE IF NOT EXISTS gate_fuel_enrollment (
     user_id INTEGER PRIMARY KEY,
     enrolled INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
+-- Promo / one-time codes (James, 2026-11-24): a coupon code
+-- entered in Settings grants fuel credits. A code is usable at
+-- most max_uses times IN TOTAL across all users — BetaGate1994
+-- has max_uses 1, so the first person to enter it gets the
+-- trades and the code is dead after that. One-time codes only:
+-- that is the anti-bypass rule, so a single user cannot mint
+-- fuel by making multiple accounts. promo_redemptions is the
+-- audit trail (who redeemed which code, when, for how many
+-- trades). Codes are matched EXACTLY (case-sensitive).
+CREATE TABLE IF NOT EXISTS promo_codes (
+    code TEXT PRIMARY KEY,
+    trades INTEGER NOT NULL CHECK (trades > 0),
+    -- scope is the rule: 'global_once' means the code is usable
+    -- at most max_uses times IN TOTAL across all users
+    -- (BetaGate1994: max_uses 1); 'per_account_once' means every
+    -- account can use it once ("Still on the gate": the signup
+    -- code, 50 trades — max_uses NULL, no global cap, the
+    -- per-user UNIQUE row in promo_redemptions is the guard).
+    scope TEXT NOT NULL DEFAULT 'global_once'
+        CHECK (scope IN ('global_once', 'per_account_once')),
+    max_uses INTEGER CHECK (max_uses IS NULL OR max_uses >= 1),
+    uses INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS promo_redemptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    trades INTEGER NOT NULL,
+    redeemed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- No account can ever redeem the same code twice, whatever
+    -- the scope: this UNIQUE row is the per-user guard (and the
+    -- atomicity backstop for simultaneous redeems).
+    UNIQUE (user_id, code),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
@@ -796,6 +841,12 @@ _MIGRATIONS = (
     ("trade_fees", "treasury_lamports", "INTEGER"),
     ("trade_fees", "burn_lamports", "INTEGER"),
     ("trade_fees", "pump_fee_lamports", "INTEGER"),
+    # Promo-code grants land in gate_fuel_purchases marked as
+    # promo (James, 2026-11-24): source + promo_code name the
+    # grant, so it is never mistaken for a paid package.
+    ("gate_fuel_purchases", "source",
+     "TEXT NOT NULL DEFAULT 'package'"),
+    ("gate_fuel_purchases", "promo_code", "TEXT"),
     # Token sends (general SPL send): the mint, the amount in the
     # mint's base units, and the mint's decimals (so the amount can
     # be rendered back in token units). '' / 0 / 0 for SOL sends
@@ -988,6 +1039,25 @@ def _migrate_gate_fuel_uses(conn: sqlite3.Connection) -> None:
         "ALTER TABLE gate_fuel_uses_new RENAME TO gate_fuel_uses")
 
 
+def _seed_promo_codes(conn: sqlite3.Connection) -> None:
+    """Seed the first one-time promo codes (James, 2026-11-24):
+    BetaGate1994 grants 1000 trades, usable ONCE IN TOTAL
+    (global_once, max_uses 1); "Still on the gate" — the signup
+    code, the motto phrase itself — grants 50 trades, usable ONCE
+    PER ACCOUNT (per_account_once, no global cap). Idempotent
+    (INSERT OR IGNORE): re-running init_db never resets the uses
+    count or re-creates a spent code. Matching is exact
+    (case-sensitive, spaces significant) — "Still on the gate"
+    is lowercase gate, no $ and no question mark."""
+    conn.execute(
+        "INSERT OR IGNORE INTO promo_codes (code, trades, scope, "
+        "max_uses) VALUES ('BetaGate1994', 1000, 'global_once', 1)")
+    conn.execute(
+        "INSERT OR IGNORE INTO promo_codes (code, trades, scope, "
+        "max_uses) VALUES ('Still on the gate', 50, "
+        "'per_account_once', NULL)")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, column, ddl in _MIGRATIONS:
         cols = {r["name"] for r in conn.execute(
@@ -1002,6 +1072,7 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate(conn)
     _migrate_gate_fuel_uses(conn)
+    _seed_promo_codes(conn)
     _backfill_pumpfun_wallets(conn)
     _backfill_signing_bots(conn)
     _backfill_builderbots(conn)
