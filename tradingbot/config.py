@@ -233,6 +233,18 @@ class Config:
         # Helius account + HELIUS_API_KEY on Railway. HELIUS_STREAM_
         # ENABLED=0 also turns it off with a key set.
         self.helius_api_key: str = env.get("HELIUS_API_KEY", "").strip()
+        # Trading RPC: when no explicit RPC_URL is set and the Helius
+        # key is configured on mainnet, trade through Helius instead
+        # of the free public endpoint — the public endpoint
+        # rate-limits and drops connections, which is what surfaces
+        # as "RPC error / fails to simulate" on sells and sends.
+        # Same key the price stream already uses; no new cost. The
+        # key lives only in this URL (env-only, never logged —
+        # nothing logs cfg.rpc_url).
+        if (not env.get("RPC_URL") and self.network == "mainnet"
+                and self.helius_api_key):
+            self.rpc_url = ("https://mainnet.helius-rpc.com/?api-key="
+                            + self.helius_api_key)
         self.helius_stream_enabled: bool = env.get(
             "HELIUS_STREAM_ENABLED", "1") == "1"
         # Cap on streamed mints (held + browser-watched). The set

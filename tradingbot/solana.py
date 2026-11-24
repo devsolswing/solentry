@@ -29,6 +29,10 @@ LAMPORTS_PER_SOL = 1_000_000_000
 # A token account is 165 bytes — the rent-exempt minimum for one is
 # queried live (getMinimumBalanceForRentExemption), never hardcoded.
 TOKEN_ACCOUNT_SIZE = 165
+# A Token-2022 token account is 170 bytes — the immutableOwner
+# extension adds 5 bytes. Rent must be queried for the right size
+# or a first send to a fresh address underfunds the account.
+TOKEN_ACCOUNT_SIZE_2022 = 170
 # Fallback rent for one token account (~0.00204 SOL), used only when
 # the live rent query fails — the reserve check then stays safe
 # rather than guessing zero. Remy default, awaiting James's call.

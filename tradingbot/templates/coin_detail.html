@@ -5,7 +5,7 @@
   <p><a class="btn ghost small" href="{{ url_for('wallet') }}">← Wallet</a> <a class="btn ghost small" href="{{ url_for('dashboard') }}">Coins</a> <a class="btn small" href="{{ url_for('coin_detail', coin_id=coin.coin_id, range=range_key) }}">↻ Refresh</a></p>
   <h1>{{ coin.name }} <span class="muted">({{ coin.ticker }})</span></h1>
   <p class="muted small">{{ mode_label }}</p>
-  <p class="big-num" id="live-price" data-live-price="{{ coin.coin_id }}">{% if coin.price is not none %}${{ "%.4f"|format(coin.price) }}{% else %}Price unavailable{% endif %}</p>
+  <p class="big-num" id="live-price" data-live-price="{{ coin.coin_id }}">{% if coin.price is not none %}${{ coin.price|usd_price }}{% else %}Price unavailable{% endif %}</p>
   <div class="live-chart" id="live-chart" data-tick-url="{{ url_for('coin_tick', coin_id=coin.coin_id) }}" data-coin-id="{{ coin.coin_id }}">
     <p class="muted small live-status">Live price · Last updated <span id="live-updated">—</span></p>
     <p class="muted small" id="live-chart-note">Waiting for the first live tick…</p>
@@ -30,12 +30,12 @@
   {% if chart_error and not candles_svg %}<p class="muted small">Chart: {{ chart_error }}</p>{% endif %}
 
   <div class="detail-stats">
-    <p>24h high: <strong>{% if high_24h is not none %}${{ "%.4f"|format(high_24h) }}{% else %}<span class="muted">—</span>{% endif %}</strong></p>
-    <p>24h low: <strong>{% if low_24h is not none %}${{ "%.4f"|format(low_24h) }}{% else %}<span class="muted">—</span>{% endif %}</strong></p>
+    <p>24h high: <strong>{% if high_24h is not none %}${{ high_24h|usd_price }}{% else %}<span class="muted">—</span>{% endif %}</strong></p>
+    <p>24h low: <strong>{% if low_24h is not none %}${{ low_24h|usd_price }}{% else %}<span class="muted">—</span>{% endif %}</strong></p>
     <p>Buyers / sellers (24h): <strong>{% if flow %}Buyers {{ "%.0f"|format(flow.buys_pct) }}% / Sellers {{ "%.0f"|format(flow.sells_pct) }}% <span class="muted small">({{ flow.buys }} buys, {{ flow.sells }} sells)</span>{% else %}<span class="muted">—</span>{% endif %}</strong></p>
   </div>
 
-  <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ "%.4f"|format(coin.avg_price) }}{% endif %} · P&amp;L <strong data-live-pnl="{{ coin.coin_id }}" data-live-amount="{{ coin.held }}" data-live-avg="{{ coin.avg_price }}">{% if coin.pnl is not none %}{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}{% else %}—{% endif %}</strong>{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
+  <p>{% if coin.held > 0 %}You hold <strong>{{ "%.4f"|format(coin.held) }}</strong>{% if coin.avg_price is not none %} at avg ${{ coin.avg_price|usd_price }}{% endif %} · P&amp;L <strong data-live-pnl="{{ coin.coin_id }}" data-live-amount="{{ coin.held }}" data-live-avg="{{ coin.avg_price }}">{% if coin.pnl is not none %}{% if coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(coin.pnl) }}{% else %}—{% endif %}</strong>{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 
   <div class="coin-actions-row">
     <button class="btn coin-action-btn" type="button" data-overlay-open="coin-send-overlay">↑ Send</button>

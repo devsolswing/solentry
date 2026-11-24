@@ -79,9 +79,9 @@
     <p class="popup-head"><a class="popup-close" href="{{ url_for('dashboard') }}" aria-label="Close">✕</a></p>
     <h2>{{ popup_coin.name }} <span class="muted">({{ popup_coin.ticker }})</span></h2>
     <p class="muted small">{{ mode_label }}</p>
-    <p class="big-num">{% if popup_coin.price is not none %}${{ "%.4f"|format(popup_coin.price) }}{% else %}Price unavailable{% endif %}</p>
+    <p class="big-num">{% if popup_coin.price is not none %}${{ popup_coin.price|usd_price }}{% else %}Price unavailable{% endif %}</p>
     <p class="muted small">{% if popup_coin.change_24h is not none %}24h <span class="{{ 'up' if popup_coin.change_24h >= 0 else 'down' }}">{% if popup_coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(popup_coin.change_24h) }}%</span>{% else %}24h change unavailable{% endif %}</p>
-    <p>{% if popup_coin.held > 0 %}You hold <strong>{{ "%.4f"|format(popup_coin.held) }}</strong>{% if popup_coin.avg_price is not none %} at avg ${{ "%.4f"|format(popup_coin.avg_price) }}{% endif %}{% if popup_coin.pnl is not none %} · P&amp;L <strong>{% if popup_coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(popup_coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
+    <p>{% if popup_coin.held > 0 %}You hold <strong>{{ "%.4f"|format(popup_coin.held) }}</strong>{% if popup_coin.avg_price is not none %} at avg ${{ popup_coin.avg_price|usd_price }}{% endif %}{% if popup_coin.pnl is not none %} · P&amp;L <strong>{% if popup_coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(popup_coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 
     <div class="popup-actions">
       {% set trade_coin = popup_coin %}

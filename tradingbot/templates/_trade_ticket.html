@@ -43,16 +43,21 @@
     {% endif %}
   </div>
   <div class="ticket-panel ticket-sell-panel">
+    {% if sell_prefill_sol is defined and sell_prefill_sol is not none %}
+    <p class="muted small">You hold {{ "%.4f"|format(trade_coin.held) }} {{ trade_coin.ticker }} — worth ≈ {{ "%.4f"|format(held_sol_value) }} SOL at ${{ trade_coin.price|usd_price }}.</p>
+    {% endif %}
     {% if mode == 'paper' %}
     <form method="post" action="{{ url_for('coin_sell', coin_id=trade_coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" required{% if sell_prefill_sol is defined and sell_prefill_sol is not none %} value="{{ sell_prefill_sol }}" max="{{ held_sol_value }}" data-price-usd="{{ trade_coin.price }}" data-sol-price-usd="{{ sol_price_usd }}"{% else %} placeholder="0.1"{% endif %}></label>
+      <p class="muted small" data-sell-quote data-ticker="{{ trade_coin.ticker }}">{% if sell_prefill_sol is defined and sell_prefill_sol is not none %}≈ {{ "{:,.0f}".format(sell_prefill_sol * sol_price_usd / trade_coin.price) }} {{ trade_coin.ticker }}{% endif %}</p>
       <button class="btn big" type="submit">Sell (paper)</button>
     </form>
     {% else %}
     <form method="post" action="{{ url_for('coin_sell', coin_id=trade_coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" required{% if sell_prefill_sol is defined and sell_prefill_sol is not none %} value="{{ sell_prefill_sol }}" max="{{ held_sol_value }}" data-price-usd="{{ trade_coin.price }}" data-sol-price-usd="{{ sol_price_usd }}"{% else %} placeholder="0.1"{% endif %}></label>
+      <p class="muted small" data-sell-quote data-ticker="{{ trade_coin.ticker }}">{% if sell_prefill_sol is defined and sell_prefill_sol is not none %}≈ {{ "{:,.0f}".format(sell_prefill_sol * sol_price_usd / trade_coin.price) }} {{ trade_coin.ticker }}{% endif %}</p>
       <label>Real bot to manage this sell (required)
         <select name="bot_id" required>
           <option value="">Choose a real bot…</option>
@@ -91,4 +96,25 @@
     <p class="muted">You hold none of this coin in {{ mode_label }} — nothing to sell.</p>
     {% endif %}
   </div>
+  <script nonce="{{ csp_nonce }}">
+  (function () {
+    var ticket = document.querySelector('.trade-ticket');
+    if (!ticket) return;
+    var input = ticket.querySelector('.ticket-sell-panel input[name="amount_sol"]');
+    var quote = ticket.querySelector('[data-sell-quote]');
+    if (!input || !quote) return;
+    var price = parseFloat(input.getAttribute('data-price-usd'));
+    var sol = parseFloat(input.getAttribute('data-sol-price-usd'));
+    var ticker = quote.getAttribute('data-ticker') || '';
+    if (!(price > 0) || !(sol > 0)) return;
+    function update() {
+      var amount = parseFloat(input.value);
+      if (isNaN(amount) || amount <= 0) { quote.textContent = ''; return; }
+      var tokens = Math.round(amount * sol / price);
+      quote.textContent = '≈ ' + tokens.toLocaleString('en-US') + ' ' + ticker;
+    }
+    input.addEventListener('input', update);
+    update();
+  })();
+  </script>
 </div>

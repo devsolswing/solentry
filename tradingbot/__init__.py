@@ -12,6 +12,20 @@ from .config import Config, load_dotenv
 from .db import init_db
 
 
+def format_usd_price(price) -> str:
+    """Coin price for display: 8 decimals below $0.0001 (a $0.000002
+    coin must not read $0.0000), 4 decimals otherwise. None or a
+    non-number renders empty — templates guard with `is not none`
+    and show their own fallback."""
+    if price is None:
+        return ""
+    try:
+        value = float(price)
+    except (TypeError, ValueError):
+        return ""
+    return f"{value:.8f}" if value < 0.0001 else f"{value:.4f}"
+
+
 def create_app(config: Config | None = None) -> Flask:
     load_dotenv()
     cfg = config or Config()
@@ -29,6 +43,10 @@ def create_app(config: Config | None = None) -> Flask:
     app.config["SESSION_COOKIE_SECURE"] = cfg.session_cookie_secure
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=12)
     app.config["TRADINGBOT_CONFIG"] = cfg
+    # Coin prices: tiny prices need 8 decimals or they read $0.0000
+    # (see format_usd_price). Registered here so every template and
+    # the live JS share the same rule.
+    app.jinja_env.filters["usd_price"] = format_usd_price
     # One shared connection per app instance (sqlite, single-process
     # dev/Railway hobby deploy; check_same_thread off for the Flask
     # dev server's threaded mode).

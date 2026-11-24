@@ -587,6 +587,20 @@ CREATE TABLE IF NOT EXISTS gate_fuel_uses (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
+-- gate_fuel_sweep_trades: trade_ledger rows that belong to a
+-- last-credit exit-all sweep (James, 2026-11-24). The sweep sells
+-- every open real position for ONE credit total, so reconcile_fuel's
+-- backfill must NOT count each sweep sell as its own credit: a
+-- trade_id listed here is excluded from backfill. Without this,
+-- the backfill would consume one credit per swept position on the
+-- next fuel read, on top of the sweep's single credit.
+CREATE TABLE IF NOT EXISTS gate_fuel_sweep_trades (
+    trade_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    sweep_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
 CREATE TABLE IF NOT EXISTS gate_fuel_enrollment (
     user_id INTEGER PRIMARY KEY,
     enrolled INTEGER NOT NULL DEFAULT 0,

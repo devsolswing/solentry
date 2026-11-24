@@ -96,7 +96,7 @@
       asOf = new Date();
     }
     lastOkAt = asOf;
-    if (priceEl) priceEl.textContent = '$' + price.toFixed(4);
+    if (priceEl) priceEl.textContent = '$' + price.toFixed(price < 0.0001 ? 8 : 4);
     if (updatedEl) updatedEl.textContent = fmtTime(asOf);
     if (note) {
       note.textContent = 'Live · source: ' + (source || 'feed');

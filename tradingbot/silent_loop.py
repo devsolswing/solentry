@@ -1378,14 +1378,20 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                    price: float, reason: str, rpc_factory,
                    real_executor, actions: list, amount: float | None = None,
                    ladder_stage: int | None = None,
-                   feed=None, prices_data: dict | None = None) -> None:
+                   feed=None, prices_data: dict | None = None,
+                   sweep_id: str | None = None) -> None:
     """Sell a bot's position in `coin` (paper ledger, or the real
     executor). `amount` None means the whole position; otherwise a
     partial sell (sell-ladder rung). `ladder_stage` advances the
     position's rung counter when given. `price` is the live mark
     price: it drives the stop/ladder decision and is the fallback
     display price — real-mode P&L is NEVER computed from it (see
-    below). Logs the outcome either way; never fakes a fill."""
+    below). Logs the outcome either way; never fakes a fill.
+    `sweep_id` marks a sell as part of the last-credit exit-all
+    sweep: the sweep is the only spender of the last fuel credit,
+    so a sweep sell skips the per-trade fuel gate and the per-trade
+    consume — the sweep consumes exactly one credit for the whole
+    pass, after the sells (see run_exit_all_sweep)."""
     pos = _positions(db, bot["id"]).get(coin)
     if not pos:
         return
@@ -1406,7 +1412,8 @@ def _sell_position(db: sqlite3.Connection, cfg: Config, bot, coin: str,
                                rpc_factory, real_executor, actions,
                                amount=amount, ladder_stage=ladder_stage,
                                feed=feed, prices_data=prices_data,
-                               full_amount=full_amount)
+                               full_amount=full_amount,
+                               sweep_id=sweep_id)
     finally:
         _release_position_for_sell(int(pos["id"]))
 
@@ -1416,7 +1423,8 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
                            rpc_factory, real_executor, actions: list,
                            amount: float, ladder_stage: int | None = None,
                            feed=None, prices_data: dict | None = None,
-                           full_amount: float | None = None) -> None:
+                           full_amount: float | None = None,
+                           sweep_id: str | None = None) -> None:
     """The sell itself, run only while the position is claimed (see
     _sell_position). After a sell, two tuning-build bookkeeping
     steps run: a losing close sets the 30-minute re-buy cooldown
@@ -1500,14 +1508,35 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
     # $GATE fuel gate (2026-11-23): a real sell costs 1 package
     # credit. No fuel means no trade — the bot is turned off by
     # the gate until the user refills. Paper sells never reach
-    # this branch.
-    if not gate_fuel_mod.enforce_fuel_gate(db, bot["user_id"]):
+    # this branch. A sweep sell (sweep_id set) skips this gate:
+    # the sweep IS the authorized spender of the last credit, and
+    # it consumes exactly one credit for the whole pass afterwards
+    # (see run_exit_all_sweep) — gating it here would block the
+    # very exit the rule exists for.
+    if sweep_id is None and not gate_fuel_mod.enforce_fuel_gate(
+            db, bot["user_id"]):
         _log(db, bot["user_id"], "silent_skip",
              f"Silent bot '{bot['name']}': {reason} sell of {coin} "
              f"skipped — out of $GATE fuel (0 trades left). Buy a "
              f"$GATE package to resume.", bot["mode"])
         actions.append({"action": "skip", "coin": coin,
                         "reason": "out of fuel"})
+        return
+    # Last-credit reserve (James, 2026-11-24): when the user's fuel
+    # is down to its last credit and real positions are open, that
+    # credit is reserved to exit every position in one sweep — a
+    # single sell here would eat it. The sweep is the only spender
+    # of the last credit, so an ordinary sell at fuel == 1 is
+    # refused and the position waits for the sweep.
+    if sweep_id is None and gate_fuel_mod.exit_all_pending(
+            db, bot["user_id"]):
+        _log(db, bot["user_id"], "silent_skip",
+             f"Silent bot '{bot['name']}': {reason} sell of {coin} "
+             f"skipped — last $GATE trade is reserved to exit all "
+             f"open positions. Buy a $GATE package to keep trading.",
+             bot["mode"])
+        actions.append({"action": "skip", "coin": coin,
+                        "reason": "last trade reserved"})
         return
     # The claim is placed only once the fuel gate has passed: a
     # refused sell never holds a claim. An unconfirmed send leaves
@@ -1550,6 +1579,11 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
         # $GATE fuel: one credit for this confirmed executed trade.
         # The trade_id links the fuel-use row to the ledger row, so
         # the count is recomputable from the ledger at any time.
+        # A sweep sell consumes NOTHING here: the sweep consumes
+        # exactly one credit for the whole pass afterwards
+        # (run_exit_all_sweep). The trade is marked as a sweep
+        # trade instead, so reconcile_fuel's backfill never counts
+        # it as its own credit.
         trade_id = record_trade(
             db, bot["user_id"], bot["id"], coin, "sell", amount,
             exec_price if exec_price is not None else price,
@@ -1559,8 +1593,12 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
             exit_reason=reason, mode="real", now=_now(),
             signature=result.get("signature"),
             sol_amount=sol_received)
-        gate_fuel_mod.consume_fuel(db, bot["user_id"], trade_id,
-                                   result.get("signature"))
+        if sweep_id is not None:
+            gate_fuel_mod.record_sweep_trade(
+                db, bot["user_id"], sweep_id, trade_id)
+        else:
+            gate_fuel_mod.consume_fuel(db, bot["user_id"], trade_id,
+                                       result.get("signature"))
         if ladder_stage is not None:
             db.execute("UPDATE bot_positions SET ladder_stage = ? "
                        "WHERE bot_id = ? AND coin_id = ?",
@@ -1576,7 +1614,8 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
              f"{str(result.get('signature', ''))[:12]}... "
              f"Signing bot: {result.get('signing_bot', '')}.", bot["mode"])
         actions.append({"action": "sell", "coin": coin, "amount": amount,
-                        "reason": reason})
+                        "reason": reason, "trade_id": trade_id,
+                        "signature": result.get("signature")})
     else:
         if result.get("reason") != "transaction not confirmed":
             # The sell was refused before anything was sent — the
@@ -1588,6 +1627,136 @@ def _sell_position_claimed(db: sqlite3.Connection, cfg: Config, bot,
              f"Silent bot '{bot['name']}': {reason} sell of {coin} "
              f"skipped — {why}.", bot["mode"])
         actions.append({"action": "skip", "coin": coin, "reason": why})
+
+
+def run_exit_all_sweep(db: sqlite3.Connection, cfg: Config,
+                       user_id: int, rpc_factory, real_executor,
+                       feed=None, prices_data: dict | None = None,
+                       trenches_data: dict | None = None,
+                       price_fetcher=None) -> dict:
+    """The last-credit exit-all sweep (James, 2026-11-24, revised —
+    NO free exits): when a user's fuel reaches its last trade left,
+    that last credit exits EVERY open real position in one pass.
+    One credit closes all positions; buys can never consume the
+    last credit (see the reserve checks in _buy_coin,
+    _sell_position_claimed and routes.py).
+
+    Runs only when exit_all_pending is true (exactly 1 credit left
+    AND open real bot positions). Returns {"ran": False, ...} at
+    once otherwise — a pass with nothing to sweep costs one fuel
+    read and no trades. Called once per loop pass per evaluated
+    user (see run_once), never inside a web request: a sweep is
+    several on-chain sells and must not hang a page render.
+
+    Each position sells through the normal _sell_position path
+    (sell claims, reconciliation, ledger, stop bookkeeping) with
+    reason "exit_all" and this sweep's id, so the sells are
+    indistinguishable from any other exit except for fuel: sweep
+    sells consume nothing per trade. A refused position is logged
+    and the sweep CONTINUES with the rest — one stuck position
+    must not block the others. If ZERO sells execute, the credit
+    is NOT consumed (fuel stays 1) and the next loop pass retries.
+    If at least one sell executes, exactly ONE credit is consumed
+    for the whole sweep, keyed by the first executed sell's
+    trade_id/signature. After the sweep, fuel is 0 and the
+    existing gate turns all real silent bots off (paper untouched).
+
+    Only bot-managed real positions are swept. Manual (hand-bought)
+    holdings are not positions in this app — they are not sold by
+    the sweep (open call for James: see the MANIFEST). Prices come
+    from the live feed first, then the trenches prices for this
+    pass, then a live DexScreener fetch — a position with no live
+    price is left alone this pass and retried next time, never
+    sold blind."""
+    if not gate_fuel_mod.exit_all_pending(db, user_id):
+        return {"ran": False, "reason": "no exit-all pending"}
+    sweep_id = f"exit_all:{user_id}:{time.time_ns()}"
+    rows = db.execute(
+        "SELECT bp.coin_id AS coin_id, bp.amount AS amount, b.* "
+        "FROM bot_positions bp JOIN bots b ON b.id = bp.bot_id "
+        "WHERE bp.user_id = ? AND bp.mode = 'real' AND bp.amount > 0 "
+        "ORDER BY bp.id",
+        (user_id,)).fetchall()
+    if not rows:
+        return {"ran": False, "reason": "no open real positions"}
+    if price_fetcher is None:
+        trenches_prices = ((trenches_data or {}).get("prices") or {})
+
+        def price_fetcher(mints):
+            out = {}
+            for mint in mints:
+                entry = trenches_prices.get(mint) or {}
+                price = entry.get("price")
+                if price is not None:
+                    out[mint] = {"price_usd": price}
+            if len(out) < len(mints):
+                try:
+                    rest = _default_price_fetcher(
+                        [m for m in mints if m not in out])
+                except Exception:
+                    rest = {}
+                for mint, entry in (rest or {}).items():
+                    price = (entry or {}).get("price")
+                    if price is not None:
+                        out[mint] = {"price_usd": price}
+            return out
+
+    sold: list[dict] = []
+    skipped: list[dict] = []
+    for row in rows:
+        coin = row["coin_id"]
+        bot = dict(row)
+        price = _held_price(price_fetcher, coin, feed, cfg, rpc_factory)
+        if price is None:
+            _log(db, user_id, "silent_skip",
+                 f"Exit-all sweep: {coin} has no live price — position "
+                 f"left alone this pass, will retry.", "real")
+            skipped.append({"coin": coin, "reason": "no live price"})
+            continue
+        sub_actions: list = []
+        _sell_position(db, cfg, bot, coin, price, "exit_all",
+                       rpc_factory, real_executor, sub_actions,
+                       feed=feed, prices_data=prices_data,
+                       sweep_id=sweep_id)
+        for action in sub_actions:
+            if action.get("action") == "sell":
+                sold.append(action)
+            elif action.get("action") == "skip":
+                skipped.append({"coin": coin,
+                                "reason": action.get("reason", "skipped")})
+    if not sold:
+        _log(db, user_id, "gate_fuel_exit_all",
+             f"Exit-all sweep {sweep_id}: no position sold "
+             f"({len(skipped)} skipped) — last trade kept, will retry "
+             f"next scan.", "real")
+        return {"ran": True, "sweep_id": sweep_id, "sold": [],
+                "skipped": skipped, "consumed": False,
+                "trades_remaining": 1}
+    # Exactly one credit for the whole sweep, keyed by the first
+    # executed sell. Re-check fuel first: the sells above must not
+    # have been counted already (a concurrent consume, or a
+    # backfill that ran mid-sweep) — consuming twice would push
+    # the ledger below zero.
+    fuel_now = gate_fuel_mod.get_fuel(db, user_id)["trades_remaining"]
+    consumed = False
+    if fuel_now == 1:
+        first = sold[0]
+        consumed = gate_fuel_mod.consume_fuel(
+            db, user_id, first.get("trade_id"), first.get("signature"))
+    else:
+        _log(db, user_id, "gate_fuel_exit_all",
+             f"Exit-all sweep {sweep_id}: fuel moved during the sweep "
+             f"(now {fuel_now}) — sweep credit not consumed again.",
+             "real")
+    remaining = gate_fuel_mod.get_fuel(db, user_id)["trades_remaining"]
+    _log(db, user_id, "gate_fuel_exit_all",
+         f"Exit-all sweep {sweep_id}: sold {len(sold)} position(s) "
+         f"({', '.join(a['coin'] for a in sold)}) for 1 trade credit; "
+         f"{len(skipped)} skipped; fuel now {remaining}.",
+         "real")
+    return {"ran": True, "sweep_id": sweep_id, "sold": sold,
+            "skipped": skipped, "consumed": consumed,
+            "trades_remaining": remaining}
 
 
 def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
@@ -1761,6 +1930,20 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
              f"package to resume.", bot["mode"])
         actions.append({"action": "skip", "coin": coin,
                         "reason": "out of fuel"})
+        return
+    # Last-credit reserve (James, 2026-11-24): a buy can NEVER
+    # consume the last fuel credit while real positions are open —
+    # that credit is reserved to exit every position in one sweep.
+    # The buy waits until the user refills; the sweep runs on the
+    # next loop pass.
+    if gate_fuel_mod.exit_all_pending(db, bot["user_id"]):
+        _log(db, bot["user_id"], "silent_skip",
+             f"Silent bot '{bot['name']}': buy of {coin} skipped — "
+             f"last $GATE trade is reserved to exit all open "
+             f"positions. Buy a $GATE package to keep trading.",
+             bot["mode"])
+        actions.append({"action": "skip", "coin": coin,
+                        "reason": "last trade reserved"})
         return
     # Price-gate context for the real executor: the decision price
     # is the scan price fetched at decision_price_as_of (the loop
@@ -3166,7 +3349,8 @@ def _fast_exit_loop(db_path: str, cfg, feed, rpc_factory=None,
 
 def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
              rpc_factory=None, real_executor=None,
-             trenches_fetcher=None, feed=None) -> list:
+             trenches_fetcher=None, feed=None,
+             sweep_price_fetcher=None) -> list:
     """One loop iteration over every silent-enabled bot.
 
     Returns a list of per-bot outcome dicts. A failure for one bot is
@@ -3263,6 +3447,31 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             outcomes.append({"bot_id": bot["id"], "bot_name": bot["name"],
                              "user_id": bot["user_id"], "mode": bot["mode"],
                              "actions": [], "error": str(exc)[:200]})
+    # Last-credit exit-all sweep (James, 2026-11-24): when a user's
+    # fuel reaches its last credit, that credit exits every open
+    # real position in one pass. Checked once per loop pass for
+    # each user evaluated above — the sweep runs in the loop, never
+    # inside a web request, and never for paper. A user with
+    # nothing to sweep costs one fuel read; a sweep that sold
+    # nothing keeps the credit and retries next pass. Users with
+    # no silent bot evaluated this pass are not checked (see the
+    # MANIFEST open call) — their sweep waits until a bot runs.
+    _swept_users: set = set()
+    for _outcome in outcomes:
+        _uid = _outcome["user_id"]
+        if _uid in _swept_users:
+            continue
+        _swept_users.add(_uid)
+        try:
+            run_exit_all_sweep(db, cfg, _uid, rpc_factory,
+                               real_executor, feed=feed,
+                               prices_data=prices_data,
+                               trenches_data=trenches_data,
+                               price_fetcher=sweep_price_fetcher)
+        except Exception as _exc:  # a failed sweep never stops the loop
+            _log(db, _uid, "silent_skip",
+                 f"Exit-all sweep failed — {str(_exc)[:120]}. No trade "
+                 f"was made.", "real")
     _record_snapshots(db, cfg, prices_data, trenches_data, rpc_factory,
                       {o["user_id"] for o in outcomes})
     # builderBot reviews each evaluated bot's trade ledger: a losing

@@ -21,7 +21,9 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 
 from .solana import (
+    TOKEN_2022_PROGRAM,
     TOKEN_ACCOUNT_SIZE,
+    TOKEN_ACCOUNT_SIZE_2022,
     TOKEN_PROGRAM,
     base58_encode,
     build_create_associated_token_account_instruction,
@@ -123,9 +125,15 @@ def inspect_token(client, wallet_pubkey: str, mint: str,
     create_ata = dest_info is None
     rent_lamports = 0
     if create_ata:
+        # Rent is per account size: a Token-2022 ATA is 170 bytes
+        # (immutableOwner), a classic SPL Token ATA 165. Querying
+        # 165 for a Token-2022 mint underfunds the new account.
+        account_size = (TOKEN_ACCOUNT_SIZE_2022
+                        if token_program == TOKEN_2022_PROGRAM
+                        else TOKEN_ACCOUNT_SIZE)
         try:
             rent_lamports = client.get_minimum_balance_for_rent_exemption(
-                TOKEN_ACCOUNT_SIZE)
+                account_size)
         except Exception:
             raise TokenSendRefusal(
                 "Could not check the network fee right now — try again.")

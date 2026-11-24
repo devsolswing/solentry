@@ -275,11 +275,27 @@ class TestHoldingsHalfPanel(HomeRedoBase):
 
     def test_home_ui_enlarged_css(self):
         css = open("tradingbot/static/style.css").read()
-        # Bigger portfolio total and logo than the pre-redo sizes
-        # (34px total, 118px logo), sized in dvh so they scale
-        # with a short phone.
+        # Bigger portfolio total than the pre-redo size (34px
+        # total), sized in dvh so it scales with a short phone.
+        # The mascot logo is the brand — full size (118px),
+        # never shrunk on Home (James, 2026-11-24): no
+        # home-screen size override and no short-screen shrink.
         self.assertIn("clamp(32px, 5dvh, 44px)", css)
-        self.assertIn("clamp(56px, 10dvh, 96px)", css)
+        self.assertIn(".fox-logo { width: 118px; height: 118px;", css)
+        self.assertNotIn(".home-screen .fox-logo { width:", css)
+
+    def test_fuel_row_has_jerrycan_button_not_wide_buy(self):
+        # The Buy $GATE trigger in the fuel row is a jerry-can
+        # icon button next to "trades left" (James, 2026-11-24),
+        # not a wide button — it still opens the Buy $GATE popup.
+        css = open("tradingbot/static/style.css").read()
+        self.assertIn(".gate-fuel-btn {", css)
+        for template in ("tradingbot/templates/wallet.html",
+                         "tradingbot/templates/wallet_detail.html"):
+            html = open(template).read()
+            self.assertIn("gate-fuel-btn", html)
+            self.assertIn("data-gate-buy-open", html)
+            self.assertNotIn(">Buy $GATE</button>", html)
 
 
 class TestCoinDetailActions(HomeRedoBase):

@@ -543,16 +543,22 @@ def reconcile_fuel(db: sqlite3.Connection, user_id: int) -> dict:
                 "WHERE user_id = ? "
                 "AND mode = 'real' AND rowid > ? AND trade_id NOT IN "
                 "(SELECT trade_id FROM gate_fuel_uses WHERE user_id = ? "
-                "AND trade_id IS NOT NULL)",
-                (user_id, anchor, user_id)).fetchall()
+                "AND trade_id IS NOT NULL) "
+                "AND trade_id NOT IN "
+                "(SELECT trade_id FROM gate_fuel_sweep_trades "
+                "WHERE user_id = ?)",
+                (user_id, anchor, user_id, user_id)).fetchall()
         else:
             missing = db.execute(
                 "SELECT trade_id, signature FROM trade_ledger "
                 "WHERE user_id = ? "
                 "AND mode = 'real' AND created_at > ? AND trade_id NOT IN "
                 "(SELECT trade_id FROM gate_fuel_uses WHERE user_id = ? "
-                "AND trade_id IS NOT NULL)",
-                (user_id, first_at, user_id)).fetchall()
+                "AND trade_id IS NOT NULL) "
+                "AND trade_id NOT IN "
+                "(SELECT trade_id FROM gate_fuel_sweep_trades "
+                "WHERE user_id = ?)",
+                (user_id, first_at, user_id, user_id)).fetchall()
         for trade_id, signature in missing:
             try:
                 db.execute(
@@ -627,6 +633,48 @@ def has_fuel(db: sqlite3.Connection, user_id: int) -> bool:
     """True when the ledger truth says at least one trade credit
     remains."""
     return get_fuel(db, user_id)["trades_remaining"] > 0
+
+
+def open_real_positions(db: sqlite3.Connection, user_id: int) -> int:
+    """How many open real bot positions this user holds (amount > 0).
+    Manual holdings are not positions — the exit-all sweep only
+    exits bot-managed positions (see run_exit_all_sweep)."""
+    row = db.execute(
+        "SELECT COUNT(*) AS n FROM bot_positions "
+        "WHERE user_id = ? AND mode = 'real' AND amount > 0",
+        (user_id,)).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def exit_all_pending(db: sqlite3.Connection, user_id: int) -> bool:
+    """True when the last-credit exit-all rule is live for this user
+    (James, 2026-11-24): exactly 1 fuel credit left AND at least one
+    open real bot position. That last credit is reserved to exit
+    every open position in one sweep — no single trade may consume
+    it while this is true (see the reserve checks in routes.py and
+    silent_loop.py). With no open real positions there is nothing
+    to protect, so the reserve does not bind: a user at 1 credit
+    with no positions can still trade, instead of being stuck until
+    they refill."""
+    if get_fuel(db, user_id)["trades_remaining"] != 1:
+        return False
+    return open_real_positions(db, user_id) > 0
+
+
+def record_sweep_trade(db: sqlite3.Connection, user_id: int,
+                       sweep_id: str, trade_id: str) -> None:
+    """Mark one trade_ledger row as part of an exit-all sweep, so
+    reconcile_fuel's backfill never counts that sell as its own
+    credit — the sweep costs exactly one credit total, recorded
+    separately by consume_fuel. INSERT OR IGNORE: the same trade
+    is never recorded twice."""
+    if not trade_id:
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO gate_fuel_sweep_trades "
+        "(trade_id, user_id, sweep_id) VALUES (?, ?, ?)",
+        (trade_id, user_id, sweep_id))
+    db.commit()
 
 
 def consume_fuel(db: sqlite3.Connection, user_id: int,

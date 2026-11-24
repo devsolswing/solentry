@@ -107,7 +107,7 @@
     return d.toLocaleTimeString([], {
       hour: '2-digit', minute: '2-digit', second: '2-digit'});
   }
-  function fmtPrice(p) { return '$' + p.toFixed(4); }
+  function fmtPrice(p) { return '$' + p.toFixed(p < 0.0001 ? 8 : 4); }
   function fmtMoney(v) {
     return (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US',
       { minimumFractionDigits: 2, maximumFractionDigits: 2 });

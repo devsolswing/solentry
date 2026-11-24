@@ -62,7 +62,9 @@ class FakeTokenRpc:
     mint_decimals = DECIMALS
     sender_ata_exists = True
     mint_exists = True
+    mint_owner = TOKEN_PROGRAM
     dest_ata_exists = False
+    rent_sizes = []
     sol_balance = SOL_BALANCE
     confirm_result = True
     tx_status_result = "confirmed"
@@ -83,7 +85,7 @@ class FakeTokenRpc:
             if not self.mint_exists:
                 return None
             return {"data": b"", "lamports": 0, "executable": False,
-                    "owner": TOKEN_PROGRAM}
+                    "owner": self.mint_owner}
         # Anything else read here is the destination's ATA.
         if self.dest_ata_exists:
             return {"data": b"", "lamports": RENT, "executable": False,
@@ -97,6 +99,7 @@ class FakeTokenRpc:
                 "decimals": self.mint_decimals}
 
     def get_minimum_balance_for_rent_exemption(self, data_size):
+        FakeTokenRpc.rent_sizes.append(data_size)
         return RENT
 
     def get_balance_lamports(self, pubkey):
@@ -204,6 +207,25 @@ class TestInspectToken(unittest.TestCase):
     def setUp(self):
         self.rpc = FakeTokenRpc("https://example.invalid")
         self.wallet = "4zg7rBoW6XV1o6VtFbqQD686pwgmRtpKHB7Ce1bQ7ze8"
+        FakeTokenRpc.mint_owner = TOKEN_PROGRAM
+        FakeTokenRpc.rent_sizes = []
+
+    def test_rent_uses_170_bytes_for_token_2022(self):
+        # A Token-2022 ATA is 170 bytes (immutableOwner), not 165 —
+        # querying 165 underfunds the new account. Set on the
+        # instance, never the class: the fake is shared, and a
+        # class-level mint owner would leak into later test classes.
+        self.rpc.mint_owner = TOKEN_2022_PROGRAM
+        plan = inspect_token(self.rpc, self.wallet, MINT, DEST)
+        self.assertTrue(plan["create_ata"])
+        self.assertEqual(plan["token_program"], TOKEN_2022_PROGRAM)
+        self.assertEqual(FakeTokenRpc.rent_sizes, [170])
+
+    def test_rent_uses_165_bytes_for_classic_token(self):
+        plan = inspect_token(self.rpc, self.wallet, MINT, DEST)
+        self.assertTrue(plan["create_ata"])
+        self.assertEqual(plan["token_program"], TOKEN_PROGRAM)
+        self.assertEqual(FakeTokenRpc.rent_sizes, [165])
 
     def test_fresh_destination_needs_ata_and_rent(self):
         plan = inspect_token(self.rpc, self.wallet, MINT, DEST)

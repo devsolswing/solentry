@@ -59,6 +59,34 @@
   <p class="muted">No signing bot yet.</p>
   {% endif %}
 
+  <h2>Wallet backup</h2>
+  <p class="muted">Your app wallet's private key is the only way to get this wallet back outside SolEntry — import it into Phantom as a private key and the wallet is yours anywhere. Anyone with this key controls the wallet, so never share it and never paste it into a chat or a website. App wallets have no seed phrase — the private key below is the backup.</p>
+  {% if wallet_key %}
+  <div id="wallet-export-revealed">
+    <p><strong>Your wallet private key:</strong></p>
+    <p><input type="text" readonly value="{{ wallet_key }}" id="wallet-export-key" style="width: 100%"></p>
+    <p><button class="btn big" type="button" data-copy="{{ wallet_key }}">Copy key</button>
+    <button class="btn ghost" type="button" id="wallet-export-hide">Hide key</button></p>
+    <p class="muted small">This key hides itself in 60 seconds. Copy it now and store it somewhere safe — not in a chat, not in a screenshot you share.</p>
+  </div>
+  <script nonce="{{ csp_nonce }}">
+  (function () {
+    var box = document.getElementById('wallet-export-revealed');
+    if (!box) return;
+    function hide() { box.remove(); }
+    setTimeout(hide, 60000);
+    var btn = document.getElementById('wallet-export-hide');
+    if (btn) btn.addEventListener('click', hide);
+  })();
+  </script>
+  {% else %}
+  <form method="post" action="{{ url_for('settings_wallet_export') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Your password<input type="password" name="password" required autocomplete="current-password" placeholder="Enter your password to show the key"></label>
+    <button class="btn big" type="submit">Show wallet key</button>
+  </form>
+  {% endif %}
+
   <p><a href="{{ url_for('wallet') }}">← Back to wallet</a></p>
   <p><a href="{{ url_for('logout') }}">Log out</a></p>
 </div>

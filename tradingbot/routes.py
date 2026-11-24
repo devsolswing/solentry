@@ -24,7 +24,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from flask import (Flask, abort, flash, has_request_context, jsonify,
-                   redirect, render_template, request, session, url_for)
+                   make_response, redirect, render_template, request,
+                   session, url_for)
 
 from webauthn import (generate_authentication_options,
                       generate_registration_options,
@@ -86,10 +87,11 @@ from .security import (decrypt_secret, encrypt_secret, hash_account_password,
 from .wallet_keys import temporary_wallet_secret
 from .signals import signal_for_coin
 from .silent_loop import _open_position
-from .solana import (SolanaRpcClient, build_signed_transfer,
-                     generate_keypair, is_valid_address,
-                     lamports_to_sol, rpc_client_for_config,
-                     rpc_client_for_url, sol_to_lamports)
+from .solana import (SolanaRpcClient, base58_encode,
+                     build_signed_transfer, generate_keypair,
+                     is_valid_address, lamports_to_sol,
+                     rpc_client_for_config, rpc_client_for_url,
+                     sol_to_lamports)
 from .trenches import (fetch_mint_1h_changes, fetch_mint_24h_changes,
                        fetch_mint_identities, fetch_prices_for_mints,
                        fetch_trenches_scan)
@@ -1299,6 +1301,28 @@ def _upgrade_account_to_v2(db, cfg, user_row, password: str) -> bool:
     return _set_account_password(db, cfg, int(user_row["id"]), password)
 
 
+def _sell_prefill_for_row(row, sol_price_usd):
+    """SOL value of a held coin row + the sell-form prefill: the
+    holding's value floored to 6 decimals, capped at 0.1 SOL.
+    Returns (held_sol_value, prefill) or (None, None) when the row
+    holds nothing or has no live price — the form then keeps its
+    0.1 placeholder. The floor matters: rounding UP could prefill
+    more than the holding is worth, and the sell would refuse with
+    "insufficient token balance"."""
+    try:
+        held = float(row["held"] or 0)
+        price = float(row["price"] or 0)
+        sol = float(sol_price_usd or 0)
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    if held <= 0 or price <= 0 or sol <= 0:
+        return None, None
+    held_sol = int(held * price / sol * 1_000_000) / 1_000_000
+    if held_sol <= 0:
+        return None, None
+    return held_sol, min(held_sol, 0.1)
+
+
 def register_routes(app: Flask) -> None:
     login_required = _login_required(app)
 
@@ -1622,10 +1646,11 @@ def register_routes(app: Flask) -> None:
     # Account settings: recovery question + passkeys
     # Account recovery: forgot password, recovery-question answer
     # ------------------------------------------------------------------
-    @app.route("/settings")
-    @login_required
-    def settings():
-        user = _current_user(app)
+    def _settings_page(app, user, wallet_key=None):
+        """Render Settings. wallet_key is only ever passed by the
+        export route after a password check — the GET never has it.
+        A response carrying the key is marked no-store so the key
+        never sits in a browser or proxy cache."""
         row = _db(app).execute(
             "SELECT username, recovery_question, recovery_hint, "
             "recovery_answer_hash FROM users WHERE id = ?",
@@ -1636,14 +1661,75 @@ def register_routes(app: Flask) -> None:
             (user["id"],)).fetchall()
         signing_bot = signing_bot_mod.get_signing_bot(_db(app),
                                                       user["id"])
-        return render_template(
+        resp = make_response(render_template(
             "settings.html",
             username=row["username"],
             has_recovery=bool(row["recovery_answer_hash"]),
             recovery_question=row["recovery_question"],
             recovery_hint=row["recovery_hint"],
             passkeys=passkeys,
-            support_id=signing_bot["support_id"] if signing_bot else "")
+            support_id=signing_bot["support_id"] if signing_bot else "",
+            wallet_key=wallet_key or ""))
+        if wallet_key:
+            resp.headers["Cache-Control"] = (
+                "no-store, no-cache, must-revalidate")
+            resp.headers["Pragma"] = "no-cache"
+        return resp
+
+    @app.route("/settings")
+    @login_required
+    def settings():
+        return _settings_page(app, _current_user(app))
+
+    @app.route("/settings/wallet-export", methods=["POST"])
+    @login_required
+    def settings_wallet_export():
+        """Show the owner's own wallet private key, once, after they
+        re-enter their password. The key leaves the server ONLY
+        here: the logged-in owner, for their OWN wallet only. No
+        user id is ever accepted, so nobody can ask for another
+        account's key — and admin oversight never reaches this
+        route (it shows no keys, ever). The key is rendered once,
+        never logged, never stored, and the response is marked
+        no-store. A wrong password counts toward the same login
+        lockout as a wrong login, so the gate cannot be
+        brute-forced. App wallets have no seed phrase — the
+        private key (base58, the form Phantom imports) IS the
+        backup."""
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        row = db.execute(
+            "SELECT username, password_hash, salt, pw_version, email "
+            "FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if row is None:
+            return redirect(url_for("settings"))
+        if _check_login_lock(app, row["username"]):
+            flash("Too many failed tries. Locked for 15 minutes.")
+            return redirect(url_for("settings"))
+        password = request.form.get("password") or ""
+        if int(row["pw_version"] or 1) == 2:
+            password_ok = verify_account_password(
+                password, row["email"] or "", row["salt"],
+                row["password_hash"])
+        else:
+            password_ok = verify_password(
+                password, row["salt"], row["password_hash"])
+        if not password_ok:
+            _record_login_fail(app, row["username"])
+            flash("Wrong password.")
+            return redirect(url_for("settings"))
+        _clear_login_fails(app, row["username"])
+        wallet_key = None
+        with temporary_wallet_secret(
+                db, user["id"], _cfg(app).encryption_key) as secret:
+            if secret is None:
+                flash("No app wallet on this account.")
+                return redirect(url_for("settings"))
+            wallet_key = base58_encode(bytes(secret))
+        _log(app, user["id"], "wallet_export",
+             "Wallet key shown in Settings (password confirmed).")
+        return _settings_page(app, user, wallet_key=wallet_key)
 
     @app.route("/settings/promo-code", methods=["POST"])
     @login_required
@@ -2294,6 +2380,11 @@ def register_routes(app: Flask) -> None:
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
         trenches_rows, trenches_error = (
             _trenches_list() if include_trenches else ([], None))
+        # Coin popup sell form: the popup holding's SOL value +
+        # prefill (same rule as the coin detail page).
+        popup_held_sol, popup_sell_prefill = (
+            _sell_prefill_for_row(popup_coin, sol_price)
+            if popup_coin is not None else (None, None))
         return {"wallet": wallet if mode == "devnet" else None,
                 "receive_address": wallet["pubkey"] if wallet else "",
                 "real_sol": real_sol,
@@ -2318,6 +2409,8 @@ def register_routes(app: Flask) -> None:
                 if signing_bot else "",
                 "sol_price_usd": sol_price,
                 "popup_coin": popup_coin,
+                "held_sol_value": popup_held_sol,
+                "sell_prefill_sol": popup_sell_prefill,
                 "trenches_rows": trenches_rows,
                 "trenches_error": trenches_error}
 
@@ -2749,6 +2842,11 @@ def register_routes(app: Flask) -> None:
             (user["id"], "real" if mode == "devnet" else "paper")
             ).fetchall()
         wallet = _wallet(app, user["id"])
+        # Sell form: the holding's SOL value + prefill, so the form
+        # never suggests 0.1 SOL for a holding worth less.
+        sol_price = _sol_price_usd()
+        held_sol_value, sell_prefill_sol = _sell_prefill_for_row(
+            row, sol_price)
         return render_template(
             "coin_detail.html", coin=row, range_key=range_key,
             ranges=CHART_RANGES, candles_svg=candles_svg,
@@ -2770,7 +2868,10 @@ def register_routes(app: Flask) -> None:
             coin_network=networks_mod.coin_network(coin_id_resolved),
             send_refusal=networks_mod.send_refusal(
                 coin_id_resolved, _cfg(app).network),
-            network_label=networks_mod.network_label(_cfg(app).network))
+            network_label=networks_mod.network_label(_cfg(app).network),
+            sol_price_usd=sol_price,
+            held_sol_value=held_sol_value,
+            sell_prefill_sol=sell_prefill_sol)
 
     @app.route("/api/coins/<coin_id>/tick")
     @login_required
@@ -3166,6 +3267,19 @@ def register_routes(app: Flask) -> None:
                  "off until you refill."],
                 False, coin_id_resolved, label,
                 **_gate_no_fuel_context(app, user))
+        # Last-credit reserve (James, 2026-11-24): when fuel is down
+        # to its last credit and real positions are open, that
+        # credit is reserved to exit every position in one sweep —
+        # a buy here would eat it. Buys can never consume the last
+        # credit; the sweep is its only spender.
+        if gate_fuel_mod.exit_all_pending(db, user["id"]):
+            return _coin_result(
+                "Last trade reserved",
+                ["Your last $GATE trade is reserved to exit all your "
+                 "open positions at once.",
+                 "This buy would use it up — buys can't use the last "
+                 "trade. Buy a $GATE package to keep trading."],
+                False, coin_id_resolved, label)
         # The venue is the bonding curve: a graduated coin trades
         # through Jupiter (mainnet, gated behind James's go-ahead);
         # anything still bonding trades through the pump.fun
@@ -3429,6 +3543,21 @@ def register_routes(app: Flask) -> None:
                  "off until you refill."],
                 False, coin_id_resolved, label,
                 **_gate_no_fuel_context(app, user))
+        # Last-credit reserve (James, 2026-11-24): same as the buy
+        # path — when fuel is down to its last credit and real
+        # positions are open, that credit is reserved to exit every
+        # position in one sweep. A single sell here would eat it,
+        # so it is refused: the sweep closes every position for
+        # that one credit instead.
+        if gate_fuel_mod.exit_all_pending(db, user["id"]):
+            return _coin_result(
+                "Last trade reserved",
+                ["Your last $GATE trade is reserved to exit all your "
+                 "open positions at once.",
+                 "This sell would use it up — single sells can't use "
+                 "the last trade. The exit-all sweep closes every "
+                 "position for that one credit instead."],
+                False, coin_id_resolved, label)
         # The venue is the bonding curve (see the buy path
         # above): graduated -> Jupiter, still bonding -> pump.fun,
         # unreadable -> refused plainly.
