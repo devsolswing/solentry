@@ -18,17 +18,12 @@
 
 <h1>Coins</h1>
 {% if balances_stale %}<p class="muted small">Token balances couldn't be read from the chain right now — the amounts below are the last saved ones, not live.</p>{% endif %}
-<div class="coin-list">
+<div class="coin-list" data-coins-list>
   {% for row in coin_rows %}
-  <a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
-    <span class="coin-name"><strong>{{ row.name }}</strong></span><span class="coin-ticker muted small">{{ row.ticker }}</span>
-    <span class="coin-price" data-live-price="{{ row.coin_id }}">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">no data</span>{% endif %}</span>
-    <span data-live-change-24h="{{ row.coin_id }}" class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
-    <span class="coin-pnl" data-live-pnl="{{ row.coin_id }}" data-live-amount="{{ row.held }}" data-live-avg="{{ row.avg_price }}">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
-  </a>
+  {% include "_coins_row.html" %}
   {% endfor %}
   {% if not coin_rows %}
-  <p class="muted">You hold no coins in {{ mode_label }} yet — buy one below.</p>
+  <p class="muted" data-coins-empty>You hold no coins in {{ mode_label }} yet — buy one below.</p>
   {% endif %}
 </div>
 <p class="muted small">Tap a coin for its chart, 24h high/low, buyers &amp; sellers, and Buy / Sell / Sell all in SOL. P&amp;L is for coins you hold in {{ mode_label }}. Prices: {% if prices.source == 'live' %}live ({{ prices.as_of }}){% else %}unavailable right now{% endif %}</p>
@@ -36,18 +31,11 @@
 <p><button class="btn small" type="button" id="quick-trade-open">Buy or Sell Coin</button></p>
 
 <h2 class="section-title">🔥 Trenches</h2>
-<div class="coin-list trenches-list">
-  {% if trenches_rows %}
+<div class="coin-list trenches-list" data-trenches-list>
   {% for t in trenches_rows %}
-  <a class="coin-row" href="{{ url_for('coin_popup', coin_id=t.mint) }}">
-    <span class="coin-name"><strong>{{ t.name }}</strong></span><span class="coin-ticker muted small">{{ t.symbol }}</span>
-    <span class="coin-price" data-live-price="{{ t.mint }}">${{ "%.4f"|format(t.price_usd) }}</span>
-    <span data-live-change-1h="{{ t.mint }}" class="coin-change">{% if t.change_1h_pct is not none %}<span class="{{ 'up' if t.change_1h_pct >= 0 else 'down' }}">{% if t.change_1h_pct >= 0 %}+{% endif %}{{ "%.1f"|format(t.change_1h_pct) }}% 1h</span>{% else %}<span class="muted">—</span>{% endif %}</span>
-  </a>
+  {% include "_trenches_row.html" %}
   {% endfor %}
-  {% else %}
-  <p class="muted small">{% if trenches_error %}Trenches unavailable right now — the feed did not answer.{% else %}No trenches tokens right now.{% endif %}</p>
-  {% endif %}
+  <p class="muted small" data-trenches-empty{% if trenches_rows %} hidden{% endif %}>{% if trenches_error %}Trenches unavailable right now — the feed did not answer.{% else %}No trenches tokens right now.{% endif %}</p>
 </div>
 <p class="muted small">Fresh pump.fun / PumpSwap tokens. Tap one for the same Buy / Sell / Sell all popup as any other coin.</p>
 

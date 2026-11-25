@@ -47,6 +47,14 @@ def create_app(config: Config | None = None) -> Flask:
     # (see format_usd_price). Registered here so every template and
     # the live JS share the same rule.
     app.jinja_env.filters["usd_price"] = format_usd_price
+    # Unit prices in significant figures (see fmt_price_sig in
+    # home_holdings — the same 3-significant-figure rule live.js
+    # fmtPrice uses): a $0.00002 coin reads $0.0000200, never
+    # $0.0000, and a $100 price never carries eight decimals. A
+    # missing or non-positive price reads "no data". Templates
+    # that render a unit price with "%.4f" use this filter instead.
+    from .home_holdings import fmt_price_sig
+    app.jinja_env.filters["sig_price"] = fmt_price_sig
     # One shared connection per app instance (sqlite, single-process
     # dev/Railway hobby deploy; check_same_thread off for the Flask
     # dev server's threaded mode).

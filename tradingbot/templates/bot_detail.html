@@ -50,7 +50,7 @@
     <tr><th>Trade ID</th><th>When</th><th>Coin</th><th>Side</th><th>Amount</th><th>Price</th><th>P&amp;L</th><th>W/L</th></tr>
     {% for t in trades %}
     <tr>
-      <td>{{ t.trade_id }}</td><td>{{ t.created_at }}</td><td>{{ t.coin }}</td><td>{{ t.side }}</td><td>{{ "%.4f"|format(t.amount) }}</td><td>${{ "%.4f"|format(t.price) }}</td><td>{% if t.pnl_usd is not none %}${{ "%.2f"|format(t.pnl_usd) }}{% else %}—{% endif %}</td><td>{% if t.win == 1 %}Win{% elif t.win == 0 %}Loss{% else %}—{% endif %}</td>
+      <td>{{ t.trade_id }}</td><td>{{ t.created_at }}</td><td>{{ t.coin }}</td><td>{{ t.side }}</td><td>{{ "%.4f"|format(t.amount) }}</td><td>{{ t.price|sig_price }}</td><td>{% if t.pnl_usd is not none %}${{ "%.2f"|format(t.pnl_usd) }}{% else %}—{% endif %}</td><td>{% if t.win == 1 %}Win{% elif t.win == 0 %}Loss{% else %}—{% endif %}</td>
     </tr>
     {% endfor %}
   </table>

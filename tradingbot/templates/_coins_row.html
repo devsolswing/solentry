@@ -1,0 +1,19 @@
+{# One coins-page holdings row (shared by dashboard.html and
+   the /api/coins-rows refresh, so the server and the poll render
+   the same markup). The layout is the coins page's own flat row
+   — name + ticker + unit price + 1h % + P&L — unchanged. The
+   unit price is in significant figures (sig_price — never
+   $0.0000); the % is the 1h % from the same points the home
+   sparkline draws (the old 24h % was hardcoded None in
+   _coin_rows, so it read "—" always). data-live-price keeps the
+   price ticking live; data-live-change-1h is refreshed by the 5s
+   coins-list poll (Helius ticks carry no 1h %, so the tick path
+   alone can never move it); data-live-amount / data-live-avg let
+   the tick path recompute P&L; data-coin-id lets the poll match
+   this row to the server's rows. #}
+<a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}" data-coin-id="{{ row.coin_id }}">
+  <span class="coin-name"><strong>{{ row.name }}</strong></span><span class="coin-ticker muted small">{{ row.ticker }}</span>
+  <span class="coin-price" data-live-price="{{ row.coin_id }}">{% if row.price is not none %}{{ row.price|sig_price }}{% else %}<span class="muted">no data</span>{% endif %}</span>
+  <span data-live-change-1h="{{ row.coin_id }}" class="coin-change">{% if row.change_1h is not none %}<span class="{{ 'up' if row.change_1h >= 0 else 'down' }}">{% if row.change_1h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_1h) }}% 1h</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+  <span class="coin-pnl" data-live-pnl="{{ row.coin_id }}" data-live-amount="{{ row.held }}" data-live-avg="{{ row.avg_price }}">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+</a>

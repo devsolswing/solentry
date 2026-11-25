@@ -636,18 +636,21 @@ class TestRefreshLive(unittest.TestCase):
             (self.user_id,)).fetchone()["c"]
 
     def test_refresh_records_snapshot_and_shows_live_prices(self):
-        self.assertIn("$10.0000", self._html("/dashboard"))
+        # Unit prices render in significant figures now (D4), so a
+        # $10 coin reads $10.00 in its row, not $10.0000 — the test
+        # still pins the live price moving on the next render.
+        self.assertIn(">$10.00</span>", self._html("/dashboard"))
         # No price cache any more: the live chain price moves the
         # row on the next render, with no refresh needed.
         self.mint_prices[GATE] = 99.0
-        self.assertIn("$99.0000", self._html("/dashboard"))
+        self.assertIn(">$99.00</span>", self._html("/dashboard"))
         before = self._snapshots()
         resp = self.client.post("/dashboard/refresh", data={
             "csrf_token": csrf(self.client, "/dashboard")})
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/dashboard", resp.headers["Location"])
         html = self._html("/dashboard")
-        self.assertIn("$99.0000", html)
+        self.assertIn(">$99.00</span>", html)
         self.assertIn("Refreshed with live data.", html)
         self.assertGreater(self._snapshots(), before)
 

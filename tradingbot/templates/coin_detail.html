@@ -10,7 +10,7 @@
     <p class="muted small live-status">Live price · Last updated <span id="live-updated">—</span></p>
     <p class="muted small" id="live-chart-note">Waiting for the first live tick…</p>
   </div>
-  <p class="muted small">24h <span data-live-change-24h="{{ coin.coin_id }}">{% if coin.change_24h is not none %}<span class="{{ 'up' if coin.change_24h >= 0 else 'down' }}">{% if coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(coin.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span> · Prices: {% if prices_source == 'live' %}live ({{ prices_as_of }}){% else %}unavailable right now{% endif %}</p>
+  <p class="muted small">24h <span data-live-change-24h="{{ coin.coin_id }}">{% if change_24h is not none %}<span class="{{ 'up' if change_24h >= 0 else 'down' }}">{% if change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span> · Prices: {% if prices_source == 'live' %}live ({{ prices_as_of }}){% else %}unavailable right now{% endif %}</p>
 
   <div class="chart-ranges" role="group" aria-label="Chart range">
     {% for key, (label, days) in ranges.items() %}

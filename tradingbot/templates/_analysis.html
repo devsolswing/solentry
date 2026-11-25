@@ -32,9 +32,9 @@
       <td>{{ p.buy_at }}</td>
       <td>{{ p.coin }}</td>
       <td>{{ p.bot }}</td>
-      <td>${{ "%.4f"|format(p.buy_price) }}</td>
+      <td>{{ p.buy_price|sig_price }}</td>
       <td>{{ p.sell_at }}</td>
-      <td>${{ "%.4f"|format(p.sell_price) }}</td>
+      <td>{{ p.sell_price|sig_price }}</td>
       <td class="{{ 'down' if p.pnl_usd < 0 else 'up' }}">{% if p.pnl_usd >= 0 %}+{% endif %}${{ "%.2f"|format(p.pnl_usd) }}</td>
       <td>{% if p.hold_seconds is not none %}{{ "%.0f"|format(p.hold_seconds / 60) }} min{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{{ p.exit_reason }}</td>
@@ -57,7 +57,7 @@
       <td>{{ b.buy_at }}</td>
       <td>{{ b.coin }}</td>
       <td>{{ b.bot }}</td>
-      <td>${{ "%.4f"|format(b.buy_price) }}</td>
+      <td>{{ b.buy_price|sig_price }}</td>
       <td>{{ "%.4f"|format(b.amount) }}</td>
       <td>{% if b.m5_pct is not none %}{{ "%.1f"|format(b.m5_pct) }}%{% else %}<span class="muted">unavailable</span>{% endif %}</td>
       <td>{% if b.volume_5m_usd is not none %}${{ "{:,.0f}".format(b.volume_5m_usd) }}{% else %}<span class="muted">unavailable</span>{% endif %}</td>

@@ -274,6 +274,17 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .coin-list-panel { max-height: 300px; overflow-y: auto; background: #000; border: 2px solid #ffb300; border-radius: 12px; padding: 4px; }
 .coin-list-panel .coin-list { margin: 0; }
 .trenches-list .coin-row { border-color: rgba(255, 45, 32, .55); }
+/* Trenches badge (Page 10): a two-line button, nothing cut off.
+   The coin name wraps in full (the global .coin-name truncates
+   with an ellipsis — the holdings rows already override it the
+   same way); the price and the 1h % never wrap, and the 1h chart
+   reuses .holdings-spark (64x16, hidden while empty). */
+.trenches-list .coin-row { flex-wrap: wrap; row-gap: 2px; }
+.trenches-main { flex: 1 1 100%; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.trenches-list .coin-name { flex: 1 1 auto; min-width: 0; overflow: visible; white-space: normal; }
+.trenches-list .coin-price { flex: 0 0 auto; white-space: nowrap; }
+.trenches-bottom { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.trenches-bottom .coin-change { flex: 0 0 auto; white-space: nowrap; }
 .chart-ranges { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
 .range-btn { flex: 1 1 auto; text-align: center; padding: 8px 4px; background: #1a0805; border: 1px solid #ffb300; border-radius: 999px; color: #ffd700; text-decoration: none; font-size: 13px; font-weight: 700; }
 .range-btn.active { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border-color: #ffcf3d; }

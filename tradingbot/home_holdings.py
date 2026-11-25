@@ -228,6 +228,49 @@ def sparkline_svg_1h(coin_id: str, is_mint: bool = False,
         coin_id, is_mint=is_mint, feed=feed, http_get=http_get))
 
 
+def change_pct_from_points(points) -> float | None:
+    """1h % change from a sparkline points list (oldest first):
+    (last - first) / first * 100. None when fewer than 2 points
+    or the first price is not positive — the same points the
+    chart draws from, so the % and the chart can never disagree.
+    A fresh coin with no history has no % ("—" on the page)."""
+    try:
+        values = [float(p) for p in (points or []) if p is not None
+                  and math.isfinite(float(p))]
+    except (TypeError, ValueError):
+        return None
+    if len(values) < 2 or values[0] <= 0:
+        return None
+    return (values[-1] - values[0]) / values[0] * 100.0
+
+
+def sparkline_1h_change_pct(coin_id: str, is_mint: bool = False,
+                            feed=None, http_get=None) -> float | None:
+    """The 1h % for a coin from the SAME points its sparkline
+    draws (GeckoTerminal OHLCV first, then the feed's last-hour
+    ticks). None when fewer than 2 real recent points exist."""
+    return change_pct_from_points(sparkline_points_1h(
+        coin_id, is_mint=is_mint, feed=feed, http_get=http_get))
+
+
+def fmt_price_sig(price) -> str:
+    """A unit price in significant figures, mirroring live.js
+    fmtPrice: decimals fit the size, so a sub-$0.0001 price never
+    renders as $0.0000 and a $100 price never carries eight
+    decimals. Three significant figures (decimals =
+    clamp(floor(-log10(p)) + 3, 2, 12)). A missing or
+    non-positive price reads "no data", never $0.00."""
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return "no data"
+    if not (p > 0) or not math.isfinite(p):
+        return "no data"
+    decimals = math.floor(-math.log10(p)) + 3
+    decimals = max(2, min(12, decimals))
+    return "$" + f"{p:.{decimals}f}"
+
+
 def sparkline_points_for_coin(coin_id: str, is_mint: bool = False,
                               feed=None, http_get=None) -> list:
     """Real recent prices for a coin's sparkline, oldest first,
@@ -367,7 +410,8 @@ def reconcile_holdings(db_rows, chain_balances,
 def enrich_row(row: dict, feed=None, http_get=None,
                http_head=None, db=None,
                rpc_url: str | None = None) -> dict:
-    """Attach a coin row's real image URL and 1hr sparkline SVG.
+    """Attach a coin row's real image URL, 1hr sparkline SVG, and
+    1h % change.
 
     Sets `row["image_url"]` (only when a verified real image URL
     resolves — from the stored `coin_meta` row for the mint, fetched
@@ -376,8 +420,14 @@ def enrich_row(row: dict, feed=None, http_get=None,
     prices exist — GeckoTerminal OHLCV first, then the feed's
     last-hour ticks). A row with no image or no recent history is
     left without those keys, and the template falls back to the
-    ticker-initial icon / no sparkline. Never raises; the row is
-    returned unchanged on any failure.
+    ticker-initial icon / no sparkline. It also fills
+    `row["change_1h"]` from the SAME points the sparkline draws,
+    so the % and the chart can never disagree (D2: Helius ticks
+    never carry a change_1h and feed.change_over needs an hour of
+    ticks a fresh coin lacks, so the feed-derived value stays "—"
+    forever — the points-derived value replaces it whenever the
+    points yield one, and the feed value stands otherwise). Never
+    raises; the row is returned unchanged on any failure.
     """
     if not isinstance(row, dict):
         return row
@@ -394,6 +444,13 @@ def enrich_row(row: dict, feed=None, http_get=None,
         svg = sparkline_svg(points)
         if svg:
             row["sparkline_svg"] = svg
+        # D2: the 1h % from the SAME points the chart draws, so
+        # the two can never disagree. Only fill when the points
+        # yield a value; the feed-derived change_1h (set in
+        # _coin_rows) stands otherwise.
+        pct = change_pct_from_points(points)
+        if pct is not None:
+            row["change_1h"] = pct
     except Exception:
         pass
     return row

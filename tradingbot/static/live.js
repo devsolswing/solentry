@@ -6,8 +6,10 @@
    time: the status pill in the topbar shows both, and each updated
    node gets them as a tooltip. A tick the server rejected never
    arrives here. The home page also re-fetches its holdings list
-   every 60 seconds (/api/home-holdings), so a coin leaves the
-   list the moment its balance hits 0 without a manual reload.
+   every 5 seconds (/api/home-holdings), so a coin leaves the
+   list the moment its balance hits 0 without a manual reload,
+   and Page 10 re-fetches its trenches list on the same cadence
+   (/api/trenches), so it never sits frozen.
    If the socket drops, the page says so plainly (status pill) and
    falls back to polling /api/live every 4 seconds, while the
    socket reconnects with backoff. A socket that connects but never
@@ -72,8 +74,22 @@
       .then(function (data) {
         if (!data || !data.ok || !data.sparklines) return;
         els.forEach(function (el) {
-          var svg = data.sparklines[el.getAttribute('data-sparkline-coin')];
+          var coin = el.getAttribute('data-sparkline-coin');
+          var svg = data.sparklines[coin];
           if (typeof svg === 'string' && svg) el.innerHTML = svg;
+          /* The badge's own 1h % comes from the same points the
+             chart draws (data.pct_1h) — update it with the chart,
+             so the two can never disagree. Home rows have no such
+             node (their % is data-live-change-1h) and skip this. */
+          var pct = data.pct_1h ? data.pct_1h[coin] : null;
+          var pctEl = el.parentNode
+            ? el.parentNode.querySelector('[data-sparkline-pct-1h]')
+            : null;
+          if (pctEl && typeof pct === 'number') {
+            pctEl.textContent = fmtPct(pct, 1) + ' 1h';
+            pctEl.classList.remove('up', 'down', 'muted');
+            pctEl.classList.add(pct >= 0 ? 'up' : 'down');
+          }
         });
       })
       .catch(function () { /* next poll retries; last chart stands */ });
@@ -95,7 +111,7 @@
     window.addEventListener('pagehide', stopSparkPoll);
   }
 
-  /* Holdings list auto-refresh (home page): every 60 seconds the
+  /* Holdings list auto-refresh (home page): every 5 seconds the
      page re-fetches /api/home-holdings and updates the rows in
      place (SOL value, 1h %, sparkline) when the coin set is
      unchanged. A coin that left the server's rows (its balance
@@ -167,6 +183,15 @@
                 pctWrap.classList.remove('up', 'down', 'muted');
                 pctWrap.classList.add(r.change_1h >= 0 ? 'up' : 'down');
               }
+            } else if (pctEl && r.change_1h === null) {
+              /* The server has no 1h % any more (too few chart
+                 points) — clear the stale value to "—" instead of
+                 leaving yesterday's % standing. */
+              pctEl.textContent = '—';
+              if (pctWrap) {
+                pctWrap.classList.remove('up', 'down');
+                pctWrap.classList.add('muted');
+              }
             }
             var sparkEl = el.querySelector('[data-sparkline-coin]');
             if (sparkEl && typeof r.sparkline_svg === 'string'
@@ -207,6 +232,199 @@
     });
     window.addEventListener('pagehide', stopHoldingsPoll);
   }
+  /* Trenches list auto-refresh (Page 10): every 5 seconds the
+     page re-fetches /api/trenches and updates the rows in place
+     (price, 1h %, sparkline) when the coin set is unchanged. A
+     coin that left the server's rows is removed from the DOM,
+     and a new coin's row is inserted — so the list never sits
+     frozen, without a manual reload. A row the feed AND the
+     chain read cannot price is kept reading "no data" (the
+     endpoint keeps it), so a stall cannot yank rows off the
+     page. Any insert / removal re-collects live.js's node lists
+     and re-subscribes the socket, so the new rows tick live too.
+     The poll runs while the page is visible and stops when
+     hidden, like the holdings poll. */
+  var trenchesList = document.querySelector('[data-trenches-list]');
+  var TRENCHES_POLL_MS = 5000;
+  var trenchesTimer = null;
+  function fetchTrenches() {
+    if (!trenchesList) return;
+    fetch('/api/trenches', { credentials: 'same-origin' })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (!data || !data.ok || !Array.isArray(data.rows)) return;
+        var byId = {};
+        data.rows.forEach(function (r) { byId[r.mint] = r; });
+        var changed = false;
+        var domRows = trenchesList.querySelectorAll('[data-trenches-mint]');
+        for (var i = 0; i < domRows.length; i++) {
+          if (!byId[domRows[i].getAttribute('data-trenches-mint')]) {
+            domRows[i].remove();
+            changed = true;
+          }
+        }
+        data.rows.forEach(function (r) {
+          var el = trenchesList.querySelector(
+            '[data-trenches-mint="' + r.mint + '"]');
+          if (el) {
+            var priceEl = el.querySelector('[data-live-price]');
+            if (priceEl && typeof r.price_display === 'string') {
+              priceEl.textContent = r.price_display;
+            }
+            var pctEl = el.querySelector('[data-sparkline-pct-1h]');
+            if (pctEl && typeof r.change_1h === 'number') {
+              pctEl.textContent = fmtPct(r.change_1h, 1) + ' 1h';
+              pctEl.classList.remove('up', 'down', 'muted');
+              pctEl.classList.add(r.change_1h >= 0 ? 'up' : 'down');
+            } else if (pctEl && r.change_1h === null) {
+              pctEl.textContent = '—';
+              pctEl.classList.remove('up', 'down');
+              pctEl.classList.add('muted');
+            }
+            var sparkEl = el.querySelector('[data-sparkline-coin]');
+            if (sparkEl && typeof r.sparkline_svg === 'string'
+                && r.sparkline_svg) {
+              sparkEl.innerHTML = r.sparkline_svg;
+            }
+            return;
+          }
+          if (typeof r.html === 'string' && r.html) {
+            trenchesList.insertAdjacentHTML('beforeend', r.html);
+            changed = true;
+          }
+        });
+        var emptyEl = trenchesList.querySelector('[data-trenches-empty]');
+        if (emptyEl) emptyEl.hidden = data.rows.length > 0;
+        if (changed) {
+          refreshLiveCollections();
+          startSparkPoll();
+        }
+      })
+      .catch(function () { /* next poll retries; last rows stand */ });
+  }
+  function startTrenchesPoll() {
+    if (trenchesTimer) return;
+    fetchTrenches();
+    trenchesTimer = setInterval(fetchTrenches, TRENCHES_POLL_MS);
+  }
+  function stopTrenchesPoll() {
+    if (trenchesTimer) { clearInterval(trenchesTimer); trenchesTimer = null; }
+  }
+  if (trenchesList) {
+    startTrenchesPoll();
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) stopTrenchesPoll();
+      else startTrenchesPoll();
+    });
+    window.addEventListener('pagehide', stopTrenchesPoll);
+  }
+
+  /* Coins-page holdings list auto-refresh: every 5 seconds the
+     page re-fetches /api/coins-rows and updates the rows in place
+     (unit price, 1h %, P&L) when the coin set is unchanged. A coin
+     that left the server's rows (its balance hit 0) is removed
+     from the DOM, and a new coin's row is inserted — so the list
+     never sits frozen, without a manual reload. Same pattern as
+     the home holdings poll; the coins page renders the same rows
+     in its own markup, so it gets its own endpoint. Any insert /
+     removal re-collects live.js's node lists and re-subscribes
+     the socket, so the new rows tick live too. The poll runs
+     while the page is visible and stops when hidden, like the
+     other list polls. */
+  var coinsList = document.querySelector('[data-coins-list]');
+  var COINS_POLL_MS = 5000;
+  var coinsTimer = null;
+  function fetchCoinsRows() {
+    if (!coinsList) return;
+    fetch('/api/coins-rows', { credentials: 'same-origin' })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (!data || !data.ok || !Array.isArray(data.rows)) return;
+        var byId = {};
+        data.rows.forEach(function (r) { byId[r.coin_id] = r; });
+        var changed = false;
+        var domRows = coinsList.querySelectorAll('[data-coin-id]');
+        for (var i = 0; i < domRows.length; i++) {
+          if (!byId[domRows[i].getAttribute('data-coin-id')]) {
+            domRows[i].remove();
+            changed = true;
+          }
+        }
+        data.rows.forEach(function (r) {
+          var el = coinsList.querySelector(
+            '[data-coin-id="' + r.coin_id + '"]');
+          if (el) {
+            var priceEl = el.querySelector('[data-live-price]');
+            if (priceEl && typeof r.price_display === 'string') {
+              priceEl.textContent = r.price_display;
+            }
+            var pctEl = el.querySelector('[data-live-change-1h]');
+            if (pctEl && typeof r.change_1h === 'number') {
+              pctEl.textContent = fmtPct(r.change_1h, 1) + ' 1h';
+              pctEl.classList.remove('up', 'down', 'muted');
+              pctEl.classList.add(r.change_1h >= 0 ? 'up' : 'down');
+            } else if (pctEl && r.change_1h === null) {
+              pctEl.textContent = '—';
+              pctEl.classList.remove('up', 'down');
+              pctEl.classList.add('muted');
+            }
+            var pnlEl = el.querySelector('[data-live-pnl]');
+            if (pnlEl && typeof r.pnl_display === 'string') {
+              pnlEl.textContent = r.pnl_display;
+            } else if (pnlEl && r.pnl === null) {
+              pnlEl.textContent = '—';
+              pnlEl.classList.add('muted');
+            }
+            return;
+          }
+          if (typeof r.html === 'string' && r.html) {
+            coinsList.insertAdjacentHTML('beforeend', r.html);
+            changed = true;
+          }
+        });
+        /* The empty message is rendered by the server only when
+           the list starts empty (the page must not tell a holder
+           they hold nothing, even hidden) — so the poll creates
+           it when the list empties and removes it when a row
+           arrives, using the server's mode label for the text. */
+        var emptyEl = coinsList.querySelector('[data-coins-empty]');
+        if (data.rows.length === 0) {
+          if (!emptyEl) {
+            emptyEl = document.createElement('p');
+            emptyEl.className = 'muted';
+            emptyEl.setAttribute('data-coins-empty', '');
+            emptyEl.textContent = 'You hold no coins in '
+              + (data.mode_label || '') + ' yet — buy one below.';
+            coinsList.appendChild(emptyEl);
+          } else {
+            emptyEl.hidden = false;
+          }
+        } else if (emptyEl) {
+          emptyEl.remove();
+        }
+        if (changed) {
+          refreshLiveCollections();
+        }
+      })
+      .catch(function () { /* next poll retries; last rows stand */ });
+  }
+  function startCoinsPoll() {
+    if (coinsTimer) return;
+    fetchCoinsRows();
+    coinsTimer = setInterval(fetchCoinsRows, COINS_POLL_MS);
+  }
+  function stopCoinsPoll() {
+    if (coinsTimer) { clearInterval(coinsTimer); coinsTimer = null; }
+  }
+  if (coinsList) {
+    startCoinsPoll();
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) stopCoinsPoll();
+      else startCoinsPoll();
+    });
+    window.addEventListener('pagehide', stopCoinsPoll);
+  }
+
   var chart = document.getElementById('live-chart');
   var statusEl = document.getElementById('live-status');
 
@@ -267,7 +485,7 @@
   /* A holding's SOL value ticks live too: amount × coin price ÷
      the SOL price. The SOL price comes from the feed's SOL tick
      (subscribed whenever a value-sol node exists); until the
-     first SOL tick arrives the 60s holdings refresh keeps the
+     first SOL tick arrives the 5s holdings refresh keeps the
      values right. A SOL tick recomputes every row; a coin tick
      recomputes only that coin's rows. */
   function recomputeSolValues(changedId, tick) {
@@ -443,6 +661,14 @@
     setStatus('live', asOf);
   }
 
+  /* Snapshot grace: a fresh trenches mint has no feed tick yet
+     (the stream watches held + watched mints only), so a snapshot
+     that does not carry it must not blank the server-rendered
+     price in the first 30s after page load — the app's own
+     staleness bound. After 30s a missing coin is genuinely stale
+     and reads "no data" as before. */
+  var pageLoadedAt = Date.now();
+
   function fetchSnapshot() {
     fetch('/api/live?coins=' + encodeURIComponent(coinList.join(',')),
       { credentials: 'same-origin' })
@@ -454,9 +680,13 @@
         });
         /* A subscribed coin the snapshot does not carry has no live
            price right now: its nodes read "no data", never the
-           last number. */
+           last number — but not in the first 30s after page load
+           (see pageLoadedAt above): a fresh coin's tick has not
+           arrived yet and the server price still stands. */
         coinList.forEach(function (id) {
-          if (!data.ticks[id]) renderNoData(id);
+          if (!data.ticks[id] && Date.now() - pageLoadedAt > 30000) {
+            renderNoData(id);
+          }
         });
       })
       .catch(function () { /* next poll retries; nodes already
@@ -510,8 +740,12 @@
         Object.keys(data.ticks).forEach(function (k) {
           applyTick(data.ticks[k]);
         });
+        /* Same 30s grace as the REST snapshot (pageLoadedAt):
+           a fresh coin's tick has not arrived yet. */
         coinList.forEach(function (id) {
-          if (!data.ticks[id]) renderNoData(id);
+          if (!data.ticks[id] && Date.now() - pageLoadedAt > 30000) {
+            renderNoData(id);
+          }
         });
       } else if (data.type === 'tick') {
         applyTick(data);

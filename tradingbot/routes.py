@@ -63,8 +63,14 @@ from .paper import (PAPER_BUY_HAIRCUT_PCT, InsufficientCash,
                     paper_sell as ledger_sell)
 from .prices import clear_price_cache
 from .builderbot import list_adjustments
-from .home_holdings import (enrich_row, fetch_chain_token_balances,
-                            reconcile_holdings, sparkline_svg_1h)
+from .home_holdings import (change_pct_from_points, enrich_row,
+                            fetch_chain_token_balances, fmt_price_sig,
+                            reconcile_holdings, sparkline_1h_change_pct,
+                            sparkline_points_1h, sparkline_svg)
+# NOTE: sparkline_svg_1h is NOT imported here any more — after E7
+# the /api/sparklines endpoint computes points once and derives
+# both the SVG and the % from them, so routes.py no longer calls
+# the wrapper (it still lives in home_holdings.py, used there).
 from .ledger import (bot_wl_summary, kind_wl_summary, recent_trades,
                      version_wl_summary)
 from .pit import (current_pit_version, ensure_pit_version_1_0,
@@ -1066,24 +1072,35 @@ def _clear_login_fails(app, username: str):
 # is DISCOVERY only: its DexScreener prices never reach the page —
 # _reprice_trenches_rows rewrites every row onto the single source
 # (feed tick, else one batched Helius chain read) before it is
-# returned, and a row neither can price is dropped.
+# returned, and gives each row its own 1h % and 1h sparkline from
+# the same points. A row neither price source can price is dropped
+# on the page render (drop_unpriced=True) and kept reading
+# "no data" on a live list refresh (drop_unpriced=False).
 # ----------------------------------------------------------------------
 _TRENCHES_CACHE: dict = {"at": 0.0, "rows": None, "error": None}
 
 
-def _reprice_trenches_rows(app, rows: list) -> list:
-    """Rewrite trenches rows onto the single price source: each
-    row's price_usd becomes the feed's fresh tick, else one batched
-    Helius chain read for the rows the feed cannot price; the 1h
-    change becomes the feed's own tick history (None when the
-    history does not reach back an hour — "—" on the page). A row
-    neither source can price is dropped — unpriced means no trade,
-    never a guess. Returns new dicts; the cached scan rows are
-    never mutated."""
+def _reprice_trenches_rows(app, rows: list,
+                           drop_unpriced: bool = True) -> list:
+    """Rewrite trenches rows onto the single price source, per
+    mint (never a shared value): each row's price_usd becomes the
+    feed's fresh tick, else one batched Helius chain read for the
+    rows the feed cannot price (the no-break-rule-4 backup path,
+    so a Helius stall cannot blank the page). Each row also
+    carries its own 1h % AND its own 1h sparkline, both from the
+    SAME points (GeckoTerminal OHLCV first, then the feed's
+    last-hour ticks) — so the % and the chart can never disagree,
+    and a fresh coin with no history shows "—" / no chart rather
+    than a made-up number (the old change_over path could never
+    move for a fresh coin: it needs an hour of stream history).
+    A row neither source can price is dropped on the PAGE render
+    (unpriced means no trade, never a guess), while a LIVE LIST
+    refresh keeps it reading "no data" so a stall cannot yank
+    rows off the page. Returns new dicts; the cached scan rows
+    are never mutated."""
     if not rows:
         return []
     feed = app.config.get("LIVE_FEED") if app is not None else None
-    now = time.time()
     priced: dict = {}
     uncovered = []
     for row in rows:
@@ -1103,33 +1120,44 @@ def _reprice_trenches_rows(app, rows: list) -> list:
     for row in rows:
         price = priced.get(row["mint"])
         if price is None or price <= 0:
-            continue
-        change_1h = None
-        if feed is not None:
-            try:
-                change_1h = feed.change_over(row["mint"], 3600, now)
-            except Exception:
-                change_1h = None
-        out.append({**row, "price_usd": float(price),
-                    "change_1h_pct": change_1h})
+            if drop_unpriced:
+                continue
+            price = None
+        # The 1h % and the 1h chart come from the SAME points.
+        try:
+            points = sparkline_points_1h(row["mint"], is_mint=True,
+                                         feed=feed)
+        except Exception:
+            points = []
+        out.append({**row,
+                    "price_usd": (float(price) if price is not None
+                                  else None),
+                    "price_display": fmt_price_sig(price),
+                    "change_1h_pct": change_pct_from_points(points),
+                    "sparkline_svg": sparkline_svg(points)})
     return out
 
 
-def _trenches_list(app=None) -> tuple[list, str | None]:
+def _trenches_list(app=None, drop_unpriced: bool = True) -> tuple[list, str | None]:
     """Top trenches rows: [{mint, symbol, name, price_usd,
-    change_1h_pct}], best 1-hour gain first, at most 10. Returns
-    (rows, error). The scan's order is its own 1-hour-gain ranking
-    (discovery order); the prices and 1h changes on the rows are
-    the single source (see _reprice_trenches_rows). Without `app`
-    the raw scan rows are returned (name/symbol lookup only —
-    _trenches_entry never shows a price)."""
+    change_1h_pct, price_display, sparkline_svg}], best 1-hour gain
+    first, at most 10. Returns (rows, error). The scan's order is
+    its own 1-hour-gain ranking (discovery order); the prices, 1h
+    changes and sparklines on the rows are the single source (see
+    _reprice_trenches_rows). Without `app` the raw scan rows are
+    returned (name/symbol lookup only — _trenches_entry never shows
+    a price). drop_unpriced=False keeps a row neither source can
+    price (reading "no data") — the live list refresh uses that,
+    so a stall cannot yank rows off the page; the page render
+    drops unpriced rows."""
     now = time.time()
     if (_TRENCHES_CACHE["rows"] is not None
             and now - _TRENCHES_CACHE["at"] < 120):
         cached = _TRENCHES_CACHE["rows"]
         if app is None:
             return cached, _TRENCHES_CACHE["error"]
-        return (_reprice_trenches_rows(app, cached),
+        return (_reprice_trenches_rows(app, cached,
+                                       drop_unpriced=drop_unpriced),
                 _TRENCHES_CACHE["error"])
     try:
         scan = fetch_trenches_scan()
@@ -1154,7 +1182,8 @@ def _trenches_list(app=None) -> tuple[list, str | None]:
     _TRENCHES_CACHE["error"] = error
     if app is None:
         return rows, error
-    return _reprice_trenches_rows(app, rows), error
+    return _reprice_trenches_rows(app, rows,
+                                 drop_unpriced=drop_unpriced), error
 
 
 def _trenches_entry(mint: str) -> dict | None:
@@ -2655,6 +2684,21 @@ def register_routes(app: Flask) -> None:
         popup_held_sol, popup_sell_prefill = (
             _sell_prefill_for_row(popup_coin, sol_price)
             if popup_coin is not None else (None, None))
+        # D2: the popup's 24h % from the coin's 24h chart points —
+        # the same derivation as the coin detail page, so the % and
+        # the chart can never disagree. The row's change_24h is
+        # hardcoded None in _coin_rows (the feed never carries a
+        # 24h % and _feed_price_list never has one), so the popup
+        # showed "—" always. One feed-history read, only when a
+        # popup is actually open — never on a plain dashboard
+        # render. None while the series has fewer than 2 points.
+        if popup_coin is not None:
+            _popup_chart = fetch_market_chart(
+                popup_coin["coin_id"], 1,
+                feed=app.config.get("LIVE_FEED"))
+            popup_coin["change_24h"] = change_pct_from_points(
+                [p["price"] for p in _popup_chart.get("points") or []
+                 if p.get("price") is not None])
         # Each row's position value in SOL (the home page shows
         # the SOL value to 5 decimals, never the unit price): the
         # row's USD value — live price, or cost when there is no
@@ -3093,10 +3137,24 @@ def register_routes(app: Flask) -> None:
         # the range chart is the 24h series — no second fetch.
         if range_key in ("24h", "1d"):
             high_24h, low_24h = high_low_24h(chart["points"])
+            points_24h = chart["points"]
         else:
             chart_24h = fetch_market_chart(coin_id_resolved, 1,
                                            feed=feed)
             high_24h, low_24h = high_low_24h(chart_24h["points"])
+            points_24h = chart_24h["points"]
+        # D2: the 24h % from the SAME 24h series the high/low come
+        # from, so the % and the chart can never disagree. The row's
+        # change_24h was hardcoded None in _coin_rows (the feed
+        # never carries a 24h % and _feed_price_list never has one),
+        # so the detail page showed "—" always. None while the
+        # series has fewer than 2 points — the template keeps "—".
+        # The % covers the window the feed actually holds (a few
+        # hours when the feed restarted), the same window the 24h
+        # high/low already use.
+        change_24h = change_pct_from_points(
+            [p["price"] for p in points_24h
+             if p.get("price") is not None])
         flow = fetch_trade_flow(coin_id_resolved)
         bots = db.execute(
             "SELECT * FROM bots WHERE user_id = ? AND mode = ? "
@@ -3120,6 +3178,7 @@ def register_routes(app: Flask) -> None:
             chart_candles_count=len(candles),
             high_24h=high_24h,
             low_24h=low_24h, flow=flow, bots=bots, mode=mode,
+            change_24h=change_24h,
             mode_label=_mode_label(mode, _cfg(app)),
             receive_address=wallet["pubkey"] if wallet else "",
             prices_source=prices["source"],
@@ -3218,30 +3277,67 @@ def register_routes(app: Flask) -> None:
     @app.route("/api/sparklines")
     @login_required
     def sparklines_snapshot():
-        """Fresh sparklines for the home page's holdings rows.
-        The home page polls this every 60 seconds so each coin's
-        chart keeps moving with the live market instead of sitting
-        static from page load. Each chart is real market data
-        (GeckoTerminal OHLCV first, then the feed's recorded
-        ticks). Returns {ok: True, sparklines: {coin_id:
-        svg-or-null}}. A coin with fewer than 2 real recent
-        points returns null — the page leaves its sparkline alone
-        (chart building), never faked."""
+        """Fresh sparklines for the home page's holdings rows and
+        the trenches badges. The page polls this every 5 seconds
+        (live.js) so each coin's chart keeps moving with the live
+        market instead of sitting static from page load. Each
+        chart is real market data (GeckoTerminal OHLCV first,
+        then the feed's recorded ticks). Returns {ok: True,
+        sparklines: {coin_id: svg-or-null}, pct_1h: {coin_id:
+        number-or-null}}. The % comes from the SAME points the
+        chart draws, so the two can never disagree. A coin with
+        fewer than 2 real recent points returns null — the page
+        leaves its sparkline alone (chart building), never
+        faked."""
         coins = [c.strip()
                  for c in (request.args.get("coins") or "").split(",")
                  if c.strip()]
         feed = app.config["LIVE_FEED"]
         out = {}
+        pct = {}
         for coin_id in coins:
             is_mint = is_valid_address(coin_id)
-            svg = sparkline_svg_1h(coin_id, is_mint=is_mint, feed=feed)
-            out[coin_id] = svg or None
-        return jsonify({"ok": True, "sparklines": out, "as_of": _now()})
+            points = sparkline_points_1h(coin_id, is_mint=is_mint,
+                                        feed=feed)
+            out[coin_id] = sparkline_svg(points) or None
+            pct[coin_id] = change_pct_from_points(points)
+        return jsonify({"ok": True, "sparklines": out, "pct_1h": pct,
+                        "as_of": _now()})
+
+    @app.route("/api/trenches")
+    @login_required
+    def trenches_snapshot():
+        """Fresh trenches rows for Page 10's 5-second list poll
+        (live.js): the same rows the page renders, with each row's
+        HTML plus its live bits (price display, 1h %, sparkline
+        SVG). The page updates rows in place when the coin set is
+        unchanged, and inserts / removes rows when it changes —
+        so a coin leaves the list the moment it drops out of the
+        top 10, without a manual reload. A row neither price
+        source can price is KEPT here (reading "no data") — the
+        page render drops it, but the live refresh must not yank
+        rows off the page during a stall. Returns {ok: True,
+        rows: [{mint, html, price_usd, price_display, change_1h,
+        sparkline_svg}], error}."""
+        rows, error = _trenches_list(app, drop_unpriced=False)
+        out = []
+        for row in rows:
+            html = render_template("_trenches_row.html", t=row)
+            out.append({
+                "mint": row["mint"],
+                "html": html,
+                "price_usd": row.get("price_usd"),
+                "price_display": row.get("price_display"),
+                "change_1h": row.get("change_1h_pct"),
+                "sparkline_svg": row.get("sparkline_svg"),
+            })
+        return jsonify({"ok": True, "rows": out, "error": error,
+                        "as_of": _now()})
 
     @app.route("/api/home-holdings")
     @login_required
     def home_holdings_snapshot():
-        """Fresh home holdings rows for the home page's 60-second
+        """Fresh home holdings rows for the home page's 5-second
         auto-refresh: the same rows _dashboard_data renders, with
         each row's HTML plus its live bits (SOL value text, 1h %,
         sparkline SVG). The page updates rows in place when the
@@ -3276,6 +3372,55 @@ def register_routes(app: Flask) -> None:
         return jsonify({"ok": True,
                         "balances_stale": data["balances_stale"],
                         "rows": rows, "as_of": _now()})
+
+    @app.route("/api/coins-rows")
+    @login_required
+    def coins_rows():
+        """Fresh coins-page holdings rows for the 5-second list poll
+        (live.js): the same rows the coins page renders, with each
+        row's HTML plus its live bits (price display, 1h %, P&L).
+        The page updates rows in place when the coin set is
+        unchanged, and inserts / removes rows when it changes — so
+        a coin leaves the list the moment its balance hits 0, and
+        the 1h % moves, without a manual reload. Mirrors
+        /api/home-holdings, which covers the home page's rows; the
+        coins page renders the same rows in its own markup (unit
+        price + 1h % + P&L, no sparkline, no SOL value), so it gets
+        its own endpoint. Returns {ok: True, balances_stale,
+        rows: [{coin_id, html, price_display, change_1h,
+        pnl_display, pnl}], mode_label, as_of} — mode_label lets
+        the poll build the empty-list message ("You hold no coins
+        in …") with the server's own wording when the list
+        empties; the page itself renders that message only when
+        the list starts empty, never beside real rows."""
+        user = _current_user(app)
+        data = _dashboard_data(app, user, include_trenches=False,
+                               chart_range="1d")
+        rows = []
+        for row in data["coin_rows"]:
+            pnl = row.get("pnl")
+            # P&L text matches the row template exactly
+            # ("+$12.34" / "$-1.23"): the poll must not flip the
+            # format the server rendered.
+            if pnl is None:
+                pnl_display = None
+            elif pnl >= 0:
+                pnl_display = "+$" + f"{pnl:.2f}"
+            else:
+                pnl_display = "$" + f"{pnl:.2f}"
+            rows.append({
+                "coin_id": row["coin_id"],
+                "html": render_template("_coins_row.html", row=row),
+                "price_display": fmt_price_sig(row.get("price")),
+                "change_1h": row.get("change_1h"),
+                "pnl_display": pnl_display,
+                "pnl": pnl,
+            })
+        return jsonify({"ok": True,
+                        "balances_stale": data["balances_stale"],
+                        "rows": rows,
+                        "mode_label": data["mode_label"],
+                        "as_of": _now()})
 
     sock = app.config["SOCK"]
 
@@ -4211,9 +4356,11 @@ def register_routes(app: Flask) -> None:
     def trenches():
         """The trenches page (black + gold theme): the top 10 fresh
         pump.fun / PumpSwap tokens by 1-hour gain, price + 1h gain
-        per row — tapping a token opens the same Buy / Sell / Sell
-        all popup as any other coin. A feed failure says the
-        trenches are unavailable, never fake rows."""
+        + 1h chart per row — tapping a token opens the same Buy /
+        Sell / Sell all popup as any other coin. The list live-
+        refreshes every 5 seconds (GET /api/trenches) so it never
+        sits frozen. A feed failure says the trenches are
+        unavailable, never fake rows."""
         user = _current_user(app)
         db = _db(app)
         mode = _active_mode(db, user["id"])

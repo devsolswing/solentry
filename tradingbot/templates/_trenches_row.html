@@ -1,0 +1,26 @@
+{# One trenches badge button (shared by trenches.html and the
+   /api/trenches refresh, so the server and the poll render the
+   same markup). Two lines inside the button, nothing truncated:
+   icon + full name + ticker + unit price on top (the price in
+   significant figures, never $0.0000); the coin's true 1h market
+   chart (GeckoTerminal OHLCV, then feed ticks — never faked)
+   + the 1h % underneath. The % comes from the SAME points the
+   chart draws, so the two can never disagree. data-live-price
+   keeps the price ticking live; data-sparkline-coin refreshes
+   the chart every 5s; data-sparkline-pct-1h refreshes the %
+   on the same poll (Helius ticks carry no 1h %, so the tick
+   path alone can never move it). data-trenches-mint lets the
+   5s list refresh match this row to the server's rows. #}
+<a class="coin-row trenches-row" href="{{ url_for('coin_popup', coin_id=t.mint) }}" data-trenches-mint="{{ t.mint }}">
+  <span class="coin-ico" aria-hidden="true">{{ t.symbol[:1] }}</span>
+  <span class="trenches-main">
+    <span class="trenches-top">
+      <span class="coin-name"><strong>{{ t.name }}</strong><span class="muted small"> {{ t.symbol }}</span></span>
+      <span class="coin-price" data-live-price="{{ t.mint }}">{{ t.price_display }}</span>
+    </span>
+    <span class="trenches-bottom">
+      <span class="holdings-spark" data-sparkline-coin="{{ t.mint }}" aria-hidden="true">{% if t.sparkline_svg %}{{ t.sparkline_svg|safe }}{% endif %}</span>
+      <span data-live-change-1h="{{ t.mint }}" data-sparkline-pct-1h="{{ t.mint }}" class="coin-change">{% if t.change_1h_pct is not none %}<span class="{{ 'up' if t.change_1h_pct >= 0 else 'down' }}">{% if t.change_1h_pct >= 0 %}+{% endif %}{{ "%.1f"|format(t.change_1h_pct) }}% 1h</span>{% else %}<span class="muted">—</span>{% endif %}</span>
+    </span>
+  </span>
+</a>
