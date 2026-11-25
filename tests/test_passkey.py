@@ -9,6 +9,7 @@ update, the session login, and the failure paths. Password login is
 also covered here to prove it still works alongside passkeys.
 """
 
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -89,6 +90,29 @@ class PasskeyTestCase(unittest.TestCase):
         return self.client.post(
             "/login/passkey/begin", json={
                 "csrf_token": token, "username": username})
+
+    def begin_discoverable(self):
+        token = self.json_csrf("/login")
+        return self.client.post(
+            "/login/passkey/discoverable/begin", json={
+                "csrf_token": token})
+
+    def finish_discoverable(self, credential_id=FAKE_CREDENTIAL_ID,
+                            user_handle=None):
+        token = self.json_csrf("/login")
+        response = {"clientDataJSON": "AAAA",
+                    "authenticatorData": "AAAA",
+                    "signature": "AAAA"}
+        if user_handle is not None:
+            response["userHandle"] = bytes_to_base64url(user_handle)
+        return self.client.post(
+            "/login/passkey/discoverable/finish", json={
+                "csrf_token": token,
+                "credential": {
+                    "id": bytes_to_base64url(credential_id),
+                    "rawId": bytes_to_base64url(credential_id),
+                    "type": "public-key",
+                    "response": response}})
 
     def finish_login(self, username="alice"):
         token = self.json_csrf("/login")
@@ -366,3 +390,181 @@ class TestPasskeyLogin(PasskeyTestCase):
         resp = login(self.client, "alice", "password123")
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/wallet", resp.headers["Location"])
+
+
+class TestPasskeyDiscoverableLogin(PasskeyTestCase):
+    """One-tap passkey sign-in: no username typed first. The
+    authenticator offers the device's discoverable credential and
+    the server resolves the user from the credential ID alone."""
+
+    def test_begin_needs_no_username(self):
+        resp = self.begin_discoverable()
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("challenge", data)
+        self.assertEqual(data["allowCredentials"], [])
+
+    def test_full_discoverable_login_flow(self):
+        self.register_passkey()
+        self.client.get("/logout", follow_redirects=False)
+        resp = self.begin_discoverable()
+        self.assertEqual(resp.status_code, 200)
+        with mock.patch("tradingbot.routes.verify_authentication_response",
+                        _fake_authentication):
+            resp = self.finish_discoverable()
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["ok"])
+        # Signed in: dashboard loads, and the sign count advanced.
+        page = self.client.get("/dashboard")
+        self.assertEqual(page.status_code, 200)
+        row = self.db().execute(
+            "SELECT sign_count FROM passkey_credentials").fetchone()
+        self.assertEqual(row["sign_count"], 1)
+
+    def test_discoverable_login_resolves_user_by_credential(self):
+        # The credential — not the client-supplied userHandle —
+        # decides who signs in. A userHandle pointing at another
+        # account must not hijack the login.
+        self.register_passkey("alice")
+        signup(self.client, "bob")
+        bob_id = self.user_id("bob")
+        self.client.get("/logout", follow_redirects=False)
+        self.begin_discoverable()
+        with mock.patch("tradingbot.routes.verify_authentication_response",
+                        _fake_authentication):
+            resp = self.finish_discoverable(
+                user_handle=str(bob_id).encode("utf-8"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["ok"])
+        with self.client.session_transaction() as sess:
+            self.assertEqual(sess["user_id"], self.user_id("alice"))
+
+    def test_discoverable_login_without_user_handle(self):
+        # A discoverable credential need not carry a userHandle at
+        # all — resolution is by credential ID alone.
+        self.register_passkey()
+        self.client.get("/logout", follow_redirects=False)
+        self.begin_discoverable()
+        with mock.patch("tradingbot.routes.verify_authentication_response",
+                        _fake_authentication):
+            resp = self.finish_discoverable()
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["ok"])
+
+    def test_finish_unknown_credential_fails(self):
+        self.register_passkey()
+        self.client.get("/logout", follow_redirects=False)
+        self.begin_discoverable()
+        resp = self.finish_discoverable(
+            credential_id=b"some-other-credential")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["error"],
+                         "Passkey verification failed.")
+        # Still signed out.
+        page = self.client.get("/dashboard", follow_redirects=False)
+        self.assertEqual(page.status_code, 302)
+
+    def test_finish_without_begin_fails(self):
+        self.register_passkey()
+        self.client.get("/logout", follow_redirects=False)
+        with mock.patch("tradingbot.routes.verify_authentication_response",
+                        _fake_authentication):
+            resp = self.finish_discoverable()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Challenge expired", resp.get_json()["error"])
+
+    def test_verify_failure_is_generic(self):
+        self.register_passkey()
+        self.client.get("/logout", follow_redirects=False)
+        self.begin_discoverable()
+        with mock.patch(
+                "tradingbot.routes.verify_authentication_response",
+                side_effect=Exception("bad signature")):
+            resp = self.finish_discoverable()
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["error"],
+                         "Passkey verification failed.")
+
+    def test_discoverable_challenge_cannot_finish_username_flow(self):
+        # Purpose scoping: a discoverable challenge is useless to
+        # the username-first finish.
+        self.register_passkey()
+        self.client.get("/logout", follow_redirects=False)
+        self.begin_discoverable()
+        with mock.patch("tradingbot.routes.verify_authentication_response",
+                        _fake_authentication):
+            resp = self.finish_login()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Challenge expired", resp.get_json()["error"])
+
+    def test_login_page_has_one_tap_button(self):
+        html = self.client.get("/login").get_data(as_text=True)
+        self.assertIn('id="passkey-discoverable-btn"', html)
+        self.assertIn("passkey-login-btn", html)
+        self.assertIn("passkey.js", html)
+
+    def test_discoverable_challenge_is_single_use(self):
+        from tradingbot import passkey as passkey_mod
+        signup(self.client, "alice")
+        db = self.db()
+        passkey_mod.issue_challenge(db, None, "login-discoverable")
+        self.assertIsNotNone(passkey_mod.take_challenge(
+            db, None, "login-discoverable"))
+        self.assertIsNone(passkey_mod.take_challenge(
+            db, None, "login-discoverable"))
+
+    def test_discoverable_challenge_scoped_by_purpose(self):
+        from tradingbot import passkey as passkey_mod
+        signup(self.client, "alice")
+        db = self.db()
+        passkey_mod.issue_challenge(db, None, "login-discoverable")
+        self.assertIsNone(passkey_mod.take_challenge(db, None, "login"))
+        self.assertIsNotNone(passkey_mod.take_challenge(
+            db, None, "login-discoverable"))
+
+    def test_migration_relaxes_challenge_user_id(self):
+        # A database built with the old NOT NULL shape upgrades in
+        # place: old challenge rows keep their user, and a NULL-user
+        # challenge can then be issued. No credential rows move.
+        import sqlite3
+        from tradingbot import db as db_mod
+        from tradingbot import passkey as passkey_mod
+        path = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "username TEXT NOT NULL UNIQUE)")
+        conn.execute("INSERT INTO users (username) VALUES ('alice')")
+        conn.execute(
+            "CREATE TABLE webauthn_challenges ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "purpose TEXT NOT NULL, "
+            "challenge TEXT NOT NULL UNIQUE, "
+            "expires_at TEXT NOT NULL, "
+            "used INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+            "FOREIGN KEY (user_id) REFERENCES users (id))")
+        conn.execute(
+            "INSERT INTO webauthn_challenges "
+            "(user_id, purpose, challenge, expires_at) "
+            "VALUES (1, 'login', 'old-challenge', '2999-01-01T00:00:00Z')")
+        conn.commit()
+        db_mod._migrate_webauthn_challenges_user_nullable(conn)
+        info = conn.execute(
+            "PRAGMA table_info(webauthn_challenges)").fetchall()
+        user_col = [r for r in info if r["name"] == "user_id"][0]
+        self.assertEqual(user_col["notnull"], 0)
+        row = conn.execute(
+            "SELECT user_id, challenge FROM webauthn_challenges"
+            ).fetchone()
+        self.assertEqual(row["user_id"], 1)
+        self.assertEqual(row["challenge"], "old-challenge")
+        # Idempotent: running it again changes nothing.
+        db_mod._migrate_webauthn_challenges_user_nullable(conn)
+        # A usernameless challenge can now be issued and taken.
+        passkey_mod.issue_challenge(conn, None, "login-discoverable")
+        self.assertIsNotNone(passkey_mod.take_challenge(
+            conn, None, "login-discoverable"))
+        conn.close()

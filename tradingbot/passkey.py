@@ -37,8 +37,12 @@ def _parse(text: str | None) -> datetime | None:
         return None
 
 
-def issue_challenge(db, user_id: int, purpose: str) -> str:
-    """Create a fresh challenge for a ceremony. Returns base64url text."""
+def issue_challenge(db, user_id: int | None, purpose: str) -> str:
+    """Create a fresh challenge for a ceremony. Returns base64url text.
+
+    user_id is None for a usernameless (discoverable-credential)
+    login challenge: no user is known until the authenticator
+    answers, so the row carries no user."""
     now = _now_dt()
     challenge = bytes_to_base64url(generate_challenge())
     db.execute(
@@ -51,19 +55,28 @@ def issue_challenge(db, user_id: int, purpose: str) -> str:
     return challenge
 
 
-def take_challenge(db, user_id: int, purpose: str) -> bytes | None:
+def take_challenge(db, user_id: int | None, purpose: str) -> bytes | None:
     """Take the newest live challenge for a ceremony (single-use).
 
     Returns the challenge bytes, or None when there is no live one.
     The row is marked used whether verification later succeeds or
-    not — a challenge is never presented twice.
+    not — a challenge is never presented twice. user_id is None
+    for a usernameless challenge (matched with IS NULL, since
+    NULL never equals anything in SQL).
     """
     now = _now_dt()
-    row = db.execute(
-        "SELECT id, challenge, expires_at FROM webauthn_challenges "
-        "WHERE user_id = ? AND purpose = ? AND used = 0 "
-        "ORDER BY id DESC LIMIT 1",
-        (user_id, purpose)).fetchone()
+    if user_id is None:
+        row = db.execute(
+            "SELECT id, challenge, expires_at FROM webauthn_challenges "
+            "WHERE user_id IS NULL AND purpose = ? AND used = 0 "
+            "ORDER BY id DESC LIMIT 1",
+            (purpose,)).fetchone()
+    else:
+        row = db.execute(
+            "SELECT id, challenge, expires_at FROM webauthn_challenges "
+            "WHERE user_id = ? AND purpose = ? AND used = 0 "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id, purpose)).fetchone()
     if not row:
         return None
     expires_at = _parse(row["expires_at"])

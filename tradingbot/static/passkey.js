@@ -185,8 +185,43 @@
     });
   }
 
+  function initDiscoverableLogin() {
+    var btn = document.getElementById("passkey-discoverable-btn");
+    if (!btn) return;
+    if (!window.PublicKeyCredential) { noSupport(btn); return; }
+    btn.addEventListener("click", function () {
+      // One tap, no username: the server issues a challenge with
+      // an empty allowCredentials list and the authenticator
+      // offers the device's passkey for this site.
+      setStatus("Waiting for your device — approve the passkey prompt…");
+      postJson("/login/passkey/discoverable/begin",
+        { csrf_token: csrfToken() })
+        .then(function (options) {
+          return navigator.credentials.get({
+            publicKey: decodeOptions(options),
+          });
+        })
+        .then(function (credential) {
+          return finishCredential("/login/passkey/discoverable/finish",
+            encodeCredential(credential),
+            captureTransports(credential));
+        })
+        .then(function (data) {
+          if (data.ok) {
+            window.location.href = data.redirect || "/dashboard";
+          } else {
+            setStatus(data.error || "Sign-in failed.");
+          }
+        })
+        .catch(function (err) {
+          setStatus(err.message || "Sign-in failed.");
+        });
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     initRegister();
     initLogin();
+    initDiscoverableLogin();
   });
 })();

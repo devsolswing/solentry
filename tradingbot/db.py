@@ -198,7 +198,10 @@ CREATE TABLE IF NOT EXISTS passkey_credentials (
 -- moment it is presented — replaying it always fails.
 CREATE TABLE IF NOT EXISTS webauthn_challenges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    -- NULL for a usernameless (discoverable-credential) login
+    -- challenge: no user is known until the authenticator
+    -- answers. A NULL user never violates the FK below.
+    user_id INTEGER,
     purpose TEXT NOT NULL,
     challenge TEXT NOT NULL UNIQUE,
     expires_at TEXT NOT NULL,
@@ -1053,6 +1056,45 @@ def _migrate_gate_fuel_uses(conn: sqlite3.Connection) -> None:
         "ALTER TABLE gate_fuel_uses_new RENAME TO gate_fuel_uses")
 
 
+def _migrate_webauthn_challenges_user_nullable(
+        conn: sqlite3.Connection) -> None:
+    """Let webauthn_challenges.user_id be NULL (2026-11-25): a
+    one-tap passkey sign-in issues its challenge before any user
+    is known, so the challenge row carries no user. SQLite cannot
+    relax a NOT NULL column in place, so the table is rebuilt:
+    every existing row is copied across with its user_id intact
+    (username-first challenges keep working exactly as before).
+    Idempotent: a table whose user_id is already nullable is left
+    alone. Fresh databases get the nullable shape straight from
+    SCHEMA and never enter this branch. No credential rows are
+    touched — passkey_credentials is unchanged."""
+    info = conn.execute(
+        "PRAGMA table_info(webauthn_challenges)").fetchall()
+    if not info:
+        return
+    user_col = [r for r in info if r["name"] == "user_id"]
+    if not user_col or not user_col[0]["notnull"]:
+        return
+    conn.execute(
+        "CREATE TABLE webauthn_challenges_new ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "user_id INTEGER, "
+        "purpose TEXT NOT NULL, "
+        "challenge TEXT NOT NULL UNIQUE, "
+        "expires_at TEXT NOT NULL, "
+        "used INTEGER NOT NULL DEFAULT 0, "
+        "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+        "FOREIGN KEY (user_id) REFERENCES users (id))")
+    conn.execute(
+        "INSERT INTO webauthn_challenges_new "
+        "(id, user_id, purpose, challenge, expires_at, used, created_at) "
+        "SELECT id, user_id, purpose, challenge, expires_at, used, created_at "
+        "FROM webauthn_challenges")
+    conn.execute("DROP TABLE webauthn_challenges")
+    conn.execute(
+        "ALTER TABLE webauthn_challenges_new RENAME TO webauthn_challenges")
+
+
 def _seed_promo_codes(conn: sqlite3.Connection) -> None:
     """Seed the first one-time promo codes (James, 2026-11-24):
     BetaGate1994 grants 1000 trades, usable ONCE IN TOTAL
@@ -1086,6 +1128,7 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate(conn)
     _migrate_gate_fuel_uses(conn)
+    _migrate_webauthn_challenges_user_nullable(conn)
     _seed_promo_codes(conn)
     _backfill_pumpfun_wallets(conn)
     _backfill_signing_bots(conn)

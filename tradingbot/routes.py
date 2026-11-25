@@ -2278,6 +2278,96 @@ def register_routes(app: Flask) -> None:
         _clear_mode_chosen(_db(app), user_id)
         return jsonify({"ok": True, "redirect": url_for("wallet")})
 
+    @app.route("/login/passkey/discoverable/begin", methods=["POST"])
+    def passkey_discoverable_begin():
+        """Start a one-tap passkey sign-in: no username needed.
+        Returns publicKey request options with an EMPTY
+        allowCredentials list, so the authenticator offers any
+        discoverable credential registered for this site and the
+        user picks their account on the device. The challenge is
+        stored with no user (purpose "login-discoverable") — the
+        user is resolved only at finish, from the credential."""
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "json required"}), 400
+        _csrf_check()
+        cfg = _cfg(app)
+        challenge = passkey_mod.issue_challenge(
+            _db(app), None, "login-discoverable")
+        options = generate_authentication_options(
+            rp_id=cfg.webauthn_rp_id,
+            challenge=base64url_to_bytes(challenge),
+            allow_credentials=[])
+        return jsonify(options_to_json_dict(options))
+
+    @app.route("/login/passkey/discoverable/finish", methods=["POST"])
+    def passkey_discoverable_finish():
+        """Verify a completed one-tap passkey sign-in and log the
+        user in. The user is resolved ONLY from the credential ID
+        stored in passkey_credentials — the client-supplied
+        userHandle is never trusted, and no account is ever
+        created from a passkey login. Unknown credentials fail
+        plainly, exactly like the username-first flow."""
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "json required"}), 400
+        _csrf_check()
+        body = request.get_json()
+        credential = body.get("credential") or {}
+        try:
+            credential_id = credential.get("id") or ""
+        except AttributeError:
+            credential_id = ""
+        stored = _db(app).execute(
+            "SELECT user_id, public_key, sign_count "
+            "FROM passkey_credentials WHERE credential_id = ?",
+            (credential_id,)).fetchone()
+        if not stored:
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        user_id = stored["user_id"]
+        row = _db(app).execute(
+            "SELECT id, username FROM users WHERE id = ?",
+            (user_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        if _check_login_lock(app, row["username"]):
+            return jsonify({"ok": False, "error":
+                            "Too many failed tries. "
+                            "Locked for 15 minutes."}), 403
+        challenge = passkey_mod.take_challenge(
+            _db(app), None, "login-discoverable")
+        if challenge is None:
+            return jsonify({"ok": False, "error":
+                            "Challenge expired or already used. "
+                            "Start again."}), 400
+        cfg = _cfg(app)
+        try:
+            verified = verify_authentication_response(
+                credential=credential,
+                expected_challenge=challenge,
+                expected_rp_id=cfg.webauthn_rp_id,
+                expected_origin=cfg.webauthn_origin,
+                credential_public_key=base64url_to_bytes(
+                    stored["public_key"]),
+                credential_current_sign_count=stored["sign_count"])
+        except Exception:
+            _record_login_fail(app, row["username"])
+            return jsonify({"ok": False, "error":
+                            "Passkey verification failed."}), 400
+        _db(app).execute(
+            "UPDATE passkey_credentials SET sign_count = ? "
+            "WHERE user_id = ? AND credential_id = ?",
+            (verified.new_sign_count, user_id, credential_id))
+        _db(app).commit()
+        _clear_login_fails(app, row["username"])
+        _record_login_event(app, row["username"], True)
+        _log(app, user_id, "passkey_login", "Signed in with a passkey.")
+        _rotate_session(user_id)
+        # Fresh sign-in: the mode chooser shows once, then the
+        # answer is remembered (see _clear_mode_chosen).
+        _clear_mode_chosen(_db(app), user_id)
+        return jsonify({"ok": True, "redirect": url_for("wallet")})
+
     # ------------------------------------------------------------------
     # Donations (public: the donate card lives on the login page)
     # ------------------------------------------------------------------
