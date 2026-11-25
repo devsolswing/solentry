@@ -80,6 +80,25 @@
           <span class="bot-arrow" aria-hidden="true">›</span>
         </button>
       </form>
+      {# Trenches preset button (returned 2026-11-24, James): same
+         shape as Clyde's — a carousel item alongside the active
+         bot cards, hidden until Presets is tapped. Button ONLY:
+         no description, no rules, no notes. It POSTs to create
+         Trenches (or goes to the existing one), landing on the
+         bot details page. The 📈 icon is the strongest gainer —
+         the Trenches page itself uses 🔥, but Clyde already
+         carries 🔥 on this row, so the card stays distinct. #}
+      <form method="post" action="{{ trenches_preset.create_url }}" data-preset-item hidden>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="card bot-card" type="submit" aria-label="Create the Trenches bot">
+          <span class="bot-ico" aria-hidden="true">📈</span>
+          <span class="bot-info">
+            <span class="bot-name"><strong>{{ trenches_preset.name }}</strong> <span class="badge preset">Preset</span></span>
+            <span class="muted small">{{ trenches_preset.strategy }} · Buy {{ trenches_preset.buy_size_pct }}% · Stop {{ trenches_preset.stop_loss_pct }}% · Max {{ trenches_preset.max_open_trades }}</span>
+          </span>
+          <span class="bot-arrow" aria-hidden="true">›</span>
+        </button>
+      </form>
       {# Gnat preset button (2026-11-21): same shape as Clyde's —
          a carousel item alongside the active bot cards, hidden
          until Presets is tapped. Button ONLY: no description, no

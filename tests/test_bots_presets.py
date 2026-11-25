@@ -156,20 +156,20 @@ class TestBotsPresets(UiBase):
         self.assertNotIn("presetList.setAttribute", show)
         self.assertNotIn("presetList", show)
 
-    def test_preset_window_is_clyde_and_gnat_buttons_only(self):
+    def test_preset_window_is_five_buttons(self):
         """Owner (2026-11-11) + Gnat (2026-11-21) + Pit Sweeper
-        (2026-11-23) + Middy (2026-11-24): the preset view is
-        BUTTONS ONLY — no description, no rules, no notes. Four
-        buttons, Clyde, Gnat, Pit Sweeper and Middy, each a
-        carousel item like an active bot card (icon, name, gold
-        Preset pill, stats line), each POSTing to create its
-        preset."""
+        (2026-11-23) + Middy (2026-11-24) + Trenches returned
+        (2026-11-24): the preset view is BUTTONS ONLY — no
+        description, no rules, no notes. Five buttons, Clyde,
+        Trenches, Gnat, Pit Sweeper and Middy, each a carousel
+        item like an active bot card (icon, name, gold Preset
+        pill, stats line), each POSTing to create its preset."""
         self._choose_mode("paper")
         html = self._html("/bots")
         # No separate preset list element anywhere.
         self.assertNotIn("preset-list", html)
-        # Scope to the one carousel (the words "Trenches" and
-        # "Scanner" must not appear in the window at all).
+        # Scope to the one carousel (the word "Scanner" must not
+        # appear in the window at all — Trenches is back in it).
         start = html.find('id="active-bots-list"')
         end = html.find('id="signer-card"', start)
         window = html[start:end]
@@ -178,13 +178,22 @@ class TestBotsPresets(UiBase):
         m = re.search(r'<form[^>]*data-preset-item[^>]*>', window)
         self.assertIsNotNone(m, "Clyde form not found")
         self.assertIn("hidden", m.group(0))
-        # Four POST forms, to the Clyde, Gnat, Pit and Middy
-        # create routes.
-        self.assertEqual(window.count("<form"), 4)
+        # Five POST forms, to the Clyde, Trenches, Gnat, Pit and
+        # Middy create routes — in the preset_bots() order.
+        self.assertEqual(window.count("<form"), 5)
         self.assertIn('action="/bots/preset/clyde"', window)
+        self.assertIn('action="/bots/preset/trenches"', window)
         self.assertIn('action="/bots/preset/gnat"', window)
         self.assertIn('action="/bots/preset/pit"', window)
         self.assertIn('action="/bots/preset/middy"', window)
+        order = [window.find(a) for a in (
+            'action="/bots/preset/clyde"',
+            'action="/bots/preset/trenches"',
+            'action="/bots/preset/gnat"',
+            'action="/bots/preset/pit"',
+            'action="/bots/preset/middy"')]
+        self.assertEqual(order, sorted(order),
+                         "preset cards out of order")
         # The button IS the card: same classes as a bot card.
         m = re.search(r'<button class="([^"]*)" type="submit"',
                       window)
@@ -195,6 +204,9 @@ class TestBotsPresets(UiBase):
         self.assertIn("🔥", window)
         self.assertIn("<strong>Clyde</strong>", window)
         self.assertIn("bot-arrow", window)
+        # Trenches' card: 📈 icon, name, same gold Preset pill.
+        self.assertIn("📈", window)
+        self.assertIn("<strong>Trenches</strong>", window)
         # Gnat's card: 🦟 icon, name, same gold Preset pill.
         self.assertIn("🦟", window)
         self.assertIn("<strong>Gnat</strong>", window)
@@ -209,6 +221,8 @@ class TestBotsPresets(UiBase):
         self.assertNotIn("● Active", window)
         # Clyde's stats line, same format as a bot card.
         self.assertIn("bold · Buy 15% · Stop 4% · Max 3", window)
+        # Trenches' stats line, same format as a bot card.
+        self.assertIn("bold · Buy 20% · Stop 7% · Max 3", window)
         # Gnat's stats line, same format as a bot card.
         self.assertIn("bold · Buy 18% · Stop 18% · Max 3", window)
         # Pit Sweeper's stats line, same format as a bot card.
@@ -220,10 +234,8 @@ class TestBotsPresets(UiBase):
         self.assertNotIn("preset-note", window)
         self.assertNotIn("preset-card", window)
         self.assertNotIn("data-preset=", window)
-        # No other preset in the window at all.
-        self.assertNotIn("Trenches", window)
+        # No other preset in the window at all — Scanner stays out.
         self.assertNotIn("Scanner", window)
-        self.assertNotIn("/bots/preset/trenches", window)
         self.assertNotIn("/bots/preset/scanner", window)
         # None of the rules text survives in the window.
         self.assertNotIn("30 seconds", window)

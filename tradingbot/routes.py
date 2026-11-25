@@ -4473,6 +4473,17 @@ def register_routes(app: Flask) -> None:
             "stop_loss_pct": int(CLYDE_STOP_LOSS_PCT),
             "max_open_trades": 3,
         })
+        # Trenches returned to the window 2026-11-24 (James):
+        # second button, same shape — its stats are the values its
+        # create route writes (strategy 'bold', buy size 20%,
+        # stop loss 7%, max 3 open).
+        trenches_preset = next(p for p in presets if p["key"] == "trenches")
+        trenches_preset.update({
+            "strategy": "bold",
+            "buy_size_pct": 20,
+            "stop_loss_pct": 7,
+            "max_open_trades": 3,
+        })
         gnat_preset = next(p for p in presets if p["key"] == "gnat")
         gnat_preset.update({
             "strategy": "bold",
@@ -4523,6 +4534,7 @@ def register_routes(app: Flask) -> None:
                                signing_tx_count=signing_tx_count,
                                presets=presets,
                                clyde_preset=clyde_preset,
+                               trenches_preset=trenches_preset,
                                gnat_preset=gnat_preset,
                                pit_preset=pit_preset,
                                middy_preset=middy_preset)

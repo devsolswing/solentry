@@ -667,10 +667,15 @@ class TestRulesRoutes(unittest.TestCase):
         # test_assistant_preset_create). (Owner, 2026-11-11: the
         # Page 6 assistant box is deleted, so its "create the
         # trenches bot" hint is gone from the page too.)
+        # Trenches returned 2026-11-24 (James) as a preset-window
+        # card — so its aria-label "Create the Trenches bot" now
+        # appears on the page, but only as that preset card: the
+        # old Memecoin build section is still gone.
         resp = self.client.get("/bots")
         html = resp.get_data(as_text=True)
         self.assertNotIn("memecoin-card", html)
-        self.assertNotIn("Create the Trenches bot", html)
+        self.assertIn('action="/bots/preset/trenches"', html)
+        self.assertIn('aria-label="Create the Trenches bot"', html)
         self.assertNotIn("create the trenches bot", html)
 
     def test_assistant_preset_create(self):
