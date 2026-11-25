@@ -628,10 +628,29 @@ class TestRulesRoutes(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.get_json()
 
-    def _bot(self, name="Trenches"):
+    def _bot(self, name="Trenches", mode=None):
+        if mode is None:
+            return self.db.execute(
+                "SELECT * FROM bots WHERE user_id = ? AND name = ?",
+                (self.user_id, name)).fetchone()
         return self.db.execute(
-            "SELECT * FROM bots WHERE user_id = ? AND name = ?",
-            (self.user_id, name)).fetchone()
+            "SELECT * FROM bots WHERE user_id = ? AND name = ? "
+            "AND mode = ?",
+            (self.user_id, name, mode)).fetchone()
+
+    def _set_mode(self, mode):
+        # Switch the session's trading mode the way the real
+        # post-sign-in chooser does (POST /choose-mode): 'paper' for
+        # Demo trading, 'devnet' for Real trading.
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/choose-mode",
+                                data={"mode": mode, "csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        row = self.db.execute(
+            "SELECT active_mode FROM users WHERE id = ?",
+            (self.user_id,)).fetchone()
+        self.assertEqual(row["active_mode"], mode)
 
     def test_preset_route_creates_trenches(self):
         token = csrf(self.client, "/bots")
@@ -729,6 +748,99 @@ class TestRulesRoutes(unittest.TestCase):
         html = resp.get_data(as_text=True)
         self.assertIn('href="/bots">Cancel — keep the bot', html)
         self.assertNotIn(f'href="/bots/{bot["id"]}/edit">Cancel', html)
+
+    def test_trenches_paper_does_not_block_real(self):
+        # A paper Trenches (live shape: bot 9, 2026-11-24) must NOT
+        # block creating a Trenches bot in a real session — the
+        # duplicate check is scoped to the session's mode.
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        paper_bot = self._bot(mode="paper")
+        self.assertIsNotNone(paper_bot)
+        self._set_mode("devnet")
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        real_bot = self._bot(mode="real")
+        self.assertIsNotNone(real_bot)
+        self.assertNotEqual(real_bot["id"], paper_bot["id"])
+        self.assertEqual(real_bot["mode"], "real")
+        self.assertEqual(real_bot["silent"], 0)
+        count = self.db.execute(
+            "SELECT COUNT(*) c FROM bots WHERE user_id = ? "
+            "AND name = 'Trenches'",
+            (self.user_id,)).fetchone()["c"]
+        self.assertEqual(count, 2)
+        # Lands on the NEW (real) bot, not on the paper one.
+        self.assertIn(f"/bots/{real_bot['id']}", resp.headers["Location"])
+
+    def test_trenches_real_blocks_second_real(self):
+        # A real Trenches DOES block a second real one: redirect to
+        # the existing bot with the 'already have' flash, count stays 1.
+        self._set_mode("devnet")
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        first = self._bot(mode="real")
+        self.assertIsNotNone(first)
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(f"/bots/{first['id']}", resp.headers["Location"])
+        count = self.db.execute(
+            "SELECT COUNT(*) c FROM bots WHERE user_id = ? "
+            "AND name = 'Trenches' AND mode = 'real'",
+            (self.user_id,)).fetchone()["c"]
+        self.assertEqual(count, 1)
+        followed = self.client.post("/bots/preset/trenches",
+                                    data={"csrf_token": token},
+                                    follow_redirects=True)
+        self.assertIn("You already have a Trenches bot.",
+                      followed.get_data(as_text=True))
+
+    def test_trenches_created_in_real_session_is_real(self):
+        # A bot created in a real session is a real bot, silent off,
+        # with the preset's own buy/stop/max — and no paper twin.
+        # The flash says real, not paper.
+        self._set_mode("devnet")
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=True)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("(Memecoin build, real)",
+                      resp.get_data(as_text=True))
+        bot = self._bot(mode="real")
+        self.assertIsNotNone(bot)
+        self.assertEqual(bot["mode"], "real")
+        self.assertEqual(bot["silent"], 0)
+        self.assertEqual(bot["buy_size_pct"], 20)
+        self.assertEqual(bot["stop_loss_pct"], 7)
+        self.assertEqual(bot["max_open_trades"], 3)
+        self.assertIsNone(self._bot(mode="paper"))
+
+    def test_trenches_created_in_paper_session_is_paper(self):
+        # The default session after sign-up is paper (fail-closed):
+        # a bot created there is a paper bot, silent off, no real twin.
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        bot = self._bot(mode="paper")
+        self.assertIsNotNone(bot)
+        self.assertEqual(bot["mode"], "paper")
+        self.assertEqual(bot["silent"], 0)
+        self.assertIsNone(self._bot(mode="real"))
 
     def test_bots_page_memecoin_section_removed(self):
         # Page 6 rebuild: the Memecoin build section (Trenches

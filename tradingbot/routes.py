@@ -4655,20 +4655,31 @@ def register_routes(app: Flask) -> None:
     def bot_preset_trenches():
         """Create the Trenches memecoin bot (Memecoin build preset).
 
-        Paper mode, silent off. One per user — if a Trenches bot
-        already exists, go to it instead of making a duplicate.
+        Creates in the session's current mode (paper or real),
+        silent off. One per user per mode — if a Trenches bot
+        already exists in this mode, go to it instead of making a
+        duplicate.
         """
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
+        # The mode the bot is created in: the session's current
+        # trading mode. The stored session value is 'devnet' for
+        # real trading; bots store 'real' (same mapping as the bots
+        # list in _dashboard_data).
+        bot_mode = ("real" if _active_mode(db, user["id"]) == "devnet"
+                    else "paper")
         # Match by exact preset name, not by rules kind: builderBot
         # bots can carry Trenches-kind rules under another name (live
         # 2026-11-24: Luna, bot 3), and a kind match wrongly blocked
         # creating a real Trenches bot. Same shape as Clyde/Gnat/Middy.
+        # Scoped to this mode: a paper Trenches must not block a real
+        # one (live 2026-11-24: paper bot 9 blocked Real-mode creation).
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-            "AND name = ?",
-            (user["id"], TRENCHES_CATEGORY, TRENCHES_PRESET_NAME)).fetchone()
+            "AND name = ? AND mode = ?",
+            (user["id"], TRENCHES_CATEGORY, TRENCHES_PRESET_NAME,
+             bot_mode)).fetchone()
         if existing:
             flash("You already have a Trenches bot.")
             return redirect(url_for("bot_detail", bot_id=existing["id"]))
@@ -4677,16 +4688,17 @@ def register_routes(app: Flask) -> None:
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform) "
-            "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', 20, 7, ?, 0, 3, ?, ?, ?, "
             "'pump.fun')",
-            (user["id"], TRENCHES_PRESET_NAME, hash_token(token),
+            (user["id"], TRENCHES_PRESET_NAME, bot_mode,
+             hash_token(token),
              TRENCHES_CATEGORY, json.dumps(trenches_ruleset())))
         db.commit()
         _log(app, user["id"], "bot_create",
              f"Created bot '{TRENCHES_PRESET_NAME}' (Memecoin build "
-             f"preset, paper). Silent trading is off.", "paper")
+             f"preset, {bot_mode}). Silent trading is off.", bot_mode)
         flash(f"Created the {TRENCHES_PRESET_NAME} bot (Memecoin build, "
-              f"paper). Turn silent trading on when you are ready — "
+              f"{bot_mode}). Turn silent trading on when you are ready — "
               f"it only trades within its rules and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
