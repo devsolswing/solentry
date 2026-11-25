@@ -725,8 +725,9 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
             return _skip("no blockhash")
         message = build_message(wallet_pubkey, instructions, blockhash)
         signed_b64, signature = sign_message(seed, message)
-        record_pending_trade(db, user_id, bot["id"], mint, "sell",
-                             signature)
+        record_pending_trade(db, user_id,
+                             bot["id"] if bot is not None else None,
+                             mint, "sell", signature)
         confirmed, confirm_error = _send_and_confirm(
             rpc, signed_b64, signature)
         if confirmed is None:
@@ -819,8 +820,12 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
     """
     if cfg.network not in ("devnet", "mainnet"):
         return _skip("real execution needs devnet or mainnet")
-    if bot["mode"] != "real":
+    if bot is not None and bot["mode"] != "real":
         return _skip("bot is not in real mode")
+    if side == "buy" and bot is None:
+        # Manual sells pass bot=None (the user's Sell button
+        # overrides the bot); buys still require a real bot.
+        return _skip("a real bot is required for buys")
     if side not in ("buy", "sell"):
         return _skip("unknown side")
     if amount is None or float(amount) <= 0:

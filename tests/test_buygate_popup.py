@@ -527,6 +527,9 @@ class TestManualRealFuel(unittest.TestCase):
             "avg_price) VALUES (?, ?, ?, ?)",
             (self.user_id, GATE, 100.0, GATE_PRICE))
         db.commit()
+        # The sell validates against the live on-chain balance: the
+        # fake RPC must report the 100 GATE the test inserted.
+        self.rpc._gate_tokens = 100.0
         self.mock_execute.return_value = {
             "status": "executed", "signature": "sig-sell-1",
             "coin_amount": 100.0, "sol_received": 0.01,

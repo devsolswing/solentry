@@ -655,8 +655,12 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
         return _skip(str(exc))
     if cfg.network != "mainnet":
         return _skip("Jupiter swaps need mainnet")
-    if bot["mode"] != "real":
+    if bot is not None and bot["mode"] != "real":
         return _skip("bot is not in real mode")
+    if side == "buy" and bot is None:
+        # Manual sells pass bot=None (the user's Sell button
+        # overrides the bot); buys still require a real bot.
+        return _skip("a real bot is required for buys")
     if side not in ("buy", "sell"):
         return _skip("unknown side")
     if amount is None or float(amount) <= 0:

@@ -485,8 +485,14 @@ class TestDetailTradingMint(HomeBase):
             return {"status": "executed", "signature": "fakesigALL",
                     "coin_amount": 10.0}
 
+        def fake_chain_balances(rpc, pubkey):
+            return ([{"mint": mint, "amount": "1000000000",
+                      "ui_amount": 1000000000.0}], True)
+
         with mock.patch.object(routes, "execute_real_trade",
                                fake_execute), \
+                mock.patch.object(routes, "fetch_chain_token_balances",
+                                  side_effect=fake_chain_balances), \
                 mock.patch.object(routes, "is_curve_complete",
                                   return_value=False), \
                 mock.patch.object(

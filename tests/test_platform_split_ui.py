@@ -622,8 +622,14 @@ class TestCoinPopup(SplitBase):
             return {"status": "executed", "signature": "fakesigSELL",
                     "coin_amount": 4.0}
 
+        def fake_chain_balances(rpc, pubkey):
+            return ([{"mint": BONDING_MINT, "amount": "1000000000",
+                      "ui_amount": 1000000000.0}], True)
+
         with mock.patch.object(routes, "is_curve_complete",
                                return_value=False), \
+                mock.patch.object(routes, "fetch_chain_token_balances",
+                                  side_effect=fake_chain_balances), \
                 mock.patch.object(routes, "execute_jupiter_swap") \
                 as jup_exec, \
                 mock.patch.object(routes, "execute_real_trade",
@@ -650,8 +656,14 @@ class TestCoinPopup(SplitBase):
             "avg_price) VALUES (?, ?, ?, ?)",
             (self.user_id, GRAD_MINT, 10.0, 0.01))
         self.db.commit()
+        def fake_chain_balances(rpc, pubkey):
+            return ([{"mint": GRAD_MINT, "amount": "1000000000",
+                      "ui_amount": 1000000000.0}], True)
+
         with mock.patch.object(routes, "is_curve_complete",
                                return_value=True), \
+                mock.patch.object(routes, "fetch_chain_token_balances",
+                                  side_effect=fake_chain_balances), \
                 mock.patch.object(
                     routes, "execute_jupiter_swap",
                     return_value={"status": "executed",
@@ -675,7 +687,9 @@ class TestCoinPopup(SplitBase):
             (GRAD_MINT,)).fetchone()
         self.assertAlmostEqual(row["amount"], 6.0)
 
-    def test_real_sell_of_bot_managed_coin_refused(self):
+    def test_real_sell_of_bot_managed_coin_succeeds_and_shrinks_row(self):
+        # Manual sell overrides the bot: no bot pick is needed, the
+        # sell executes, and the bot's row shrinks by the sold amount.
         self._choose_mode("devnet")
         bot_id = self._create_bot("Nova", mode="real")
         mint = generate_keypair()[1]
@@ -684,14 +698,80 @@ class TestCoinPopup(SplitBase):
             "avg_price, mode) VALUES (?, ?, ?, ?, ?, 'real')",
             (self.user_id, bot_id, mint, 5.0, 0.01))
         self.db.commit()
-        resp = self.client.post(f"/coins/{mint}/sell", data={
-            "csrf_token": csrf(self.client, f"/coins/{mint}"),
-            "amount": "1", "bot_id": str(bot_id)})
+
+        def fake_execute(*args, **kwargs):
+            return {"status": "executed", "signature": "fakesigSELL",
+                    "coin_amount": 1.0}
+
+        def fake_chain_balances(rpc, pubkey):
+            return ([{"mint": mint, "amount": "1000000000",
+                      "ui_amount": 1000000000.0}], True)
+
+        with mock.patch.object(routes, "is_curve_complete",
+                               return_value=False), \
+                mock.patch.object(routes, "fetch_chain_token_balances",
+                                  side_effect=fake_chain_balances), \
+                mock.patch.object(routes, "execute_jupiter_swap") \
+                as jup_exec, \
+                mock.patch.object(routes, "execute_real_trade",
+                                  fake_execute):
+            resp = self.client.post(f"/coins/{mint}/sell", data={
+                "csrf_token": csrf(self.client, f"/coins/{mint}"),
+                "amount": "1"})
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(jup_exec.call_count, 0)
         html = resp.get_data(as_text=True)
-        self.assertIn("Nothing was sold", html)
-        self.assertIn("bot is managing it", html)
+        self.assertIn("Sold", html)
+        self.assertNotIn("bot is managing it", html)
         self.assertIn("Back to coins", html)
+        row = self.db.execute(
+            "SELECT amount FROM bot_positions WHERE bot_id = ? "
+            "AND coin_id = ?",
+            (bot_id, mint)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertAlmostEqual(row["amount"], 4.0)
+
+    def test_real_sell_all_of_bot_managed_coin_deletes_row(self):
+        # Sell-all with no manual holding: the whole bot-managed
+        # position sells and the bot row is deleted, not left as
+        # a ghost the bot keeps trying to sell.
+        self._choose_mode("devnet")
+        bot_id = self._create_bot("Nova", mode="real")
+        mint = generate_keypair()[1]
+        self.db.execute(
+            "INSERT INTO bot_positions (user_id, bot_id, coin_id, amount, "
+            "avg_price, mode) VALUES (?, ?, ?, ?, ?, 'real')",
+            (self.user_id, bot_id, mint, 5.0, 0.01))
+        self.db.commit()
+
+        def fake_execute(*args, **kwargs):
+            return {"status": "executed", "signature": "fakesigSELLALL",
+                    "coin_amount": 5.0}
+
+        def fake_chain_balances(rpc, pubkey):
+            return ([{"mint": mint, "amount": "1000000000",
+                      "ui_amount": 1000000000.0}], True)
+
+        with mock.patch.object(routes, "is_curve_complete",
+                               return_value=False), \
+                mock.patch.object(routes, "fetch_chain_token_balances",
+                                  side_effect=fake_chain_balances), \
+                mock.patch.object(routes, "execute_jupiter_swap") \
+                as jup_exec, \
+                mock.patch.object(routes, "execute_real_trade",
+                                  fake_execute):
+            resp = self.client.post(f"/coins/{mint}/sell", data={
+                "csrf_token": csrf(self.client, f"/coins/{mint}"),
+                "sell_all": "1"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(jup_exec.call_count, 0)
+        html = resp.get_data(as_text=True)
+        self.assertIn("Sold", html)
+        self.assertIn("fakesigSELLALL", html)
+        row = self.db.execute(
+            "SELECT * FROM bot_positions WHERE bot_id = ? AND coin_id = ?",
+            (bot_id, mint)).fetchone()
+        self.assertIsNone(row)
 
     def test_send_from_popup_returns_to_coins_after_confirm(self):
         intent_resp = self.client.post("/wallet/send", data={

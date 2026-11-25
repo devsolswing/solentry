@@ -518,6 +518,53 @@ def _remove_real_holding(db, user_id: int, mint: str,
     db.commit()
 
 
+def _shrink_bot_positions(db, user_id: int, coin: str, amount: float,
+                          mode: str) -> None:
+    """Take `amount` out of the user's bot_positions rows for
+    (coin, mode), oldest-first (opened_at, then id). A row fully
+    consumed is deleted and its scanner watches cleared (like
+    _close_position in the silent loop); a partially consumed row
+    is updated. The caller attributes the sold amount first to
+    the manual holding, then to bot rows — so `amount` here is
+    only the part of the sell that came from bot-managed rows.
+    Never raises — a bookkeeping failure must never break a
+    completed sell."""
+    if amount is None or amount <= 0:
+        return
+    try:
+        from .scanner import clear_watches
+    except Exception:
+        clear_watches = None
+    try:
+        rows = db.execute(
+            "SELECT id, bot_id, amount FROM bot_positions "
+            "WHERE user_id = ? AND coin_id = ? AND mode = ? "
+            "ORDER BY opened_at ASC, id ASC",
+            (user_id, coin, mode)).fetchall()
+        remaining = float(amount)
+        for row in rows:
+            if remaining <= 0:
+                break
+            row_amount = float(row["amount"])
+            if row_amount <= remaining:
+                db.execute("DELETE FROM bot_positions WHERE id = ?",
+                           (row["id"],))
+                if clear_watches is not None:
+                    try:
+                        clear_watches(db, row["bot_id"], coin)
+                    except Exception:
+                        pass
+                remaining -= row_amount
+            else:
+                db.execute("UPDATE bot_positions SET amount = ? "
+                           "WHERE id = ?",
+                           (row_amount - remaining, row["id"]))
+                remaining = 0
+        db.commit()
+    except Exception:
+        return
+
+
 def _real_avg_price(app, mint: str, amount_sol: float,
                     coin_amount: float) -> float:
     """USD cost basis for a real buy, from the EXECUTED amounts: the
@@ -3475,25 +3522,22 @@ def register_routes(app: Flask) -> None:
                         ["You hold none of this coin in " + label + "."],
                         False, coin_id_resolved, label)
             else:
+                # Manual sell-all covers the whole position: what
+                # the user holds by hand PLUS what any bot is
+                # managing. The user's Sell button overrides the
+                # bot — the bot's rules never block a manual sell.
                 manual = db.execute(
                     "SELECT amount FROM real_holdings WHERE user_id = ? "
                     "AND coin_id = ?", (user["id"], coin_id_resolved)
                     ).fetchone()
-                amount = float(manual["amount"]) if manual else 0.0
+                manual_amount = float(manual["amount"]) if manual else 0.0
+                bot_managed = db.execute(
+                    "SELECT COALESCE(SUM(amount), 0) AS total "
+                    "FROM bot_positions WHERE user_id = ? "
+                    "AND coin_id = ? AND mode = 'real'",
+                    (user["id"], coin_id_resolved)).fetchone()["total"]
+                amount = manual_amount + float(bot_managed)
                 if amount <= 0:
-                    bot_managed = db.execute(
-                        "SELECT COALESCE(SUM(amount), 0) AS total "
-                        "FROM bot_positions WHERE user_id = ? "
-                        "AND coin_id = ? AND mode = 'real'",
-                        (user["id"], coin_id_resolved)).fetchone()["total"]
-                    if bot_managed > 0:
-                        return _coin_result(
-                            "Nothing was sold",
-                            [f"You hold {bot_managed:.4f} "
-                             f"{coin_id_resolved} in real mode, but a bot "
-                             f"is managing it — the bot sells it by its "
-                             f"rules."],
-                            False, coin_id_resolved, label)
                     return _coin_result(
                         "Nothing was sold",
                         ["You hold none of this coin in " + label + "."],
@@ -3549,6 +3593,23 @@ def register_routes(app: Flask) -> None:
                     "Nothing was sold", ["Amount must be more than 0."],
                     False, coin_id_resolved, label)
         if mode == "paper":
+            # The part of this sell that came from bot-managed
+            # rows (manual holdings first, then bots) — shrunk
+            # from bot_positions after a successful sell so no
+            # ghost row is left behind.
+            paper_row = db.execute(
+                "SELECT amount FROM paper_holdings WHERE user_id = ? "
+                "AND coin_id = ?", (user["id"], coin_id_resolved)
+                ).fetchone()
+            paper_before = float(paper_row["amount"]) if paper_row else 0.0
+            bot_managed_paper = db.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS total "
+                "FROM bot_positions WHERE user_id = ? AND coin_id = ? "
+                "AND mode = 'paper'",
+                (user["id"], coin_id_resolved)).fetchone()["total"]
+            sold_from_bots = max(
+                0.0, amount - max(
+                    0.0, paper_before - float(bot_managed_paper)))
             # Paper sells price from the live Jupiter quote when the
             # coin has a route — a failed quote falls back to the
             # live price (never blocks the trade).
@@ -3560,12 +3621,21 @@ def register_routes(app: Flask) -> None:
             lines = [result["message"]]
             if result["ok"]:
                 lines.append(f"New paper cash: ${result['cash']:,.2f} CAD.")
+                _shrink_bot_positions(db, user["id"], coin_id_resolved,
+                                      sold_from_bots, "paper")
             return _coin_result(
                 "Sold" if result["ok"] else "Nothing was sold",
                 lines, result["ok"], coin_id_resolved, label)
-        # Real mode: sell only the manually-held part. Tokens a bot
-        # is managing are sold by that bot's rules, not by hand, so
-        # the two ledgers never get out of step.
+        # Real mode: a manual sell covers the whole position —
+        # what the user holds by hand PLUS what any bot is
+        # managing. The user's Sell button overrides the bot's
+        # rules and its selling point: the sell executes for the
+        # amount entered, at the live price. No bot exit rule
+        # (TP tiers, trailing stop, stop loss, time caps) is
+        # consulted on this path. The ONLY rule the override does
+        # not touch is the last-credit reserve (fuel==1) below —
+        # it stays exactly as confirmed, so the user is never
+        # stuck in positions with no fuel left to act.
         manual = db.execute(
             "SELECT amount FROM real_holdings WHERE user_id = ? "
             "AND coin_id = ?", (user["id"], coin_id_resolved)).fetchone()
@@ -3574,32 +3644,16 @@ def register_routes(app: Flask) -> None:
             "SELECT COALESCE(SUM(amount), 0) AS total FROM bot_positions "
             "WHERE user_id = ? AND coin_id = ? AND mode = 'real'",
             (user["id"], coin_id_resolved)).fetchone()["total"]
-        if amount > manual_amount:
-            if manual_amount <= 0 and bot_managed > 0:
-                return _coin_result(
-                    "Nothing was sold",
-                    [f"You hold {bot_managed:.4f} {coin_id_resolved} in "
-                     f"real mode, but a bot is managing it — the bot "
-                     f"sells it by its rules."],
-                    False, coin_id_resolved, label)
+        total_held = manual_amount + float(bot_managed)
+        if amount > total_held:
             return _coin_result(
                 "Nothing was sold",
-                [f"You hold {manual_amount:.4f} {coin_id_resolved} in "
-                 f"real mode that you can sell by hand"
-                 + (f" ({bot_managed:.4f} more is managed by a bot)."
-                    if bot_managed > 0 else ".")],
+                [f"You hold {total_held:.4f} {coin_id_resolved} total "
+                 f"in real mode."],
                 False, coin_id_resolved, label)
-        # A Jupiter-routed coin trades through the Jupiter executor
-        # (mainnet, gated behind James's go-ahead); anything else
-        # is a pump.fun mint and trades through the pump.fun
-        # executor. With the Jupiter gate off the
-        # executor refuses plainly — nothing is built, signed or
-        # sent.
-        bot, error = _real_bot_for_trade(
-            app, user, request.form.get("bot_id") or "")
-        if error:
-            return _coin_result("Nothing was sold", [error], False,
-                                coin_id_resolved, label)
+        # Fuel checks come first: they are DB-only and binding,
+        # so a refused sell never spends an RPC read — and the
+        # last-credit message is never shadowed by a chain read.
         # $GATE fuel gate (2026-11-23): same as the buy path — a
         # real sell costs 1 trade credit. No fuel means no trade:
         # the page shows the no-fuel popup instead of placing the
@@ -3629,6 +3683,41 @@ def register_routes(app: Flask) -> None:
                  "the last trade. The exit-all sweep closes every "
                  "position for that one credit instead."],
                 False, coin_id_resolved, label)
+        # Live-balance pre-check: the sell is validated against
+        # the wallet's actual on-chain balance for the mint — the
+        # chain is the truth for how much can be sold. If the
+        # chain read fails, the DB total stands and the executor
+        # enforces live. Never sell a guessed amount.
+        chain_amount = None
+        try:
+            wallet = _wallet(app, user["id"])
+            if wallet:
+                chain, chain_ok = fetch_chain_token_balances(
+                    rpc_client_for_config(_cfg(app)), wallet["pubkey"])
+                if chain_ok:
+                    chain_amount = 0.0
+                    for entry in chain:
+                        if entry.get("mint") == coin_id_resolved:
+                            chain_amount = float(
+                                entry.get("ui_amount") or 0)
+                            break
+        except Exception:
+            chain_amount = None
+        if chain_amount is not None and amount > chain_amount:
+            return _coin_result(
+                "Nothing was sold",
+                [f"You hold {chain_amount:.4f} {coin_id_resolved} "
+                 f"on-chain right now — the sell can't exceed your "
+                 f"live balance."],
+                False, coin_id_resolved, label)
+        # A Jupiter-routed coin trades through the Jupiter executor
+        # (mainnet, gated behind James's go-ahead); anything else
+        # is a pump.fun mint and trades through the pump.fun
+        # executor. With the Jupiter gate off the
+        # executor refuses plainly — nothing is built, signed or
+        # sent. No bot is consulted on a manual sell: the user's
+        # Sell button overrides the bot managing the coin, and
+        # `bot_id` from the form is ignored on sells.
         # The venue is the bonding curve (see the buy path
         # above): graduated -> Jupiter, still bonding -> pump.fun,
         # unreadable -> refused plainly.
@@ -3645,12 +3734,12 @@ def register_routes(app: Flask) -> None:
                 False, coin_id_resolved, label)
         if complete:
             result = execute_jupiter_swap(
-                bot, user["id"], coin_id_resolved, "sell", amount,
+                None, user["id"], coin_id_resolved, "sell", amount,
                 db, _cfg(app))
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
-                bot, user["id"], coin_id_resolved, "sell", amount,
+                None, user["id"], coin_id_resolved, "sell", amount,
                 price or 0.0, db, _cfg(app))
             venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
@@ -3664,6 +3753,13 @@ def register_routes(app: Flask) -> None:
         gate_fuel_mod.consume_fuel(
             db, user["id"], None, result.get("signature"))
         _remove_real_holding(db, user["id"], coin_id_resolved, amount)
+        # The sold tokens came from the manual holding first, then
+        # from bot-managed rows — shrink the bot rows by the part
+        # that came from them, so no ghost row is left behind for
+        # the bot to keep trying to sell.
+        _shrink_bot_positions(
+            db, user["id"], coin_id_resolved,
+            max(0.0, amount - manual_amount), "real")
         wallet = _wallet(app, user["id"])
         new_sol = (_real_balance(app, wallet["pubkey"])
                    if wallet else None)

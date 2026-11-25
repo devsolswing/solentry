@@ -67,15 +67,9 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Amount to sell (SOL)<input type="number" name="amount_sol" step="any" min="0" required data-jupiter-amount="sell"{% if sell_prefill_sol is defined and sell_prefill_sol is not none %} value="{{ sell_prefill_sol }}" max="{{ held_sol_value }}" data-price-usd="{{ coin.price }}" data-sol-price-usd="{{ sol_price_usd }}"{% else %} placeholder="0.1"{% endif %}></label>
       <p class="muted small" data-sell-quote data-ticker="{{ coin.ticker }}">{% if sell_prefill_sol is defined and sell_prefill_sol is not none %}≈ {{ "{:,.0f}".format(sell_prefill_sol * sol_price_usd / coin.price) }} {{ coin.ticker }}{% endif %}</p>
-      <label>Real bot to manage this sell (required)
-        <select name="bot_id" required>
-          <option value="">Choose a real bot…</option>
-          {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
-        </select>
-      </label>
       <button class="btn big" type="submit">Sell (real, {{ network }})</button>
     </form>
-    <p class="muted small">Sells only the part you hold by hand. Coins a bot is managing are sold by that bot's rules.</p>
+    <p class="muted small">Sells the whole position, including any part a bot is managing. Your sell overrides the bot.</p>
     {% endif %}
     {% if coin.held > 0 %}
     <h3>Sell all</h3>
@@ -90,12 +84,6 @@
     <form method="post" action="{{ url_for('coin_sell', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="sell_all" value="1">
-      <label>Real bot to manage this sell (required)
-        <select name="bot_id" required>
-          <option value="">Choose a real bot…</option>
-          {% for b in bots %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
-        </select>
-      </label>
       <button class="btn big" type="submit">Sell all (real, {{ network }})</button>
     </form>
     {% endif %}
