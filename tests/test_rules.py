@@ -658,6 +658,78 @@ class TestRulesRoutes(unittest.TestCase):
             (self.user_id,)).fetchone()["c"]
         self.assertEqual(count, 1)
 
+    def _insert_named_bot(self, name, rules=None):
+        # A bot carrying Trenches-kind rules under a given name — the
+        # live shape (Luna, bot 3, 2026-11-24) that the old kind-based
+        # duplicate check wrongly treated as a Trenches bot.
+        cur = self.db.execute(
+            "INSERT INTO bots (user_id, name, strategy, coins, "
+            "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
+            "api_token_hash, category, rules_json) "
+            "VALUES (?, ?, 'balanced', '[]', 10, 5, 'paper', 1, 3, ?, ?, ?)",
+            (self.user_id, name, hashlib.sha256(b"tok").hexdigest(),
+             TRENCHES_CATEGORY,
+             json.dumps(rules if rules is not None
+                        else trenches_ruleset())))
+        self.db.commit()
+        return cur.lastrowid
+
+    def test_trenches_preset_not_blocked_by_other_trenches_kind_bot(self):
+        # A bot with category 'Memecoin build' + rules kind
+        # 'trenches' but a different name (Luna) must NOT block
+        # creating a Trenches bot.
+        luna_id = self._insert_named_bot("Luna")
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        bot = self._bot()
+        self.assertIsNotNone(bot)
+        self.assertNotEqual(bot["id"], luna_id)
+        self.assertEqual(bot["category"], TRENCHES_CATEGORY)
+        self.assertEqual(bot["mode"], "paper")
+        count = self.db.execute(
+            "SELECT COUNT(*) c FROM bots WHERE user_id = ?",
+            (self.user_id,)).fetchone()["c"]
+        self.assertEqual(count, 2)
+        # Lands on the NEW bot, not on Luna.
+        self.assertIn(f"/bots/{bot['id']}", resp.headers["Location"])
+
+    def test_trenches_preset_blocked_by_existing_trenches_bot(self):
+        # An existing bot actually named 'Trenches' in the category
+        # DOES block a duplicate, with the 'already have' flash.
+        trenches_id = self._insert_named_bot("Trenches")
+        token = csrf(self.client, "/bots")
+        resp = self.client.post("/bots/preset/trenches",
+                                data={"csrf_token": token},
+                                follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(f"/bots/{trenches_id}", resp.headers["Location"])
+        count = self.db.execute(
+            "SELECT COUNT(*) c FROM bots WHERE user_id = ?",
+            (self.user_id,)).fetchone()["c"]
+        self.assertEqual(count, 1)
+        followed = self.client.post("/bots/preset/trenches",
+                                    data={"csrf_token": token},
+                                    follow_redirects=True)
+        self.assertIn("You already have a Trenches bot.",
+                      followed.get_data(as_text=True))
+
+    def test_delete_confirm_cancel_goes_back_to_bots(self):
+        # The Cancel link on the delete-confirm page must go back to
+        # the bots list, not to the edit page (2026-11-24: it pointed
+        # at bot_edit, so cancelling landed on Edit).
+        token = csrf(self.client, "/bots")
+        self.client.post("/bots/preset/trenches",
+                         data={"csrf_token": token})
+        bot = self._bot()
+        resp = self.client.get(f"/bots/{bot['id']}/delete/confirm")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertIn('href="/bots">Cancel — keep the bot', html)
+        self.assertNotIn(f'href="/bots/{bot["id"]}/edit">Cancel', html)
+
     def test_bots_page_memecoin_section_removed(self):
         # Page 6 rebuild: the Memecoin build section (Trenches
         # description + "+ Create the Trenches bot" button) is gone

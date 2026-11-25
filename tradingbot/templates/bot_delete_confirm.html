@@ -9,6 +9,6 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button class="btn danger big" type="submit">Yes, delete this bot</button>
   </form>
-  <p><a class="btn ghost" href="{{ url_for('bot_edit', bot_id=bot.id) }}">Cancel — keep the bot</a></p>
+  <p><a class="btn ghost" href="{{ url_for('bots') }}">Cancel — keep the bot</a></p>
 </div>
 {% endblock %}

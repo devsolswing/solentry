@@ -4661,11 +4661,14 @@ def register_routes(app: Flask) -> None:
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
+        # Match by exact preset name, not by rules kind: builderBot
+        # bots can carry Trenches-kind rules under another name (live
+        # 2026-11-24: Luna, bot 3), and a kind match wrongly blocked
+        # creating a real Trenches bot. Same shape as Clyde/Gnat/Middy.
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-            "AND rules_json LIKE ?",
-            (user["id"], TRENCHES_CATEGORY, '%"kind": "trenches"%')
-            ).fetchone()
+            "AND name = ?",
+            (user["id"], TRENCHES_CATEGORY, TRENCHES_PRESET_NAME)).fetchone()
         if existing:
             flash("You already have a Trenches bot.")
             return redirect(url_for("bot_detail", bot_id=existing["id"]))
