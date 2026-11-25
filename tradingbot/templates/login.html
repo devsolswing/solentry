@@ -37,6 +37,14 @@
 
   <a class="fox-btn fox-btn-red" href="{{ url_for('signup') }}">Create Account</a>
   <button class="fox-btn fox-btn-donate" type="button" id="fox-donate">Donate</button>
+  {# Android app download (2026-11-25): the real APK, uploaded to
+     static/solentry.apk via the GitHub web UI (binary files cannot go
+     through the push-files CLI). The button states the app name and the
+     download; the Android robot logo is the inline SVG. #}
+  <a class="fox-btn fox-btn-android" href="https://raw.githubusercontent.com/devsolswing/solentry/main/static/solentry.apk" download>
+    <span class="fox-android-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7.2 7.5 5.4 5.7M16.8 7.5l1.8-1.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M12 4a8 8 0 0 1 8 7.6v.9H4v-.9A8 8 0 0 1 12 4Z" fill="currentColor"/><circle cx="8.8" cy="10.2" r="1.15" fill="#C9A227"/><circle cx="15.2" cy="10.2" r="1.15" fill="#C9A227"/></svg></span>
+    <span class="fox-android-text"><span class="fox-android-name">SolEntry</span><span class="fox-android-sub">Download app</span></span>
+  </a>
 
   <button type="button" class="fox-passkey" id="passkey-login-btn">Sign in with passkey</button>
   <p class="fox-note" id="passkey-status"></p>
