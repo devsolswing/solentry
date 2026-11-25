@@ -1,10 +1,11 @@
 """Live price feed: tick validation, the app WebSocket, the REST
 snapshot, and the silent loop reading only validated prices.
 
-The feed is pump.fun-only now: DexScreener polls for mints (Raydium
-pairs for graduated coins, bonding-curve prices for devnet watchlist
-mints) and Jupiter for the SOL price (the unit of account). There is
-no Kraken WebSocket and no CoinGecko any more.
+The feed is pump.fun-only now, and single-source: coin ticks
+arrive only from the Helius stream (bonding curves, Raydium pools
+for graduated coins), and the SOL price comes from the Jupiter
+check inside the feed. There is no DexScreener price poll, no
+Kraken WebSocket and no CoinGecko any more.
 
 No live upstream is contacted here except the app's own WebSocket
 test server on localhost: DexScreener/Jupiter threads are never
@@ -143,13 +144,15 @@ class TestNoKraken(unittest.TestCase):
                      "_on_kraken_message"):
             self.assertFalse(hasattr(feed, name), name)
 
-    def test_start_only_spawns_dexscreener_and_jupiter(self):
+    def test_start_only_spawns_jupiter(self):
+        """Single-price source: start() spawns only the Jupiter
+        SOL check. There is no DexScreener poller any more — coin
+        ticks come only from the Helius stream."""
         feed = LiveFeed()
         feed.start()
         try:
             names = {t.name for t in feed._threads}
-            self.assertEqual(names, {"livefeed-dexscreener",
-                                     "livefeed-jupiter"})
+            self.assertEqual(names, {"livefeed-jupiter"})
         finally:
             feed.stop()
 
@@ -226,44 +229,15 @@ def _dex_pair(mint, price="0.002", dex_id="pumpfun"):
     }
 
 
-class TestDexscreenerPoll(unittest.TestCase):
-    def test_poll_ingests_pumpfun_mint(self):
-        feed = LiveFeed()
-        payload = {"pairs": [_dex_pair(MINT)]}
-        with mock.patch("tradingbot.trenches._default_get",
-                        return_value=payload):
-            feed._poll_dexscreener([MINT])
-        snap = feed.snapshot([MINT])[MINT]
-        self.assertEqual(snap["price"], 0.002)
-        self.assertEqual(snap["source"], "dexscreener")
-        self.assertEqual(snap["change_24h"], 5.0)
-
-    def test_poll_ingests_graduated_raydium_pair(self):
-        # A graduated coin has no pump.fun pair any more — its
-        # Raydium pair still prices it.
-        feed = LiveFeed()
-        payload = {"pairs": [_dex_pair(MINT, dex_id="raydium")]}
-        with mock.patch("tradingbot.trenches._default_get",
-                        return_value=payload):
-            feed._poll_dexscreener([MINT])
-        self.assertEqual(feed.snapshot([MINT])[MINT]["price"], 0.002)
-
-    def test_poll_skips_other_dexes(self):
-        feed = LiveFeed()
-        payload = {"pairs": [_dex_pair(MINT, dex_id="meteora")]}
-        with mock.patch("tradingbot.trenches._default_get",
-                        return_value=payload):
-            feed._poll_dexscreener([MINT])
-        self.assertEqual(feed.snapshot([MINT]), {})
-
-    def test_poll_failure_leaves_last_good_tick(self):
-        feed = LiveFeed()
-        feed.ingest(MINT, 0.002, "dexscreener")
-        with mock.patch("tradingbot.trenches._default_get",
-                        side_effect=Exception("down")):
-            feed._poll_dexscreener([MINT])
-        self.assertEqual(feed.snapshot([MINT])[MINT]["price"], 0.002)
-
+# NOTE (single-price source, 2026-11-25): the DexScreener 5s
+# poller (_poll_dexscreener) is deleted — coin ticks come only
+# from the Helius stream. The old TestDexscreenerPoll class
+# tested the deleted poller and is removed, not weakened: its
+# graduated-coin coverage (a graduated coin still prices, from
+# its Raydium pool) is re-proven at the stream level in
+# tests/test_helius_single_source.py, and the "failure leaves
+# the last good tick" rule is the feed's ingest validation,
+# covered by the sanitizer tests below.
 
 class TestSanitizers(unittest.TestCase):
     def test_sanitize_trenches_drops_absurd_mint(self):
@@ -377,24 +351,44 @@ class TestLoopSanitization(LiveFeedBase):
             (self.user_id, MINT))
         self.db.commit()
         prices = make_prices({"SOL": (10.0, 0.0)})
-        with mock.patch.object(routes, "fetch_prices_for_mints",
-                               return_value={MINT: 400.0}), \
-                mock.patch.object(routes, "fetch_mint_1h_changes",
-                                  return_value={}):
-            # No feed: the spiked price inflates the row value.
-            rows, _stale = _coin_rows(self.db, self.user_id, "paper", prices)
-            row = next(r for r in rows if r["coin_id"] == MINT)
-            self.assertAlmostEqual(row["value"], 1000.0 * 400.0)
-            # Feed seeded at the good price: the validated feed tick
-            # IS the price — the spiked DexScreener fetch is ignored
-            # and the row is valued at the feed's $0.002, never at
-            # the $400 spike.
-            self.feed.ingest(MINT, 0.002, "dexscreener")
-            rows, _stale = _coin_rows(self.db, self.user_id, "paper", prices,
-                              feed=self.feed)
-            row = next(r for r in rows if r["coin_id"] == MINT)
-            self.assertEqual(row["price"], 0.002)
-            self.assertAlmostEqual(row["value"], 2.0)
+        # No price anywhere for the mint: no second source exists
+        # to spike it, so the row has no price and no value (the
+        # page total still counts it at cost, via pnl).
+        rows, _stale = _coin_rows(self.db, self.user_id, "paper", prices,
+                                  feed=self.feed, app=self.app)
+        row = next(r for r in rows if r["coin_id"] == MINT)
+        self.assertIsNone(row["price"])
+        self.assertIsNone(row["value"])
+        self.assertIsNone(row["pnl"])
+        # Feed seeded at the good price, chain read spiked at $400:
+        # the validated feed tick IS the price — the absurd chain
+        # number never reaches the row.
+        self.feed.ingest(MINT, 0.002, "helius-stream")
+        with mock.patch.object(routes, "_chain_prices_for_mints",
+                               return_value={MINT: 400.0}):
+            rows, _stale = _coin_rows(self.db, self.user_id, "paper",
+                                      prices, feed=self.feed,
+                                      app=self.app)
+        row = next(r for r in rows if r["coin_id"] == MINT)
+        self.assertEqual(row["price"], 0.002)
+        self.assertAlmostEqual(row["value"], 2.0)
+        # Stale feed tick + spiked chain read: the chain price is
+        # dropped against the feed's last good tick, so the row has
+        # no price instead of $400,000. (A separate feed: ingesting
+        # an old tick after a fresh one is rejected out-of-order,
+        # so the stale tick has to be the only one stored.)
+        stale_feed = LiveFeed()
+        stale_feed.ingest(MINT, 0.002, "helius-stream",
+                          now=time.time() - 120)
+        with mock.patch.object(routes, "_chain_prices_for_mints",
+                               return_value={MINT: 400.0}):
+            rows, _stale = _coin_rows(self.db, self.user_id, "paper",
+                                      prices, feed=stale_feed,
+                                      app=self.app)
+        row = next(r for r in rows if r["coin_id"] == MINT)
+        self.assertIsNone(row["price"])
+        self.assertIsNone(row["value"])
+        self.assertIsNone(row["pnl"])
 
 
 class TestApiLive(LiveFeedBase):

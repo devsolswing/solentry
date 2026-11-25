@@ -541,7 +541,7 @@ class TestTokenSendFlow(unittest.TestCase):
 
     def test_coin_page_send_window_offers_token_send(self):
         with mock.patch.object(
-                routes, "fetch_prices_for_mints",
+                routes, "_chain_prices_for_mints",
                 return_value={MINT: 0.002}), mock.patch.object(
                 routes, "_trenches_list",
                 return_value=([{"mint": MINT, "name": "Gate",

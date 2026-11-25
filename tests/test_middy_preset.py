@@ -189,6 +189,27 @@ class _FakeFeed:
                             "source": "test", "stale": False}
         return out
 
+
+    def tick_age_seconds(self, coin_id, now=None):
+        # The loop's SOL read: a tick the feed holds is fresh
+        # (age 0.0); a coin with no tick has no age at all.
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        # The fake feed carries no history: no change figure,
+        # never a guessed one.
+        return None
+
     def sanitize_prices_data(self, data):
         return data
 
@@ -297,6 +318,16 @@ class MiddyBase(unittest.TestCase):
             (bot_id, coin)).fetchone()
 
     def _run(self, entries, feed=None, executor=None):
+        # Single-price source: a scan entry survives the loop's
+        # reprice only with a live feed tick at its price (the
+        # chain cannot price these test mints). Seed ticks for
+        # entries the feed has none for — never overwriting a tick
+        # a test set deliberately — and never a SOL tick, so tests
+        # asserting "no live SOL price" still see none.
+        if feed is None:
+            feed = _FakeFeed()
+        for _e in entries:
+            feed.ticks.setdefault(_e["mint"], _e["price_usd"])
         scan = _FakeScan(entries)
         return run_once(self.db, self.cfg, price_fetcher=_empty_prices,
                         trenches_fetcher=scan,
@@ -311,9 +342,47 @@ class MiddyBase(unittest.TestCase):
         return [a for o in outcomes for a in o["actions"]
                 if a["action"] == "sell"]
 
+    def _insert_mark(self, bot_id, mint, price, when):
+        self.db.execute(
+            "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?)",
+            (bot_id, mint, price, when))
+        # 1-hour trend baseline for the momentum gate: the loop
+        # fills change_1h_pct from the loop's own marks, so a
+        # 5-minute baseline alone leaves the 1-hour trend unknown
+        # and the gate fails closed. A mark already an hour old
+        # needs no companion.
+        try:
+            _age = (datetime.now(timezone.utc)
+                    - datetime.strptime(
+                        when, "%Y-%m-%dT%H:%M:%SZ").replace(
+                            tzinfo=timezone.utc)).total_seconds()
+        except Exception:
+            _age = 0
+        if 300 <= _age < 3600:
+            self.db.execute(
+                "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+                "recorded_at) VALUES (?, ?, ?, ?)",
+                (bot_id, mint, price, _now(-3700)))
+        self.db.commit()
+
     def _buy_twice(self, bot_id, entry, feed=None):
         """Run two scans (2-scan confirmation) and return the
         outcomes of the second scan."""
+        # The 5-minute gain now comes from the loop's own marks:
+        # seed one 330s old at the price the entry's stated
+        # change implies (the helper also seeds the 1-hour
+        # companion the momentum gate needs).
+        change = entry.get("change_5m_pct")
+        if change is not None:
+            # Encode the stated change plus 0.05pp (see Pit:
+            # an exactly-encoded gain reads a float hair under
+            # its threshold).
+            self._insert_mark(
+                bot_id, entry["mint"],
+                entry["price_usd"]
+                / (1.0 + (float(change) + 0.05) / 100.0),
+                _now(-330))
         self._run([entry], feed=feed)
         self._reset_scan(bot_id)
         return self._run([entry], feed=feed)
@@ -913,6 +982,8 @@ class TestMiddyIntegration(MiddyBase):
         self._insert_position(bot_id, MIDDY_MINT, 100.0, 0.01)
         # +15% with buys 100 vs sells 100: the 75/25 hold test
         # fails — sell all at the small take-profit level.
+        # The 5-minute change now comes from the loop's own marks.
+        self._insert_mark(bot_id, MIDDY_MINT, 0.0115 / 1.1505, _now(-330))
         entry = _middy_entry(MIDDY_MINT, 0.0115, change_5m=15.0,
                              buys=100, sells=100)
         outcomes = self._run([entry])
@@ -927,6 +998,8 @@ class TestMiddyIntegration(MiddyBase):
         # +15% with buys 300 vs sells 100 and the coin still
         # gaining: the 75/25 hold test passes — hold for the mid
         # level.
+        # The 5-minute change now comes from the loop's own marks.
+        self._insert_mark(bot_id, MIDDY_MINT, 0.0115 / 1.1505, _now(-330))
         entry = _middy_entry(MIDDY_MINT, 0.0115, change_5m=15.0,
                              buys=300, sells=100)
         outcomes = self._run([entry])
@@ -939,6 +1012,8 @@ class TestMiddyIntegration(MiddyBase):
         # +37% with buys 300 vs sells 100 and the coin still
         # gaining: at the ceiling — secure the profit immediately
         # and move on. The ceiling is absolute, no chasing higher.
+        # The 5-minute change now comes from the loop's own marks.
+        self._insert_mark(bot_id, MIDDY_MINT, 0.0137 / 1.1505, _now(-330))
         entry = _middy_entry(MIDDY_MINT, 0.0137, change_5m=15.0,
                              buys=300, sells=100)
         outcomes = self._run([entry])
@@ -953,6 +1028,8 @@ class TestMiddyIntegration(MiddyBase):
         # +30% with buys 300 vs sells 100 and the coin still
         # gaining: inside the higher window (25%-37%) with the
         # hold test passing — hold for more.
+        # The 5-minute change now comes from the loop's own marks.
+        self._insert_mark(bot_id, MIDDY_MINT, 0.013 / 1.1505, _now(-330))
         entry = _middy_entry(MIDDY_MINT, 0.013, change_5m=15.0,
                              buys=300, sells=100)
         outcomes = self._run([entry])
@@ -963,6 +1040,8 @@ class TestMiddyIntegration(MiddyBase):
         bot_id = self._insert_bot(rules=middy_ruleset())
         self._insert_position(bot_id, MIDDY_MINT, 100.0, 0.01,
                               opened_at=_now(-130))
+        # The 5-minute change now comes from the loop's own marks.
+        self._insert_mark(bot_id, MIDDY_MINT, 0.01 / 1.0025, _now(-330))
         entry = _middy_entry(MIDDY_MINT, 0.01, change_5m=0.2)
         outcomes = self._run([entry])
         sells = self._sells(outcomes)
@@ -1002,6 +1081,8 @@ class TestMiddySelectivity(MiddyBase):
         feed = _FakeFeed({"SOL": 71.50})
         strong = _middy_entry(MIDDY_MINT, 0.0106, change_5m=5.0)
         weak = _middy_entry(MIDDY_MINT2, 0.0106, change_5m=2.0)
+        self._insert_mark(bot_id, MIDDY_MINT, 0.0106 / 1.0505, _now(-330))
+        self._insert_mark(bot_id, MIDDY_MINT2, 0.0106 / 1.0205, _now(-330))
         self._run([strong, weak], feed=feed)
         self._reset_scan(bot_id)
         outcomes = self._run([strong, weak], feed=feed)
@@ -1020,6 +1101,8 @@ class TestMiddySelectivity(MiddyBase):
         spike = _middy_entry(MIDDY_MINT, 0.0106, change_5m=8.0,
                              buys=100, sells=100)
         real = _middy_entry(MIDDY_MINT2, 0.0106, change_5m=2.0)
+        self._insert_mark(bot_id, MIDDY_MINT, 0.0106 / 1.0805, _now(-330))
+        self._insert_mark(bot_id, MIDDY_MINT2, 0.0106 / 1.0205, _now(-330))
         self._run([spike, real], feed=feed)
         self._reset_scan(bot_id)
         outcomes = self._run([spike, real], feed=feed)

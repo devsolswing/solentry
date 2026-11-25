@@ -118,17 +118,20 @@ def _rpc_curves(curve_data=None, fee_bps=100):
 
 
 def _start_route_mocks(tc):
-    """Keep every live feed local (same shape as test_buy_mode)."""
+    """Keep every live feed local (same shape as test_buy_mode):
+    the Gate mint is priced by the batched Helius chain read (the
+    pull twin of the single price source — the feed holds no Gate
+    tick here, so the fail-closed quote tests can empty it), SOL
+    is $10 from the feed's SOL tick, and no logo/RPC/Metaplex or
+    Jupiter calls happen in these tests."""
     tc.mint_prices = {GATE: GATE_PRICE}
     tc.mint_identities = {GATE: {"name": "Gate", "symbol": "GATE"}}
     patches = [
         mock.patch.object(
-            routes, "fetch_prices_for_mints",
-            side_effect=lambda mints, http_get=None: {
+            routes, "_chain_prices_for_mints",
+            side_effect=lambda app, mints: {
                 m: tc.mint_prices[m] for m in mints
                 if m in tc.mint_prices}),
-        mock.patch.object(routes, "fetch_mint_1h_changes",
-                          return_value={}),
         mock.patch.object(
             routes, "fetch_mint_identities",
             side_effect=lambda mints, http_get=None: {
@@ -154,11 +157,8 @@ def _start_route_mocks(tc):
                           "source": "dexscreener", "as_of": "test",
                           "error": None}),
         mock.patch.object(
-            routes, "get_prices",
-            return_value={"prices": {"SOL": {
-                "price": 10.0, "change_24h": 5.25,
-                "change_1h": None}},
-                "source": "live", "as_of": "test"}),
+            routes, "_feed_sol_price_usd",
+            return_value=10.0),
     ]
     for p in patches:
         p.start()
@@ -328,8 +328,8 @@ class TestGateQuoteEndpoint(unittest.TestCase):
     def test_quote_fail_closed_when_no_live_price(self):
         # Curve unreadable AND the price feed empty: no quote.
         self.rpc._curves = _rpc_curves(None)
-        with mock.patch.object(routes, "fetch_prices_for_mints",
-                               lambda mints: {}):
+        with mock.patch.object(routes, "_chain_prices_for_mints",
+                               lambda app, mints: {}):
             data = self.client.get(
                 "/api/gate-quote?bundle=bundle_1m").get_json()
         self.assertFalse(data["price_available"])
@@ -347,14 +347,12 @@ class TestGateQuoteEndpoint(unittest.TestCase):
         main_app.testing = True
         main_client = main_app.test_client()
         signup(main_client, "alice")
-        with mock.patch.object(routes, "fetch_prices_for_mints",
-                               lambda mints: {MAINNET_GATE: 0.000002}), \
+        with mock.patch.object(routes, "_chain_prices_for_mints",
+                               lambda app, mints: {
+                                   MAINNET_GATE: 0.000002}), \
             mock.patch.object(
-                routes, "get_prices",
-                return_value={"prices": {"SOL": {
-                    "price": 150.0, "change_24h": 0,
-                    "change_1h": None}},
-                    "source": "live", "as_of": "test"}):
+                routes, "_feed_sol_price_usd",
+                return_value=150.0):
             data = main_client.get(
                 "/api/gate-quote?bundle=bundle_1m").get_json()
         self.assertTrue(data["price_available"])
@@ -998,8 +996,8 @@ class TestGateQuoteAllBundles(unittest.TestCase):
         popup shows "Price unavailable" and Buy stays disabled —
         never a guessed price."""
         self.rpc._curves = _rpc_curves(None)
-        with mock.patch.object(routes, "fetch_prices_for_mints",
-                               lambda mints: {}):
+        with mock.patch.object(routes, "_chain_prices_for_mints",
+                               lambda app, mints: {}):
             data = self.client.get("/api/gate-quote").get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(len(data["prices"]), 3)

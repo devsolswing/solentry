@@ -17,6 +17,20 @@ There is NO market-cap filter anywhere in this feed or in the rules
 engine: a trending coin qualifies at any market cap, tiny or huge.
 `market_cap_usd` is recorded on each entry for display only — the
 buy decision reads the 5-minute gain alone.
+
+Single-price source (2026-11-25): this feed is DISCOVERY + activity
+metadata only. The scan entries still carry the pair's priceUsd /
+priceChange figures (that is what the feed returns), but no price
+or change figure from here is ever shown or decided on: the silent
+loop rewrites every entry onto the Helius stream / chain read at
+its boundary (see silent_loop._reprice_trenches_data) and the pages
+reprice the trenches rows the same way (see routes
+_reprice_trenches_rows). The per-mint price/change fetchers
+(fetch_prices_for_mints, fetch_mint_1h_changes,
+fetch_mint_24h_changes) are deleted — prices come from the feed
+tick or one batched Helius chain read, 1h/24h changes from the
+feed's own tick history. fetch_mint_identities stays: names and
+tickers are identities, not prices.
 """
 
 from __future__ import annotations
@@ -167,41 +181,9 @@ def _entry(mint: str, pair: dict) -> dict:
     }
 
 
-def fetch_prices_for_mints(mints, http_get=None) -> dict:
-    """Current USD prices for specific mints (held positions).
-
-    Returns {mint: price_usd} for pump.fun / PumpSwap pairs — or, for
-    a coin that graduated, its Raydium pair. A mint with no usable
-    pair is left out (the caller values it at cost and says so), and
-    any fetch failure returns {}.
-    """
-    http_get = http_get or _default_get
-    wanted = [m for m in dict.fromkeys(mints or []) if m]
-    if not wanted:
-        return {}
-    try:
-        out = {}
-        for i in range(0, len(wanted), _CHUNK):
-            chunk = wanted[i:i + _CHUNK]
-            data = http_get(TOKENS_URL.format(",".join(chunk)))
-            by_mint: dict = {}
-            for pair in data.get("pairs") or []:
-                base = pair.get("baseToken") or {}
-                addr = base.get("address")
-                if addr:
-                    by_mint.setdefault(addr, []).append(pair)
-            for mint, pairs in by_mint.items():
-                best = _best_pair_incl_graduated(pairs)
-                if best is not None:
-                    out[mint] = float(best["priceUsd"])
-        return out
-    except Exception:
-        return {}
-
-
 def fetch_mint_identities(mints, http_get=None) -> dict:
     """Real name + ticker for specific mints (held positions), from
-    the same DexScreener pairs `fetch_prices_for_mints` reads: the
+    the same DexScreener pairs the trenches scan reads: the
     best (highest-liquidity) pump.fun / PumpSwap pair's base token —
     or its Raydium pair when the coin graduated.
 
@@ -236,86 +218,6 @@ def fetch_mint_identities(mints, http_get=None) -> dict:
                 if name is None and symbol is None:
                     continue
                 out[mint] = {"name": name, "symbol": symbol}
-        return out
-    except Exception:
-        return {}
-
-
-def fetch_mint_1h_changes(mints, http_get=None) -> dict:
-    """1-hour % change for specific mints (held positions), from the
-    same DexScreener pairs `fetch_prices_for_mints` reads: the best
-    (highest-liquidity) pump.fun / PumpSwap pair's priceChange.h1 —
-    or its Raydium pair when the coin graduated.
-
-    Returns {mint: change_1h_pct}. A mint with no usable pair, or a
-    pair with no 1h figure, is left OUT (the caller shows "—") — a
-    change is never guessed — and any fetch failure returns {}.
-    """
-    http_get = http_get or _default_get
-    wanted = [m for m in dict.fromkeys(mints or []) if m]
-    if not wanted:
-        return {}
-    try:
-        out = {}
-        for i in range(0, len(wanted), _CHUNK):
-            chunk = wanted[i:i + _CHUNK]
-            data = http_get(TOKENS_URL.format(",".join(chunk)))
-            by_mint: dict = {}
-            for pair in data.get("pairs") or []:
-                base = pair.get("baseToken") or {}
-                addr = base.get("address")
-                if addr:
-                    by_mint.setdefault(addr, []).append(pair)
-            for mint, pairs in by_mint.items():
-                best = _best_pair_incl_graduated(pairs)
-                if best is None:
-                    continue
-                change = (best.get("priceChange") or {}).get("h1")
-                if change is None:
-                    continue
-                try:
-                    out[mint] = float(change)
-                except (TypeError, ValueError):
-                    continue
-        return out
-    except Exception:
-        return {}
-
-
-def fetch_mint_24h_changes(mints, http_get=None) -> dict:
-    """24-hour % change for specific mints (signals bots), from the
-    same DexScreener pairs `fetch_prices_for_mints` reads: the best
-    (highest-liquidity) pump.fun / PumpSwap pair's priceChange.h24
-    — or its Raydium pair when the coin graduated. Same contract
-    as `fetch_mint_1h_changes`: a mint with no usable pair, or a
-    pair with no 24h figure, is left OUT — a change is never
-    guessed — and any fetch failure returns {}."""
-    http_get = http_get or _default_get
-    wanted = [m for m in dict.fromkeys(mints or []) if m]
-    if not wanted:
-        return {}
-    try:
-        out = {}
-        for i in range(0, len(wanted), _CHUNK):
-            chunk = wanted[i:i + _CHUNK]
-            data = http_get(TOKENS_URL.format(",".join(chunk)))
-            by_mint: dict = {}
-            for pair in data.get("pairs") or []:
-                base = pair.get("baseToken") or {}
-                addr = base.get("address")
-                if addr:
-                    by_mint.setdefault(addr, []).append(pair)
-            for mint, pairs in by_mint.items():
-                best = _best_pair_incl_graduated(pairs)
-                if best is None:
-                    continue
-                change = (best.get("priceChange") or {}).get("h24")
-                if change is None:
-                    continue
-                try:
-                    out[mint] = float(change)
-                except (TypeError, ValueError):
-                    continue
         return out
     except Exception:
         return {}

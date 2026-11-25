@@ -73,6 +73,29 @@ class FakeFeed:
                             "as_of": "test"}
         return out
 
+    def live_price(self, coin_id, now=None):
+        """The last recorded point, or None — the single source's
+        fresh-tick read, matching LiveFeed.live_price."""
+        hist = self._history.get(coin_id)
+        return hist[-1][1] if hist else None
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        """% change over the window from the recorded history,
+        matching LiveFeed.change_over; None when the history does
+        not reach back far enough."""
+        hist = self._history.get(coin_id) or []
+        if len(hist) < 2:
+            return None
+        now = now if now is not None else hist[-1][0]
+        base = None
+        for ts, price in hist:
+            if now - ts >= window_seconds:
+                base = price
+                break
+        if base is None or base <= 0:
+            return None
+        return (hist[-1][1] - base) / base * 100.0
+
     def would_accept(self, coin_id, price):
         return True
 
@@ -132,10 +155,17 @@ class WiringBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
-        self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({"SOL": (10.0, 5.25, 2.5)}))
-        self.prices_patch.start()
+        # Single price source: SOL from the feed's SOL tick
+        # ($10.00); mint prices from one batched Helius chain read
+        # (patched here, empty by default); 1h changes from the
+        # feed's own tick history. The old get_prices /
+        # fetch_prices_for_mints / fetch_mint_1h_changes mocks are
+        # gone with the second source.
+        self.feed = self.app.config["LIVE_FEED"]
+        self.feed.ingest("SOL", 10.0, "jupiter")
+        self.sol_patch = mock.patch.object(
+            routes, "_feed_sol_price_usd", return_value=10.0)
+        self.sol_patch.start()
         self.trenches_patch = mock.patch.object(
             routes, "fetch_trenches_scan",
             return_value={"candidates": [], "prices": {},
@@ -143,11 +173,9 @@ class WiringBase(unittest.TestCase):
                           "error": None})
         self.trenches_patch.start()
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints", return_value={})
+            routes, "_chain_prices_for_mints", return_value={})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes", return_value={})
-        self.mint_1h_patch.start()
+        self.feed.change_over = lambda mint, window, now=None: None
         self.mint_id_patch = mock.patch.object(
             routes, "fetch_mint_identities", return_value={})
         self.mint_id_patch.start()
@@ -189,10 +217,9 @@ class WiringBase(unittest.TestCase):
         self.hh_meta_patch.stop()
         self.meta_patch.stop()
         self.mint_id_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.trenches_patch.stop()
-        self.prices_patch.stop()
+        self.sol_patch.stop()
         home_holdings.clear_image_cache()
         self.tmp.cleanup()
 
@@ -308,7 +335,7 @@ class TestGateReconciliation(WiringBase):
                 return_value={GATE_MINT: {"name": "Gate",
                                           "symbol": "GATE"}}), \
                 mock.patch.object(
-                    routes, "fetch_prices_for_mints",
+                    routes, "_chain_prices_for_mints",
                     return_value={GATE_MINT: 0.00001}), \
                 mock.patch.object(routes, "rpc_client_for_url",
                                 lambda cfg, url: FakeRpc(url)):
@@ -401,11 +428,11 @@ class TestGateReconciliation(WiringBase):
                     routes, "fetch_mint_identities",
                     return_value={GATE_MINT: {"name": "Gate",
                                               "symbol": "GATE"}}), \
-                    mock.patch.object(
-                        routes, "fetch_prices_for_mints",
-                        return_value={GATE_MINT: 0.00001}), \
                     mock.patch.object(routes, "rpc_client_for_url",
                                       lambda cfg, url: FakeRpc(url)):
+                # The price comes from the FakeFeed's own ticks
+                # (live_price 0.00002) — the single source, no
+                # second-source price patch any more.
                 resp = self.client.get("/wallet")
         finally:
             for p in patches:

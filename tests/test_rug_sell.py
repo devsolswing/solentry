@@ -56,6 +56,46 @@ def _empty_prices():
     return {"prices": {}, "source": "snapshot", "as_of": "test"}
 
 
+
+class _FakeFeed:
+    """Live-feed stand-in: snapshot() returns the tick per mint."""
+
+    def __init__(self, ticks=None):
+        self.ticks = ticks or {}
+
+    def snapshot(self, coin_ids=None):
+        out = {}
+        for cid in (coin_ids or list(self.ticks)):
+            if cid in self.ticks:
+                out[cid] = {"coin_id": cid, "price": self.ticks[cid],
+                            "source": "test", "stale": False}
+        return out
+
+    def tick_age_seconds(self, coin_id, now=None):
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        return None
+
+    def sanitize_prices_data(self, data):
+        return data
+
+    def sanitize_trenches(self, data):
+        return data
+
+    def set_tick_listener(self, callback):
+        self._listener = callback
+
 class TestRugValidation(unittest.TestCase):
     def test_trenches_preset_carries_rug_sell(self):
         rules = trenches_ruleset()
@@ -253,6 +293,13 @@ class RugEngineBase(unittest.TestCase):
             (self.user_id, coin, amount, avg_price))
         self.db.commit()
 
+    def _insert_mark(self, bot_id, mint, price, when):
+        self.db.execute(
+            "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?)",
+            (bot_id, mint, price, when))
+        self.db.commit()
+
     def _reset_scan(self, bot_id):
         self.db.execute("UPDATE bots SET last_scan_at = '' WHERE id = ?",
                         (bot_id,))
@@ -272,9 +319,15 @@ class RugEngineBase(unittest.TestCase):
         return self.db.execute(q, args).fetchall()
 
     def _run(self, entries):
+        # Single-price source: a scan entry survives the loop's
+        # reprice only with a live feed tick at its price. Seed
+        # ticks for entries the feed has none for.
+        feed = _FakeFeed()
+        for _e in entries:
+            feed.ticks.setdefault(_e["mint"], _e["price_usd"])
         scan = _FakeScan(entries)
         return run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                        trenches_fetcher=scan)
+                        trenches_fetcher=scan, feed=feed)
 
 
 class TestRugEngine(RugEngineBase):
@@ -283,6 +336,9 @@ class TestRugEngine(RugEngineBase):
         trigger fires, not the trailing stop."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
+        # The -30% 5-minute drop now comes from the loop's own
+        # marks: 0.0095 / 0.70 recorded 330s ago.
+        self._insert_mark(bot_id, "MINTA", 0.0095 / 0.70, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.0095, change_5m=-30.0)])
         sell = [a for a in outcomes[0]["actions"]
                 if a["action"] == "sell"]
@@ -295,6 +351,9 @@ class TestRugEngine(RugEngineBase):
     def test_no_rug_on_small_5m_drop(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
+        # The -10% 5-minute drop now comes from the loop's own
+        # marks: 0.0095 / 0.90 recorded 330s ago.
+        self._insert_mark(bot_id, "MINTA", 0.0095 / 0.90, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.0095, change_5m=-10.0)])
         self.assertEqual(outcomes[0]["actions"], [])
         self.assertIsNotNone(self._position(bot_id, "MINTA"))
@@ -318,6 +377,9 @@ class TestRugEngine(RugEngineBase):
         bot_id = self._insert_bot(rules=trenches_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01,
                               last_price=0.0105, last_price_at=_now())
+        # The -2% 5-minute drift now comes from the loop's own
+        # marks: 0.0100 / 0.98 recorded 330s ago.
+        self._insert_mark(bot_id, "MINTA", 0.0100 / 0.98, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.0100, change_5m=-2.0)])
         self.assertEqual(outcomes[0]["actions"], [])
         pos = self._position(bot_id, "MINTA")
@@ -331,6 +393,9 @@ class TestRugEngine(RugEngineBase):
         self._insert_position(bot_id, "MINTA", 100, 0.01, peak=0.0102,
                               last_price=0.012,
                               last_price_at=_now(-600))
+        # Flat in 5 minutes from the loop's own marks (0.01 at
+        # -330s vs 0.010 now).
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.010, change_5m=0.0)])
         self.assertEqual(outcomes[0]["actions"], [])
         self.assertIsNotNone(self._position(bot_id, "MINTA"))
@@ -340,6 +405,9 @@ class TestRugEngine(RugEngineBase):
         reason must be the rug sell, which is checked first."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01, peak=0.011)
+        # The -40% 5-minute drop now comes from the loop's own
+        # marks: 0.01 recorded 330s ago vs 0.006.
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.006, change_5m=-40.0)])
         sell = [a for a in outcomes[0]["actions"]
                 if a["action"] == "sell"]
@@ -350,6 +418,9 @@ class TestRugEngine(RugEngineBase):
         """The preset carries the rug trigger on by default."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
+        # The -30% 5-minute drop now comes from the loop's own
+        # marks: 0.0095 / 0.70 recorded 330s ago.
+        self._insert_mark(bot_id, "MINTA", 0.0095 / 0.70, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.0095, change_5m=-30.0)])
         self.assertEqual(len([a for a in outcomes[0]["actions"]
                               if a["action"] == "sell"]), 1)
@@ -363,6 +434,9 @@ class TestRugEngine(RugEngineBase):
         del rules["rug_sell"]
         bot_id = self._insert_bot(rules=rules)
         self._insert_position(bot_id, "MINTA", 100, 0.01)
+        # Even a -40% 5-minute drop (from the loop's own marks)
+        # must not rug-sell with no rug rule.
+        self._insert_mark(bot_id, "MINTA", 0.0095 / 0.60, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.0095, change_5m=-40.0)])
         self.assertEqual(outcomes[0]["actions"], [])
         self.assertIsNotNone(self._position(bot_id, "MINTA"))
@@ -371,6 +445,13 @@ class TestRugEngine(RugEngineBase):
         """A buy opens the position with last_price set, so the rug
         check has a baseline on the next scan."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
+        # The Trenches buy's +6% 5-minute gain now comes from the
+        # loop's own marks: 0.01 / 1.06 recorded 330s ago.
+        self.db.execute(
+            "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?)",
+            (bot_id, "MINTA", 0.01 / 1.06, _now(-330)))
+        self.db.commit()
         outcomes = self._run([_entry("MINTA", 0.01, change_5m=6.0)])
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         pos = self._position(bot_id, "MINTA")

@@ -183,6 +183,27 @@ class _FakeFeed:
                             "source": "test", "stale": False}
         return out
 
+
+    def tick_age_seconds(self, coin_id, now=None):
+        # The loop's SOL read: a tick the feed holds is fresh
+        # (age 0.0); a coin with no tick has no age at all.
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        # The fake feed carries no history: no change figure,
+        # never a guessed one.
+        return None
+
     def sanitize_prices_data(self, data):
         return data
 
@@ -271,6 +292,23 @@ class GnatBase(unittest.TestCase):
             "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
             "recorded_at) VALUES (?, ?, ?, ?)",
             (bot_id, mint, price, when))
+        # 1-hour trend baseline for the momentum gate: the loop
+        # fills change_1h_pct from the loop's own marks, so a
+        # 5-minute baseline alone leaves the 1-hour trend unknown
+        # and the gate fails closed. A mark already an hour old
+        # needs no companion.
+        try:
+            _age = (datetime.now(timezone.utc)
+                    - datetime.strptime(
+                        when, "%Y-%m-%dT%H:%M:%SZ").replace(
+                            tzinfo=timezone.utc)).total_seconds()
+        except Exception:
+            _age = 0
+        if 300 <= _age < 3600:
+            self.db.execute(
+                "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+                "recorded_at) VALUES (?, ?, ?, ?)",
+                (bot_id, mint, price, _now(-3700)))
         self.db.commit()
 
     def _reset_scan(self, bot_id):
@@ -284,6 +322,16 @@ class GnatBase(unittest.TestCase):
             (bot_id, coin)).fetchone()
 
     def _run(self, entries, feed=None, executor=None):
+        # Single-price source: a scan entry survives the loop's
+        # reprice only with a live feed tick at its price (the
+        # chain cannot price these test mints). Seed ticks for
+        # entries the feed has none for — never overwriting a tick
+        # a test set deliberately — and never a SOL tick, so tests
+        # asserting "no live SOL price" still see none.
+        if feed is None:
+            feed = _FakeFeed()
+        for _e in entries:
+            feed.ticks.setdefault(_e["mint"], _e["price_usd"])
         scan = _FakeScan(entries)
         return run_once(self.db, self.cfg, price_fetcher=_empty_prices,
                         trenches_fetcher=scan,
@@ -301,7 +349,7 @@ class GnatBase(unittest.TestCase):
     def _buy_twice(self, bot_id, entry, feed=None):
         """Run two scans (2-scan confirmation) and return the
         outcomes of the second scan."""
-        self._insert_mark(bot_id, entry["mint"], 0.01, _now(-200))
+        self._insert_mark(bot_id, entry["mint"], 0.01, _now(-330))
         self._run([entry], feed=feed)
         self._reset_scan(bot_id)
         return self._run([entry], feed=feed)
@@ -675,7 +723,7 @@ class TestGnatLoopBuys(GnatBase):
 
     def test_first_scan_only_confirms_no_buy(self):
         bot_id = self._insert_bot(rules=gnat_ruleset())
-        self._insert_mark(bot_id, GNAT_MINT, 0.01, _now(-200))
+        self._insert_mark(bot_id, GNAT_MINT, 0.01, _now(-330))
         outcomes = self._run([_gnat_entry(GNAT_MINT, 0.0106)])
         self.assertEqual(self._buys(outcomes), [])
         self.assertIsNone(self._position(bot_id, GNAT_MINT))
@@ -806,6 +854,9 @@ class TestGnatLoopExits(GnatBase):
     def test_momentum_exhaustion_exits_the_rest(self):
         bot_id = self._insert_bot(rules=gnat_ruleset())
         self._held(bot_id, peak=0.013)
+        # The -6% 5-minute change now comes from the loop's own
+        # marks: 0.0125 / 0.94 recorded 330s ago.
+        self._insert_mark(bot_id, GNAT_MINT, 0.0125 / 0.94, _now(-330))
         outcomes = self._run([
             _gnat_entry(GNAT_MINT, 0.0125, change_5m=-6.0)])
         sells = self._sells(outcomes)

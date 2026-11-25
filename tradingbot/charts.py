@@ -33,10 +33,11 @@ import time
 import urllib.parse
 import urllib.request
 
-from .solana import is_valid_address
+from .solana import is_valid_address, rpc_client_for_config
+from .streaming import SOL_MAX_AGE_SECONDS, chain_price_usd_for_mints
 from .trenches import (DEXSCREENER_BASE, TOKENS_URL, TRENCH_DEX_IDS,
                        _best_pair_incl_graduated, _default_get,
-                       fetch_mint_identities, fetch_prices_for_mints)
+                       fetch_mint_identities)
 
 # Range key -> (label shown on the button, days of data). 24hr and 1day
 # are the same window (1 day of data), shown under both labels because
@@ -76,21 +77,95 @@ SEARCH_CACHE_TTL_SECONDS = 30
 _search_cache: dict = {}
 
 
-def _search_by_address(mint: str, http_get=None) -> dict:
+def _feed_sol_price_usd(feed) -> float | None:
+    """The ONE SOL price in USD, or None: the live feed's SOL tick
+    (Jupiter-fed) only. A SOL tick is usable up to
+    SOL_MAX_AGE_SECONDS (90s, the stream's own SOL bound): the feed
+    refreshes SOL every 60s, so the 30s fresh-tick cut would leave
+    the SOL number empty about half the time. No other source."""
+    if feed is None:
+        return None
+    try:
+        age = feed.tick_age_seconds("SOL")
+    except Exception:
+        return None
+    if age is None or age > SOL_MAX_AGE_SECONDS:
+        return None
+    try:
+        tick = feed.snapshot(["SOL"]).get("SOL")
+    except Exception:
+        return None
+    if tick is None:
+        return None
+    try:
+        price = float(tick["price"])
+    except (TypeError, ValueError):
+        return None
+    return price if price > 0 else None
+
+
+def _chain_prices_for_mints(mints, feed=None, cfg=None) -> dict:
+    """{mint: price_usd} from the single source: the feed's fresh
+    ticks first; any mint without one is priced by one batched
+    Helius RPC read of its bonding curve (graduated -> Raydium
+    pool, the same lookup the stream uses). Mints no source can
+    price are absent — never a DexScreener price, never guessed.
+    No feed SOL tick (or no cfg to build the RPC client) means {}
+    for the chain half — no USD conversion without a live SOL
+    rate. Never raises."""
+    wanted = [m for m in dict.fromkeys(mints or []) if m]
+    if not wanted:
+        return {}
+    out: dict = {}
+    missing = []
+    if feed is not None:
+        for mint in wanted:
+            try:
+                price = feed.live_price(mint)
+            except Exception:
+                price = None
+            if price is not None and price > 0:
+                out[mint] = price
+            else:
+                missing.append(mint)
+    else:
+        missing = list(wanted)
+    if not missing or cfg is None:
+        return out
+    sol_price = _feed_sol_price_usd(feed)
+    if sol_price is None:
+        return out
+    try:
+        client = rpc_client_for_config(cfg)
+    except Exception:
+        return out
+    try:
+        out.update(chain_price_usd_for_mints(
+            client, missing, sol_price) or {})
+    except Exception:
+        pass
+    return out
+
+
+def _search_by_address(mint: str, http_get=None, feed=None,
+                       cfg=None) -> dict:
     """A pasted token address resolves directly, not as a name
-    search: the trenches feed (DexScreener token pairs) gives the
-    price and the real name / ticker when it has them, and the
-    on-chain Metaplex metadata names a bonding-curve mint the feed
-    has never seen (Gate, AuditTest). A mint nobody can name reads
-    "Unknown coin" — the address is the `coin_id`, never shown as
-    the name, and the old "Pump.fun token Eu4u…8uLE" fallback label
-    is gone. No price when nobody has priced it yet — the real buy
-    is priced from the bonding curve, not the feed; the executor
-    refuses plainly at buy time when there is no devnet bonding
-    curve. Nothing is ever fabricated: no name, no price, and no
-    coin the address does not name. One lookup per query is cached
-    30 seconds, keyed by the exact address (base58 is
-    case-sensitive, so the key is never lowercased)."""
+    search: the discovery index gives the real name / ticker when
+    it has them, and the on-chain Metaplex metadata names a
+    bonding-curve mint the index has never seen (Gate, AuditTest).
+    The PRICE comes from the single source only — the feed's fresh
+    tick, else one Helius RPC read of the bonding curve — or it is
+    None ("no data" on the page), never a DexScreener price. A
+    mint nobody can name reads "Unknown coin" — the address is the
+    `coin_id`, never shown as the name, and the old "Pump.fun token
+    Eu4u…8uLE" fallback label is gone. No price when nobody has
+    priced it yet — the real buy is priced from the bonding curve,
+    not the feed; the executor refuses plainly at buy time when
+    there is no devnet bonding curve. Nothing is ever fabricated:
+    no name, no price, and no coin the address does not name. One
+    lookup per query is cached 30 seconds, keyed by the exact
+    address (base58 is case-sensitive, so the key is never
+    lowercased)."""
     cached = _search_cache.get(mint)
     now = time.time()
     if cached and now - cached["at"] < SEARCH_CACHE_TTL_SECONDS:
@@ -100,10 +175,10 @@ def _search_by_address(mint: str, http_get=None) -> dict:
     name = None
     symbol = None
     try:
-        prices = fetch_prices_for_mints([mint], http_get=http_get)
-        price = prices.get(mint)
+        price = _chain_prices_for_mints(
+            [mint], feed=feed, cfg=cfg).get(mint)
     except Exception:
-        pass
+        price = None
     try:
         identities = fetch_mint_identities([mint], http_get=http_get)
         ident = identities.get(mint) or {}
@@ -133,7 +208,8 @@ def _search_by_address(mint: str, http_get=None) -> dict:
     return {"results": [dict(result)], "error": None, "source": "live"}
 
 
-def search_coins(query: str, http_get=None) -> dict:
+def search_coins(query: str, http_get=None, feed=None,
+                 cfg=None) -> dict:
     """Live coin search: {"results", "error", "source"}.
 
     Pump.fun coins only. `query` is a name, symbol, or mint fragment
@@ -144,7 +220,11 @@ def search_coins(query: str, http_get=None) -> dict:
     pairs on pump.fun / PumpSwap ONLY (the same dex filter the
     trenches feed uses) — best liquidity first, at most 8 — each
     with the coin's real name + ticker and its pump.fun mint
-    address. DexScreener's search does NOT filter by DEX, so a
+    address. That search is DISCOVERY only: the price on each
+    result comes from the single source — the feed's fresh tick,
+    else one batched Helius RPC read of the bonding curves — and a
+    mint neither can price is dropped, never shown at a DexScreener
+    price. DexScreener's search does NOT filter by DEX, so a
     query like "BTC" also matches wrapped majors (wBTC on Raydium
     / Orca, …): those pairs are dropped here, never shown. A
     memecoin that happens to share a major's ticker is still a
@@ -163,7 +243,8 @@ def search_coins(query: str, http_get=None) -> dict:
     if is_valid_address(q):
         # A pasted token address is not a name search: resolve the
         # mint directly.
-        return _search_by_address(q, http_get=http_get)
+        return _search_by_address(q, http_get=http_get, feed=feed,
+                                  cfg=cfg)
     key = q.lower()
     now = time.time()
     cached = _search_cache.get(key)
@@ -192,13 +273,6 @@ def search_coins(query: str, http_get=None) -> dict:
             mint = base.get("address")
             if not mint:
                 continue
-            price = pair.get("priceUsd")
-            try:
-                price = float(price) if price is not None else None
-            except (TypeError, ValueError):
-                price = None
-            if price is None:
-                continue
             liq = (pair.get("liquidity") or {}).get("usd") or 0.0
             try:
                 liq = float(liq)
@@ -212,10 +286,21 @@ def search_coins(query: str, http_get=None) -> dict:
                     "name": base.get("name") or base.get("symbol")
                     or "Unknown coin",
                     "symbol": sym,
-                    "price_usd": price, "change_24h": None,
+                    "price_usd": None, "change_24h": None,
                     "is_mint": True})
         ranked = sorted(by_mint.values(), key=lambda item: -item[0])
+        # Price from the single source only (feed tick, else one
+        # batched Helius chain read) — never the DexScreener
+        # priceUsd on the pair. A mint neither can price is
+        # dropped, never guessed.
+        chain_prices = _chain_prices_for_mints(
+            [entry["coin_id"] for _liq, entry in ranked],
+            feed=feed, cfg=cfg)
         for _liq, entry in ranked:
+            price = chain_prices.get(entry["coin_id"])
+            if price is None:
+                continue
+            entry["price_usd"] = price
             results.append(entry)
             if len(results) >= 8:
                 break

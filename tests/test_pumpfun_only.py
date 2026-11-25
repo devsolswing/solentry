@@ -74,15 +74,15 @@ class PumpfunOnlyBase(unittest.TestCase):
             lambda cfg, url: FakeRpc(url))
         self.rpc_patch.start()
         self.prices_patch = mock.patch.object(
-            routes, "get_prices", return_value=make_prices())
+            routes, "_feed_sol_price_usd", return_value=100.0)
         self.prices_patch.start()
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={MINT: 0.002, OTHER_MINT: 0.001})
         self.mint_prices_patch.start()
-        self.changes_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes", return_value={})
-        self.changes_patch.start()
+        # The 1h change comes from the feed's own tick history
+        # (fetch_mint_1h_changes is gone): no history here, so
+        # change_1h is None — no patch needed.
         self.identities_patch = mock.patch.object(
             routes, "fetch_mint_identities", return_value={})
         self.identities_patch.start()
@@ -109,7 +109,6 @@ class PumpfunOnlyBase(unittest.TestCase):
         self.enrich_patch.stop()
         self.meta_patch.stop()
         self.identities_patch.stop()
-        self.changes_patch.stop()
         self.mint_prices_patch.stop()
         self.prices_patch.stop()
         self.rpc_patch.stop()

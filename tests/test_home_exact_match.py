@@ -138,17 +138,11 @@ class TestHoldingsRowExact(HomeMockupBase):
         self._choose_mode("paper")
         self._buy_mint()
         # The row's SOL value needs a live SOL price: the base
-        # harness prices are a snapshot, which _dashboard_data does
-        # not use for the SOL price (feed tick first, REST when
-        # live). With SOL live at the mocked $10, 990.0990 GATE
-        # at $0.01 ($9.90099) is 0.99010 SOL.
-        live_prices = {"prices": {"SOL": {"price": 10.0,
-                                          "change_24h": 5.25,
-                                          "change_1h": 2.5}},
-                       "source": "live", "as_of": "test"}
-        with mock.patch.object(routes, "get_prices",
-                              return_value=live_prices):
-            html = self._html("/wallet")
+        # harness supplies it — the feed's SOL tick at $10, with
+        # _feed_sol_price_usd patched to the same $10 — so
+        # 990.0990 GATE at $0.01 ($9.90099) is 0.99010 SOL. (The
+        # old routes.get_prices seam is gone in the Helius build.)
+        html = self._html("/wallet")
         # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
         # (removed 2026-11-12), leaves 990.0990 GATE worth $9.90 (1% buy haircut);
         # the SOL value is 0.99010 SOL; 1h +2.50%. NO unit price on
@@ -367,12 +361,13 @@ class TestSparklinesEndpoint(HomeMockupBase):
 
 
 class TestSparklinePoll(unittest.TestCase):
-    """live.js refreshes the holdings sparklines every 60 seconds."""
+    """live.js refreshes the holdings sparklines every 5 seconds
+    (the held-coins cadence: James, 2026-11-25)."""
 
-    def test_live_js_polls_sparklines_every_minute(self):
+    def test_live_js_polls_sparklines_every_five_seconds(self):
         with open("tradingbot/static/live.js", encoding="utf-8") as f:
             js = f.read()
-        self.assertIn("SPARK_POLL_MS = 60000", js)
+        self.assertIn("SPARK_POLL_MS = 5000", js)
         self.assertIn("fetch('/api/sparklines?coins='", js)
         self.assertIn("setInterval(fetchSparklines, SPARK_POLL_MS)", js)
         self.assertIn("data-sparkline-coin", js)

@@ -140,6 +140,27 @@ class _FakeFeed:
                             "source": "test", "stale": False}
         return out
 
+
+    def tick_age_seconds(self, coin_id, now=None):
+        # The loop's SOL read: a tick the feed holds is fresh
+        # (age 0.0); a coin with no tick has no age at all.
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        # The fake feed carries no history: no change figure,
+        # never a guessed one.
+        return None
+
     def sanitize_prices_data(self, data):
         return data
 
@@ -232,6 +253,23 @@ class TuningBase(unittest.TestCase):
             "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
             "recorded_at) VALUES (?, ?, ?, ?)",
             (bot_id, mint, price, when))
+        # 1-hour trend baseline for the momentum gate: the loop
+        # fills change_1h_pct from the loop's own marks, so a
+        # 5-minute baseline alone leaves the 1-hour trend unknown
+        # and the gate fails closed. A mark already an hour old
+        # needs no companion.
+        try:
+            _age = (datetime.now(timezone.utc)
+                    - datetime.strptime(
+                        when, "%Y-%m-%dT%H:%M:%SZ").replace(
+                            tzinfo=timezone.utc)).total_seconds()
+        except Exception:
+            _age = 0
+        if 300 <= _age < 3600:
+            self.db.execute(
+                "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+                "recorded_at) VALUES (?, ?, ?, ?)",
+                (bot_id, mint, price, _now(-3700)))
         self.db.commit()
 
     def _reset_scan(self, bot_id):
@@ -245,6 +283,16 @@ class TuningBase(unittest.TestCase):
             (bot_id, coin)).fetchone()
 
     def _run(self, entries, feed=None, executor=None):
+        # Single-price source: a scan entry survives the loop's
+        # reprice only with a live feed tick at its price (the
+        # chain cannot price these test mints). Seed ticks for
+        # entries the feed has none for — never overwriting a tick
+        # a test set deliberately — and never a SOL tick, so tests
+        # asserting "no live SOL price" still see none.
+        if feed is None:
+            feed = _FakeFeed()
+        for _e in entries:
+            feed.ticks.setdefault(_e["mint"], _e["price_usd"])
         scan = _FakeScan(entries)
         return run_once(self.db, self.cfg, price_fetcher=_empty_prices,
                         trenches_fetcher=scan,
@@ -307,7 +355,7 @@ class TestMomentumGate(TuningBase):
         import time
 
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         entry = {"mint": MINTA, "price_usd": 0.0106,
                  "devnet_watchlist": True}
         ok, _why = passes_momentum_gate(entry, self.db, bot_id,
@@ -381,7 +429,7 @@ class TestPaperHaircut(TuningBase):
 class TestTwoScanConfirmation(TuningBase):
     def test_first_scan_records_no_buy(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         outcomes = self._run([_entry(MINTA, 0.0106)])
         self.assertEqual(self._buys(outcomes), [])
         self.assertIsNone(self._position(bot_id, MINTA))
@@ -392,7 +440,7 @@ class TestTwoScanConfirmation(TuningBase):
 
     def test_second_scan_buys(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
@@ -401,7 +449,7 @@ class TestTwoScanConfirmation(TuningBase):
 
     def test_faded_signal_never_buys(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         # Second scan: the gain faded below the 5% threshold.
@@ -413,7 +461,7 @@ class TestTwoScanConfirmation(TuningBase):
 class TestScamGates(TuningBase):
     def test_clean_coin_buys_after_confirmation(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
@@ -423,7 +471,7 @@ class TestScamGates(TuningBase):
         # Top-10 owns 30% — over the Scanner 21% bar.
         self.fake_rpc.totals[MINTA] = 300_000_000
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
@@ -434,7 +482,7 @@ class TestScamGates(TuningBase):
         # Top-10 owns 15%: under Scanner's 21% bar, over Clyde's 12%.
         self.fake_rpc.totals[MINTA] = 150_000_000
         bot_id = self._insert_bot(rules=clyde_ruleset(), name="Clyde")
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
@@ -443,7 +491,7 @@ class TestScamGates(TuningBase):
     def test_unserved_mint_rejected_fail_closed(self):
         del self.fake_rpc.totals[MINTA]
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
@@ -452,7 +500,7 @@ class TestScamGates(TuningBase):
     def test_mint_authority_enabled_rejected(self):
         self.fake_rpc.authorities[MINTA] = (True, False)
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
@@ -461,7 +509,7 @@ class TestScamGates(TuningBase):
     def test_freeze_authority_enabled_rejected(self):
         self.fake_rpc.authorities[MINTA] = (False, True)
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
@@ -472,7 +520,7 @@ class TestScamGates(TuningBase):
                         (MINTA,))
         self.db.commit()
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         with mock.patch.object(sl, "ensure_coin_meta",
                               return_value=None):
             self._run([_entry(MINTA, 0.0106)])
@@ -563,7 +611,7 @@ class TestMaxHoldAndCooldown(TuningBase):
         self.assertEqual(len(self._sells(outcomes)), 1)
         # Fresh signal right after the loss: the coin is NOT
         # re-bought while the cooldown runs.
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._reset_scan(bot_id)
         outcomes = self._run([_entry(MINTA, 0.0106)])
         self.assertEqual(self._buys(outcomes), [])
@@ -596,7 +644,7 @@ class TestLossPrevention(TuningBase):
         self.db.commit()
 
     def _signal_run(self, bot_id):
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         return self._run([_entry(MINTA, 0.0106)])
@@ -687,7 +735,9 @@ class TestSignalDeathAndLogging(TuningBase):
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_position(bot_id, MINTA, 100, 0.01)
         # -5%: above the 7% stop, so the stop is not what exits —
-        # the dead signal is.
+        # the dead signal is. The -5% 5-minute gain now comes from
+        # the loop's own marks: 0.01 recorded 330s ago vs 0.0095.
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
         dead = _entry(MINTA, 0.0095, change_5m=-5.0, change_1h=-2.0,
                       volume_m5=500, volume_h1=12000, buys=10, sells=40)
         outcomes = self._run([dead])
@@ -707,7 +757,12 @@ class TestSignalDeathAndLogging(TuningBase):
 
     def test_signal_features_and_outcome_logged(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, MINTA, 0.01, _now(-200))
+        self._insert_mark(bot_id, MINTA, 0.01, _now(-330))
+        # The logged 1-hour trend (+25%) now comes from the loop's
+        # own marks too: a mark 3650s old at 0.00848 reads +25%
+        # against the 0.0106 entry (newer than the -3700 companion
+        # the helper seeded, so it wins the 1-hour window).
+        self._insert_mark(bot_id, MINTA, 0.00848, _now(-3650))
         self._run([_entry(MINTA, 0.0106)])
         self._reset_scan(bot_id)
         self._run([_entry(MINTA, 0.0106)])
@@ -910,32 +965,31 @@ class TestSignalsKindGuards(TuningBase):
         # A builderBot-created signals bot (long window): the
         # 2-scan confirmation + scam gates still apply, even though
         # the four-part momentum gate has no data for its kind.
-        # Signals bots price their mints from the trenches feed
-        # (fetch_prices_for_mints / fetch_mint_24h_changes) — mock
-        # it so the test never hits live DexScreener.
+        # Signals bots price from the single source now: a live
+        # feed tick at the signal price, and the 24-hour change
+        # from the loop's own marks — a mark 24.5 hours old at
+        # 5% below the tick reads ~+5%, above the +2% buy line.
         bot_id = self._signals_bot([SIGMINT])
-        with mock.patch.object(
-                sl, "fetch_prices_for_mints",
-                return_value={SIGMINT: 0.0106}), mock.patch.object(
-                sl, "fetch_mint_24h_changes",
-                return_value={SIGMINT: 6.0}):
-            outcomes = self._run([_entry(SIGMINT, 0.0106)])
-            self.assertEqual(self._buys(outcomes), [])
-            self._reset_scan(bot_id)
-            outcomes = self._run([_entry(SIGMINT, 0.0106)])
+        self._insert_mark(bot_id, SIGMINT, 0.0106 / 1.05,
+                          _now(-24 * 3600 - 1800))
+        feed = _FakeFeed({SIGMINT: 0.0106})
+        outcomes = self._run([_entry(SIGMINT, 0.0106)], feed=feed)
+        self.assertEqual(self._buys(outcomes), [])
+        self._reset_scan(bot_id)
+        outcomes = self._run([_entry(SIGMINT, 0.0106)], feed=feed)
         self.assertEqual(len(self._buys(outcomes)), 1)
 
     def test_signals_bot_scam_gate_blocks(self):
         self.fake_rpc.authorities[SIGMINT] = (True, False)
         bot_id = self._signals_bot([SIGMINT])
-        with mock.patch.object(
-                sl, "fetch_prices_for_mints",
-                return_value={SIGMINT: 0.0106}), mock.patch.object(
-                sl, "fetch_mint_24h_changes",
-                return_value={SIGMINT: 6.0}):
-            self._run([_entry(SIGMINT, 0.0106)])
-            self._reset_scan(bot_id)
-            outcomes = self._run([_entry(SIGMINT, 0.0106)])
+        # Same single-source pricing as the passing signals test:
+        # feed tick + a 24.5-hour-old mark reading ~+5% in 24h.
+        self._insert_mark(bot_id, SIGMINT, 0.0106 / 1.05,
+                          _now(-24 * 3600 - 1800))
+        feed = _FakeFeed({SIGMINT: 0.0106})
+        self._run([_entry(SIGMINT, 0.0106)], feed=feed)
+        self._reset_scan(bot_id)
+        outcomes = self._run([_entry(SIGMINT, 0.0106)], feed=feed)
         self.assertEqual(self._buys(outcomes), [])
 
 

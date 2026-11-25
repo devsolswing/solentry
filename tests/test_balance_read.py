@@ -181,22 +181,19 @@ class _RealModeBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
         self.patches = [
+            # Single price source: the SOL price is the feed's SOL
+            # tick only (get_prices is gone); mint prices come from
+            # one batched Helius chain read.
             mock.patch.object(
-                routes, "get_prices",
-                return_value={"prices": {
-                    "SOL": {"price": 100.0, "change_24h": 0.0,
-                            "change_1h": None}},
-                    "source": "live", "as_of": "test"}),
+                routes, "_feed_sol_price_usd", return_value=100.0),
             mock.patch.object(
                 routes, "fetch_trenches_scan",
                 return_value={"candidates": [], "prices": {},
                               "source": "dexscreener", "as_of": "test",
                               "error": None}),
             mock.patch.object(
-                routes, "fetch_prices_for_mints",
+                routes, "_chain_prices_for_mints",
                 return_value={MINT: 2.0}),
-            mock.patch.object(
-                routes, "fetch_mint_1h_changes", return_value={}),
             mock.patch.object(
                 routes, "fetch_mint_identities", return_value={}),
             mock.patch.object(

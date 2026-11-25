@@ -60,7 +60,7 @@
     qtCoin = r;
     document.getElementById('quick-trade-name').textContent = r.name;
     document.getElementById('quick-trade-symbol').textContent = '(' + r.symbol + ')';
-    document.getElementById('quick-trade-price').textContent = r.price_usd != null ? '$' + r.price_usd : 'Price unavailable';
+    document.getElementById('quick-trade-price').textContent = r.price_usd != null ? '$' + r.price_usd : 'no data';
     // A devnet mint with no feed price is still tradeable in real
     // mode: the buy is priced from the bonding curve in SOL, and
     // the executor refuses plainly when there is no devnet curve.
@@ -149,7 +149,7 @@
               b.appendChild(t);
             });
             var pr = document.createElement('span');
-            pr.textContent = r.price_usd != null ? ' — $' + r.price_usd : ' — price unavailable';
+            pr.textContent = r.price_usd != null ? ' — $' + r.price_usd : ' — no data';
             b.appendChild(pr);
             b.addEventListener('click', function () { qtSelect(r); });
             qtResults.appendChild(b);

@@ -351,12 +351,14 @@ class TestReclaimFlow(unittest.TestCase):
         FakeReclaimRpc.sol_balance = SOL_BALANCE
         FakeReclaimRpc.confirm_result = True
         FakeReclaimRpc.send_error = None
-        # Prices the preview uses (DexScreener shape): the zero
-        # holding is worth $0.00, the valuable one is worth $0.20.
+        # Prices the preview uses: the zero holding is worth
+        # $0.00, the valuable one is worth $0.20. Single price
+        # source: one batched Helius chain read (the DexScreener
+        # price reader is gone).
         self.prices = {MINT_ZERO: 0.0000001, MINT_VALUABLE: 0.002}
         self.price_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
-            side_effect=lambda mints: {
+            routes, "_chain_prices_for_mints",
+            side_effect=lambda app, mints: {
                 m: self.prices[m] for m in mints if m in self.prices})
         self.price_patch.start()
         signup(self.client, "alice")

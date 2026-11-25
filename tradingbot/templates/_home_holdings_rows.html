@@ -1,6 +1,6 @@
 {# Home holdings list (wallet.html's coin list). One row per coin
    the user actually holds; the empty message is always in the
-   DOM (hidden while rows exist) so the 60s auto-refresh can show
+   DOM (hidden while rows exist) so the 5s auto-refresh can show
    it the moment the last coin leaves, without a reload. #}
 {% for row in coin_rows %}
 {% include "_home_holdings_row.html" %}

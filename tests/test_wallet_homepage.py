@@ -26,6 +26,7 @@ No SOL moves in these tests; real execution is a recording mock.
 """
 
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -69,18 +70,6 @@ class FakeRpc:
         return True
 
 
-def make_prices(changes):
-    """changes: {coin: (price, change_24h)} or
-    (price, change_24h, change_1h)"""
-    out = {}
-    for c, tup in changes.items():
-        price, ch24 = tup[0], tup[1]
-        ch1h = tup[2] if len(tup) > 2 else None
-        out[c] = {"price": price, "change_24h": ch24,
-                  "change_1h": ch1h}
-    return {"prices": out, "source": "snapshot", "as_of": "test"}
-
-
 def fake_chart(points):
     return {"points": [{"ts": 1790000000000 + i * 60000, "price": p}
                        for i, p in enumerate(points)], "error": None}
@@ -94,10 +83,11 @@ class HomeBase(unittest.TestCase):
         self.rpc_patch.start()
         FakeRpc.instances.clear()
         FakeRpc.balance_lamports = 0
-        # get_prices() is SOL-only now: SOL is the unit of account.
+        # get_prices() is SOL-only now: SOL is the unit of account,
+        # at $10 from the feed's SOL tick.
         self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({"SOL": (10.0, 5.25, 2.5)}))
+            routes, "_feed_sol_price_usd",
+            return_value=10.0)
         self.prices_patch.start()
         # _paper_price (single-coin price) must agree with the mocked
         # list prices, or SOL conversions drift between the two.
@@ -113,19 +103,25 @@ class HomeBase(unittest.TestCase):
         self.trenches_patch.start()
         routes._TRENCHES_CACHE.update(
             {"at": 0.0, "rows": None, "error": None})
-        # Mint feeds: keep every render local — no live DexScreener
-        # or RPC calls from the routes under test.
+        # Mint prices + 1h changes come from the live feed: fresh
+        # stream ticks for the price, an hour-old tick each for the
+        # 1h change (MINT +2.5%, MINT2 −1.0%). The batched Helius
+        # chain read is the pull twin. No live DexScreener or RPC
+        # calls from the routes under test.
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
-            side_effect=lambda mints: {
+            routes, "_chain_prices_for_mints",
+            side_effect=lambda app, mints: {
                 m: MINT_PRICES[m] for m in (mints or [])
                 if m in MINT_PRICES})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes",
-            side_effect=lambda mints: {
-                m: MINT_1H[m] for m in (mints or []) if m in MINT_1H})
-        self.mint_1h_patch.start()
+        feed = self.app.config["LIVE_FEED"]
+        now = time.time()
+        for mint, price, change in (
+                (MINT, MINT_PRICES[MINT], MINT_1H[MINT]),
+                (MINT2, MINT_PRICES[MINT2], MINT_1H[MINT2])):
+            feed.ingest(mint, price / (1 + change / 100.0),
+                        "helius-stream", now=now - 3600)
+            feed.ingest(mint, price, "helius-stream", now=now)
         self.mint_ident_patch = mock.patch.object(
             routes, "fetch_mint_identities",
             side_effect=lambda mints: {
@@ -144,7 +140,6 @@ class HomeBase(unittest.TestCase):
     def tearDown(self):
         self.meta_patch.stop()
         self.mint_ident_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
@@ -374,10 +369,21 @@ class TestCoinDetail(HomeBase):
         self.assertIn("All amounts are in SOL", html)
 
     def test_detail_no_chart_data_says_still_building(self):
-        with mock.patch.object(routes, "fetch_market_chart",
-                               return_value={"points": [], "error":
-                                             "no chart history"}):
-            html = self._html(f"/coins/{MINT}/detail")
+        # A mint with no feed history says the candles are still
+        # building — never a made-up chart. The candles come from
+        # the live feed's tick history now, so the "no history"
+        # state needs an empty feed for this request (the chart
+        # fetch mock alone no longer decides it).
+        from tradingbot.livefeed import LiveFeed
+        old_feed = self.app.config["LIVE_FEED"]
+        self.app.config["LIVE_FEED"] = LiveFeed()
+        try:
+            with mock.patch.object(routes, "fetch_market_chart",
+                                   return_value={"points": [], "error":
+                                                 "no chart history"}):
+                html = self._html(f"/coins/{MINT}/detail")
+        finally:
+            self.app.config["LIVE_FEED"] = old_feed
         # A mint with no feed history says the candles are still
         # building — never a made-up chart.
         self.assertIn("Candles are still building", html)
@@ -496,8 +502,8 @@ class TestDetailTradingMint(HomeBase):
                 mock.patch.object(routes, "is_curve_complete",
                                   return_value=False), \
                 mock.patch.object(
-                    routes, "fetch_prices_for_mints",
-                    side_effect=lambda mints: {
+                    routes, "_chain_prices_for_mints",
+                    side_effect=lambda app, mints: {
                         m: 0.5 for m in (mints or [])}):
             resp = self.client.post(f"/coins/{mint}/sell", data={
                 "csrf_token": csrf(self.client,
@@ -530,6 +536,14 @@ class TestTrenchesList(HomeBase):
                 "error": None})
         self.trenches_patch.start()
         self._reset_trenches_cache()
+        # Trenches rows are repriced onto the single source: seed
+        # the feed with the mint's price and 1h history (+12.5%
+        # over the last hour) or the row is dropped as unpriced.
+        feed = self.app.config["LIVE_FEED"]
+        now = time.time()
+        feed.ingest(mint, 0.00123 / 1.125, "helius-stream",
+                    now=now - 3600)
+        feed.ingest(mint, 0.00123, "helius-stream", now=now)
         html = self._html("/trenches")
         self.assertIn("Trenches", html)
         self.assertIn("Moon Coin", html)
@@ -555,6 +569,11 @@ class TestTrenchesList(HomeBase):
         self.trenches_patch.start()
         self._reset_trenches_cache()
         # Hold some of the token so the Sell all form renders.
+        # Seed the feed's stream tick so the coin page can price
+        # it (the single price source — no trenches-feed price
+        # is used any more).
+        self.app.config["LIVE_FEED"].ingest(
+            mint, 0.00123, "helius-stream")
         self.db.execute(
             "INSERT INTO paper_holdings (user_id, coin_id, amount, "
             "avg_price) VALUES (?, ?, ?, ?)",

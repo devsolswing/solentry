@@ -4,8 +4,8 @@ Rules under test:
 - One theme everywhere: the red login-page theme. The stylesheet has
   no second-theme (blue/grey/green) chrome markers left, and every
   main page renders with the red theme shell (topbar + HUD).
-- The coins list shows a 1h change column (from the trenches feed)
-  alongside P&L; a held mint has no 24h change figure, so its row
+- The coins list shows a 1h change column (from the live feed's
+  tick history) alongside P&L; a held mint has no 24h change figure, so its row
   shows "—", never a guess. The coin popup says "24h change
   unavailable" for a mint, never a guessed number.
 - Portfolio header on the coins page: total balance + chart from
@@ -16,6 +16,7 @@ No SOL moves in these tests.
 """
 
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -46,15 +47,15 @@ class ThemeBase(unittest.TestCase):
         self.rpc_patch = mock.patch.object(routes, "SolanaRpcClient")
         fake = self.rpc_patch.start()
         fake.return_value.get_balance_lamports.return_value = 0
-        # The trenches feed prices the test mints; nothing here
-        # reaches the live network.
+        # The live feed prices the test mints (stream tick); no 1h
+        # history is seeded, so their 1h change is None. Nothing
+        # here reaches the live network.
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={MINT: MINT_PRICE})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes", return_value={})
-        self.mint_1h_patch.start()
+        self.app.config["LIVE_FEED"].ingest(
+            MINT, MINT_PRICE, "helius-stream")
         self.mint_id_patch = mock.patch.object(
             routes, "fetch_mint_identities", return_value={})
         self.mint_id_patch.start()
@@ -78,7 +79,6 @@ class ThemeBase(unittest.TestCase):
         self.trenches_patch.stop()
         self.meta_patch.stop()
         self.mint_id_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.rpc_patch.stop()
         self.tmp.cleanup()
@@ -93,11 +93,8 @@ class ThemeBase(unittest.TestCase):
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(100.0, "live", "test"))
         self.price_patch.start()
-        self.prices_patch = mock.patch.object(routes, "get_prices",
-                                              return_value={
-            "prices": {"SOL": {"price": 100.0, "change_24h": 5.25,
-                               "change_1h": 2.5}},
-            "source": "live", "as_of": "test"})
+        self.prices_patch = mock.patch.object(
+            routes, "_feed_sol_price_usd", return_value=100.0)
         self.prices_patch.start()
         self.addCleanup(self.price_patch.stop)
         self.addCleanup(self.prices_patch.stop)
@@ -170,9 +167,23 @@ class TestChange24h(ThemeBase):
             {"mint": AUDIT_MINT, "symbol": "AUDT", "name": "AuditTest",
              "price_usd": 0.02, "change_1h_pct": -2.5},
         ])
+        # Trenches rows are repriced onto the single source: seed
+        # each candidate's feed price and 1h history (Grad +5.25%,
+        # AuditTest −2.5% over the last hour) or the rows drop.
+        now = time.time()
+        feed = self.app.config["LIVE_FEED"]
+        for _mint, _price, _chg in (
+                (GRAD_MINT, 0.05, 5.25), (AUDIT_MINT, 0.02, -2.5)):
+            feed.ingest(_mint, _price / (1 + _chg / 100.0),
+                        "helius-stream", now=now - 3600)
+            feed.ingest(_mint, _price, "helius-stream", now=now)
         with mock.patch.object(
-                routes, "fetch_prices_for_mints",
+                routes, "_chain_prices_for_mints",
                 return_value={MINT: 0.012}):
+            # The feed's stream tick is the live price now: move
+            # it to $0.012 for this read.
+            self.app.config["LIVE_FEED"].ingest(
+                MINT, 0.012, "helius-stream")
             html = self._html("/dashboard")
         self.assertIn("coin-change", html)
         self.assertIn("+5.2% 1h", html)

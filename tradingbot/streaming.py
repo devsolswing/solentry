@@ -1,5 +1,4 @@
-"""Helius live-price stream: bonding-curve prices straight off the
-chain for the coins the app holds.
+"""Helius live-price stream: the ONE price stream for the whole app.
 
 Why: DexScreener has no public price/trade websocket — its API is
 REST only, and the app's 5-second poll is already the fastest honest
@@ -9,14 +8,26 @@ quote at all: it is the bonding curve's own virtual reserves, read
 from the chain. Helius's free-tier WebSocket lets the app subscribe
 to a curve account and hear every state change (~1 per slot,
 ~400ms), then derive the price from the reserves — ground truth,
-no intermediary price to be wrong.
+no intermediary price to be wrong. The same ground truth covers a
+graduated coin: its Raydium pool's vault balances, subscribed the
+same way (see _find_pool).
 
-Design (stream what you hold, poll what you discover):
+ONE STREAM (2026-11-25, "Do we need two streams?" — no): this is
+the only price stream in the app. The DexScreener 5-second poll is
+deleted — nothing reads DexScreener for prices any more — and every
+price the app shows or decides on is a tick from this stream (or a
+direct Helius RPC read of the same curve/pool account, same math,
+for a coin the stream has not subscribed yet). A coin this stream
+cannot tick (no curve, no known pool) has NO price: pages say
+"no data" and the bot skips it.
+
+Design (stream what you hold, pull what you discover):
 - One daemon thread, one Helius connection. It subscribes (standard
   Solana `accountSubscribe`) to the bonding-curve accounts of HELD
   mints (bot positions + paper holdings) and browser-WATCHED mints
-  only — never the full scanner set. The DexScreener 5s poll stays
-  as discovery + fallback for everything else.
+  only — never the full scanner set. Discovery candidates are
+  priced on demand by the silent loop with direct Helius RPC reads
+  of the same curve accounts (same math, same source).
 - Every curve update is priced from the virtual reserves with the
   same math the executor's buy_quote reads
   (`pumpfun.curve_spot_price_sol` x the feed's live SOL price),
@@ -24,13 +35,23 @@ Design (stream what you hold, poll what you discover):
   50% single-tick jump guard, the 3-agreeing-tick re-base, the
   out-of-order guard. The stream never bypasses ingest, and it
   never decides or executes anything: it only supplies prices.
+- Graduated coins: a curve update that parses as complete moves
+  the mint to its Raydium pool — the stream finds the pool through
+  Helius alone (getProgramAccounts on the Raydium AMM program,
+  memcmp on the pool's baseMint), subscribes to the pool's base +
+  quote vaults, and prices from the vault balances. A graduated
+  coin with no discoverable pool has no price ("no data").
+- Stale refresh (2026-11-25): a quiet coin with no trades stops
+  ticking, and its last tick goes stale — stale reads as "no data".
+  The stream re-reads a stale subscribed mint's curve (or pool
+  vaults) straight from the chain on its own periodic wake, so
+  "no data" is brief: the re-read carries the current reserves
+  (unchanged when nothing traded) and the price is back. Bounded
+  to one re-read per mint per STALE_REFRESH_SECONDS.
 - Reconnect with jittered backoff + a heartbeat ping + a watchdog
   (45s of no data closes the socket and reconnects). On reconnect
-  it resubscribes and backfills from the REST poll, so no mint is
-  left showing a stale price as live.
-- Graduated coins drop out by themselves: a curve update that
-  parses as complete unsubscribes the mint (the Raydium/Jupiter
-  price takes over via the poll).
+  it resubscribes and backfills from direct chain reads, so no mint
+  is left showing a stale price as live.
 
 Helius endpoints (official docs):
 - Mainnet: wss://mainnet.helius-rpc.com/?api-key=<api-key>
@@ -62,6 +83,7 @@ import websocket
 
 from .pumpfun import (bonding_curve_pda, curve_spot_price_sol,
                       parse_bonding_curve)
+from .solana import base58_encode
 
 log = logging.getLogger("tradingbot.streaming")
 
@@ -81,6 +103,27 @@ SOURCE = "helius-stream"
 SUBSCRIBE_ENCODING = "base64"
 SUBSCRIBE_COMMITMENT = "confirmed"
 
+# Raydium AMM v4 program: the pool account for a graduated coin.
+# The stream finds the pool through Helius alone (getProgramAccounts
+# with a memcmp filter on the pool's baseMint) and then subscribes
+# to the pool's base + quote vaults. Offsets are the AMM v4 state
+# layout: 24 u64 fields (192 bytes), 4 u128 + 2 u64 swap fields (80
+# bytes), then baseVault @272, quoteVault @304, baseMint @336,
+# quoteMint @368 (each a 32-byte pubkey). The layout is NOT verified
+# against a live pool in this build — a wrong offset fails safe: no
+# pool is found and the coin shows "no data", never a wrong price.
+# Vault balances are SPL token accounts: the amount is a u64 LE at
+# offset 64.
+RAYDIUM_AMM_PROGRAM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+RAYDIUM_POOL_BASE_VAULT_OFFSET = 272
+RAYDIUM_POOL_QUOTE_VAULT_OFFSET = 304
+RAYDIUM_POOL_BASE_MINT_OFFSET = 336
+RAYDIUM_POOL_BASE_DECIMALS_OFFSET = 32
+RAYDIUM_POOL_QUOTE_DECIMALS_OFFSET = 40
+TOKEN_ACCOUNT_AMOUNT_OFFSET = 64
+# Pump.fun graduations pair the token against wrapped SOL.
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+
 # --- defaults (Remy defaults, James's call — see MANIFEST) --------
 # Ping every 30s: Helius's 10-minute inactivity timer is why the
 # ping exists at all; 30s is the stricter of the two values in
@@ -98,6 +141,10 @@ RECONNECT_MAX_SECONDS = 60.0
 # How often the subscription set is re-derived (held + watched
 # mints change as bots trade and browsers come and go).
 SUBSCRIPTION_REFRESH_SECONDS = 60.0
+# Stale-tick refresh: a subscribed mint whose feed tick is stale
+# (or missing) is re-read from the chain at most this often, so
+# "no data" is brief without hammering the RPC.
+STALE_REFRESH_SECONDS = 30.0
 # The SOL reference for the USD conversion: SOL refreshes from
 # Jupiter every 60s, so the feed's 30s staleness cut would drop
 # half the stream's updates. SOL moves slowly — a tick up to 90s
@@ -106,6 +153,194 @@ SUBSCRIPTION_REFRESH_SECONDS = 60.0
 SOL_MAX_AGE_SECONDS = 90.0
 WS_CONNECT_TIMEOUT = 10
 WS_RECV_TIMEOUT = 5
+
+
+def _token_account_amount(data: bytes) -> int | None:
+    """The token balance (base units) of an SPL token account, or
+    None when the data is too short to parse. The amount is a u64
+    little-endian at offset 64 (mint 0-32, owner 32-64)."""
+    if len(data) < TOKEN_ACCOUNT_AMOUNT_OFFSET + 8:
+        return None
+    try:
+        return int.from_bytes(
+            data[TOKEN_ACCOUNT_AMOUNT_OFFSET:
+                 TOKEN_ACCOUNT_AMOUNT_OFFSET + 8], "little")
+    except Exception:
+        return None
+
+
+def find_raydium_pool(client, mint: str) -> dict | None:
+    """A graduated mint's Raydium pool, through Helius alone:
+    getProgramAccounts on the AMM program with a memcmp filter on
+    the pool's baseMint. Returns {"pool", "base_vault",
+    "quote_vault", "base_decimals", "quote_decimals"}, or None when
+    no pool is found, the RPC fails, or the data does not parse.
+    None means "no data" for this coin — never a guessed pool.
+    Takes the first pool quoted in wSOL (a pump.fun graduation
+    creates one pool per mint); a mint with several pools prices
+    from the first. The AMM v4 layout offsets are NOT verified
+    against a live pool in this build — a wrong offset fails safe
+    (no pool found, never a wrong price)."""
+    try:
+        accounts = client.get_program_accounts(
+            RAYDIUM_AMM_PROGRAM,
+            [{"memcmp": {"offset": RAYDIUM_POOL_BASE_MINT_OFFSET,
+                         "bytes": mint}}])
+    except Exception as exc:
+        log.warning("[helius-stream] pool lookup failed for %s: %s",
+                    mint, exc)
+        return None
+    for entry in accounts or []:
+        data = (entry.get("account") or {}).get("data") or b""
+        if len(data) < RAYDIUM_POOL_BASE_MINT_OFFSET + 64:
+            continue
+        try:
+            base_mint = base58_encode(
+                data[RAYDIUM_POOL_BASE_MINT_OFFSET:
+                     RAYDIUM_POOL_BASE_MINT_OFFSET + 32])
+            quote_mint = base58_encode(
+                data[RAYDIUM_POOL_BASE_MINT_OFFSET + 32:
+                     RAYDIUM_POOL_BASE_MINT_OFFSET + 64])
+            base_vault = base58_encode(
+                data[RAYDIUM_POOL_BASE_VAULT_OFFSET:
+                     RAYDIUM_POOL_BASE_VAULT_OFFSET + 32])
+            quote_vault = base58_encode(
+                data[RAYDIUM_POOL_QUOTE_VAULT_OFFSET:
+                     RAYDIUM_POOL_QUOTE_VAULT_OFFSET + 32])
+            base_decimals = int.from_bytes(
+                data[RAYDIUM_POOL_BASE_DECIMALS_OFFSET:
+                     RAYDIUM_POOL_BASE_DECIMALS_OFFSET + 8],
+                "little")
+            quote_decimals = int.from_bytes(
+                data[RAYDIUM_POOL_QUOTE_DECIMALS_OFFSET:
+                     RAYDIUM_POOL_QUOTE_DECIMALS_OFFSET + 8],
+                "little")
+        except Exception:
+            continue
+        if base_mint != mint or quote_mint != WSOL_MINT:
+            continue
+        if not base_vault or not quote_vault:
+            continue
+        if not (0 <= base_decimals <= 18
+                and 0 <= quote_decimals <= 18):
+            continue
+        return {"pool": (entry.get("pubkey") or ""),
+                "base_vault": base_vault,
+                "quote_vault": quote_vault,
+                "base_decimals": base_decimals,
+                "quote_decimals": quote_decimals}
+    return None
+
+
+def pool_price_sol(pool: dict, vault_amounts: dict) -> float | None:
+    """SOL per whole token from a pool's vault balances, or None
+    when either vault has not been seen yet or the balances are
+    degenerate. Vault amounts are base units; the pool's own
+    decimals scale them."""
+    if pool is None:
+        return None
+    base = vault_amounts.get(pool["base_vault"])
+    quote = vault_amounts.get(pool["quote_vault"])
+    if base is None or quote is None:
+        return None
+    try:
+        base_tokens = float(base) / (10 ** pool["base_decimals"])
+        quote_sol = float(quote) / (10 ** pool["quote_decimals"])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if base_tokens <= 0 or quote_sol <= 0:
+        return None
+    price = quote_sol / base_tokens
+    if not math.isfinite(price) or price <= 0:
+        return None
+    return price
+
+
+def chain_price_usd_for_mints(client, mints,
+                              sol_price_usd) -> dict:
+    """{mint: price_usd} for mints priced straight from the chain —
+    the single source's pull twin of the Helius stream. Bonding
+    curve first (one batched getMultipleAccounts for all curve
+    PDAs); a mint whose curve is complete, missing or unreadable
+    is tried against its Raydium pool (pool discovery + one
+    batched vault read per such mint). Mints no source can price
+    are absent from the result — never a stale, guessed or
+    second-source number. sol_price_usd None (or unusable) means
+    {}: no USD conversion without a live SOL rate."""
+    out: dict = {}
+    if not mints or sol_price_usd is None:
+        return out
+    try:
+        sol_price_usd = float(sol_price_usd)
+    except (TypeError, ValueError):
+        return out
+    if not (math.isfinite(sol_price_usd) and sol_price_usd > 0):
+        return out
+    mints = [m for m in dict.fromkeys(mints) if m]
+    curve_addr: dict = {}
+    addrs: list = []
+    for mint in mints:
+        try:
+            addr, _ = bonding_curve_pda(mint)
+        except Exception:
+            continue
+        curve_addr[mint] = addr
+        addrs.append(addr)
+    if not addrs:
+        return out
+    try:
+        infos = client.get_multiple_accounts(addrs)
+    except Exception as exc:
+        log.warning("[helius-stream] batched curve read failed: %s",
+                    exc)
+        return out
+    need_pool: list = []
+    for mint, addr in curve_addr.items():
+        info = infos.get(addr)
+        if info is None:
+            need_pool.append(mint)
+            continue
+        try:
+            curve = parse_bonding_curve(info.get("data") or b"")
+        except ValueError:
+            need_pool.append(mint)
+            continue
+        if curve.get("complete"):
+            need_pool.append(mint)
+            continue
+        price_sol = curve_spot_price_sol(curve)
+        if price_sol is None:
+            need_pool.append(mint)
+            continue
+        price = price_sol * sol_price_usd
+        if math.isfinite(price) and price > 0:
+            out[mint] = price
+        else:
+            need_pool.append(mint)
+    # Graduated mints: pool discovery + one batched vault read each.
+    for mint in need_pool:
+        pool = find_raydium_pool(client, mint)
+        if pool is None:
+            continue
+        try:
+            vault_infos = client.get_multiple_accounts(
+                [pool["base_vault"], pool["quote_vault"]])
+        except Exception:
+            continue
+        amounts: dict = {}
+        for vault, info in (vault_infos or {}).items():
+            if info is None:
+                continue
+            amount = _token_account_amount(info.get("data") or b"")
+            if amount is not None:
+                amounts[vault] = amount
+        price_sol = pool_price_sol(pool, amounts)
+        if price_sol is None:
+            continue
+        price = price_sol * sol_price_usd
+        if math.isfinite(price) and price > 0:
+            out[mint] = price
+    return out
 
 
 class HeliusStream:
@@ -137,8 +372,23 @@ class HeliusStream:
         # mint -> curve account address: the desired subscription
         # set (held + watched mints with a live, incomplete curve).
         self._subs: dict = {}
+        # mint -> pool info for graduated mints: {"pool", "base_vault",
+        # "quote_vault", "base_decimals", "quote_decimals"}.
+        self._pools: dict = {}
+        # vault address -> (amount in base units, decimals): the last
+        # seen balance per pool vault, so a price can be recomputed
+        # when either vault updates.
+        self._vault_amounts: dict = {}
+        # subscription id -> (mint, vault address) for pool-vault
+        # subscriptions (curve subscriptions live in _sub_id).
+        self._vault_sub_id: dict = {}
+        # mint -> {vault address: subscription id}, for pool vaults.
+        self._mint_vault_sub_id: dict = {}
+        # mint -> last stale-refresh epoch (bounds re-reads).
+        self._last_stale_refresh: dict = {}
         # Per-connection state, reset on every (re)connect.
-        self._pending_req: dict = {}  # jsonrpc id -> mint
+        self._pending_req: dict = {}  # jsonrpc id -> ("curve", mint)
+        # or ("vault", mint, vault address)
         self._sub_id: dict = {}  # subscription id -> mint
         self._mint_sub_id: dict = {}  # mint -> subscription id
         self._last_slot: dict = {}  # mint -> last processed slot
@@ -209,8 +459,9 @@ class HeliusStream:
     def _curve_is_live(self, mint: str) -> bool:
         """True only when the mint's bonding curve exists, parses,
         and is incomplete. A graduated coin (complete) or an
-        unreadable curve is never subscribed — the poll prices
-        those instead. One REST read per new mint, on subscribe."""
+        unreadable curve is never subscribed — the pool is watched
+        instead, or the coin has no price ("no data"). One REST
+        read per new mint, on subscribe."""
         try:
             curve_addr, _ = bonding_curve_pda(mint)
             client = self._rpc_client()
@@ -229,31 +480,82 @@ class HeliusStream:
 
     def _refresh_subscriptions(self, ws=None) -> None:
         """Re-derive the subscription set from held + watched
-        mints. New mints get a curve check first; mints that are
-        no longer held or watched are unsubscribed."""
+        mints. New mints get a curve check first; a mint whose
+        curve is complete (graduated) gets its Raydium pool
+        instead; a mint with neither has no price ("no data").
+        Mints that are no longer held or watched are unsubscribed."""
         desired = self._desired_mints()
-        current = set(self._subs)
+        current = set(self._subs) | set(self._pools)
         for mint in sorted(desired - current):
-            if not self._curve_is_live(mint):
-                continue
-            curve_addr, _ = bonding_curve_pda(mint)
-            self._subs[mint] = curve_addr
-            if ws is not None:
-                try:
-                    self._send_subscribe(ws, mint)
-                except Exception as exc:
-                    log.warning("[helius-stream] subscribe failed "
-                                "for %s: %s", mint, exc)
-                    self._subs.pop(mint, None)
+            if self._curve_is_live(mint):
+                curve_addr, _ = bonding_curve_pda(mint)
+                self._subs[mint] = curve_addr
+                if ws is not None:
+                    try:
+                        self._send_subscribe(ws, mint)
+                    except Exception as exc:
+                        log.warning("[helius-stream] subscribe failed "
+                                    "for %s: %s", mint, exc)
+                        self._subs.pop(mint, None)
+            elif not self._ensure_pool(mint, ws=ws):
+                log.info("[helius-stream] %s has no live curve and "
+                         "no discoverable pool — no price", mint)
         for mint in sorted(current - desired):
             self._drop_mint(mint, "no longer held/watched", ws=ws)
+
+    def _find_pool(self, mint: str) -> dict | None:
+        """Find a graduated mint's Raydium pool through Helius
+        alone (see find_raydium_pool). None means "no data" for
+        this coin — never a guessed pool."""
+        try:
+            client = self._rpc_client()
+        except Exception as exc:
+            log.warning("[helius-stream] pool lookup failed for %s: "
+                        "%s", mint, exc)
+            return None
+        return find_raydium_pool(client, mint)
+
+    def _ensure_pool(self, mint: str, ws=None) -> bool:
+        """Subscribe a graduated mint to its Raydium pool vaults.
+        Returns True when the mint is now pool-subscribed."""
+        if mint in self._pools:
+            return True
+        pool = self._find_pool(mint)
+        if pool is None:
+            return False
+        self._pools[mint] = pool
+        if ws is not None:
+            try:
+                self._send_subscribe_pool(ws, mint)
+            except Exception as exc:
+                log.warning("[helius-stream] pool subscribe failed "
+                            "for %s: %s", mint, exc)
+                self._pools.pop(mint, None)
+                return False
+        return True
+
+    def _send_subscribe_pool(self, ws, mint: str) -> None:
+        """Subscribe to a pool's base + quote vault accounts."""
+        pool = self._pools[mint]
+        for vault in (pool["base_vault"], pool["quote_vault"]):
+            req_id = self._next_req_id
+            self._next_req_id += 1
+            ws.send(json.dumps(
+                {"jsonrpc": "2.0", "id": req_id,
+                 "method": "accountSubscribe",
+                 "params": [vault,
+                            {"encoding": SUBSCRIBE_ENCODING,
+                             "commitment": SUBSCRIBE_COMMITMENT}]}))
+            self._pending_req[req_id] = ("vault", mint, vault)
 
     def _drop_mint(self, mint: str, reason: str, ws=None) -> None:
         """Stop streaming a mint: unsubscribe when connected and
         forget it, so a later refresh can re-add it if it is held
-        or watched again."""
+        or watched again. Drops the curve subscription and the
+        pool-vault subscriptions alike."""
         self._subs.pop(mint, None)
         self._last_slot.pop(mint, None)
+        self._last_stale_refresh.pop(mint, None)
         sub_id = self._mint_sub_id.pop(mint, None)
         if sub_id is not None:
             self._sub_id.pop(sub_id, None)
@@ -268,6 +570,27 @@ class HeliusStream:
             except Exception as exc:
                 log.warning("[helius-stream] unsubscribe failed for "
                             "%s: %s", mint, exc)
+        pool = self._pools.pop(mint, None)
+        if pool is not None:
+            vault_subs = self._mint_vault_sub_id.pop(mint, {})
+            for vault in (pool["base_vault"], pool["quote_vault"]):
+                self._vault_amounts.pop(vault, None)
+                self._last_slot.pop(vault, None)
+                vault_sub = vault_subs.pop(vault, None)
+                if vault_sub is not None:
+                    self._vault_sub_id.pop(vault_sub, None)
+                    if ws is not None:
+                        req_id = self._next_req_id
+                        self._next_req_id += 1
+                        try:
+                            ws.send(json.dumps(
+                                {"jsonrpc": "2.0", "id": req_id,
+                                 "method": "accountUnsubscribe",
+                                 "params": [vault_sub]}))
+                        except Exception as exc:
+                            log.warning(
+                                "[helius-stream] vault unsubscribe "
+                                "failed for %s: %s", mint, exc)
         log.info("[helius-stream] dropped %s (%s)", mint, reason)
 
     # --- connection ------------------------------------------------------
@@ -281,7 +604,7 @@ class HeliusStream:
              "params": [curve_addr,
                         {"encoding": SUBSCRIBE_ENCODING,
                          "commitment": SUBSCRIBE_COMMITMENT}]}))
-        self._pending_req[req_id] = mint
+        self._pending_req[req_id] = ("curve", mint)
 
     def _connect(self):
         url = self._wss_url()
@@ -292,26 +615,165 @@ class HeliusStream:
         self._pending_req = {}
         self._sub_id = {}
         self._mint_sub_id = {}
+        self._vault_sub_id = {}
+        self._mint_vault_sub_id = {}
         for mint in sorted(self._subs):
             self._send_subscribe(ws, mint)
+        for mint in sorted(self._pools):
+            self._send_subscribe_pool(ws, mint)
         self._last_message_at = self._time()
-        log.info("[helius-stream] connected (%d subscriptions)",
-                 len(self._subs))
+        log.info("[helius-stream] connected (%d curve + %d pool "
+                 "subscriptions)",
+                 len(self._subs), len(self._pools))
         return ws
 
     def _backfill(self) -> None:
-        """After (re)connect, refresh the streamed mints from REST
-        so no mint is left showing a stale price as live while the
-        stream catches up. The 5s DexScreener poller covers the
-        same mints within one poll anyway; this just closes the
-        gap at once. Never kills the thread."""
-        mints = sorted(self._subs)
+        """After (re)connect, refresh the streamed mints from
+        direct chain reads so no mint is left showing a stale price
+        as live while the stream catches up. Never kills the
+        thread."""
+        mints = sorted(set(self._subs) | set(self._pools))
         if not mints:
             return
         try:
-            self._feed._poll_dexscreener(mints)
+            self._refresh_mints(mints, force=True)
         except Exception as exc:
             log.warning("[helius-stream] backfill failed: %s", exc)
+
+    def _ingest_sol_price(self, mint: str, price_sol: float,
+                          now: float) -> bool:
+        """Convert a SOL-denominated price with the feed's live SOL
+        tick and ingest it. Returns True when a tick was ingested.
+        The SOL tick may be up to SOL_MAX_AGE_SECONDS old; older
+        than that, or no SOL tick at all, the update is skipped —
+        never converted at a stale SOL rate, never guessed."""
+        sol_age = self._feed.tick_age_seconds("SOL", now=now)
+        if sol_age is None or sol_age > SOL_MAX_AGE_SECONDS:
+            return False
+        sol = self._feed.snapshot(["SOL"]).get("SOL")
+        if sol is None:
+            return False
+        try:
+            sol_price = float(sol["price"])
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(sol_price) or sol_price <= 0:
+            return False
+        price_usd = price_sol * sol_price
+        if not math.isfinite(price_usd) or price_usd <= 0:
+            return False
+        return self._feed.ingest(mint, price_usd, SOURCE, now=now)
+
+    def _pool_price_sol(self, mint: str) -> float | None:
+        """SOL per whole token from a graduated mint's pool vault
+        balances, or None when either vault has not been seen yet
+        or the balances are degenerate (see pool_price_sol)."""
+        pool = self._pools.get(mint)
+        if pool is None:
+            return None
+        return pool_price_sol(pool, self._vault_amounts)
+
+    def _ingest_pool_price(self, mint: str, now: float) -> bool:
+        """Ingest a graduated mint's current pool price. Returns
+        True when a tick was ingested, False when the price cannot
+        be computed yet (a vault not seen) — the coin stays
+        unpriced rather than showing a partial price."""
+        price_sol = self._pool_price_sol(mint)
+        if price_sol is None:
+            return False
+        return self._ingest_sol_price(mint, price_sol, now)
+
+    def _refresh_mints(self, mints, now: float | None = None,
+                       force: bool = False) -> None:
+        """Re-read the given subscribed mints straight from the
+        chain (bonding curves via one batched read, pool vaults
+        the same way) and ingest the current price. Used after
+        (re)connect (backfill, force=True) and for mints whose
+        feed tick is stale or missing (force=False, bounded to one
+        re-read per mint per STALE_REFRESH_SECONDS). A quiet coin's
+        reserves do not move, so the re-read carries the same price
+        with a fresh timestamp — "no data" is brief, never stuck.
+        Never kills the thread."""
+        now = self._time() if now is None else now
+        todo = []
+        for mint in sorted(mints):
+            if not force:
+                last = self._last_stale_refresh.get(mint, 0.0)
+                if now - last < STALE_REFRESH_SECONDS:
+                    continue
+                if self._feed.live_tick(mint, now=now) is not None:
+                    continue  # fresh already — nothing to refresh
+            todo.append(mint)
+        if not todo:
+            return
+        for mint in todo:
+            self._last_stale_refresh[mint] = now
+        addrs: list = []
+        addr_kind: dict = {}
+        for mint in todo:
+            if mint in self._subs:
+                addr = self._subs[mint]
+                addrs.append(addr)
+                addr_kind[addr] = ("curve", mint)
+            pool = self._pools.get(mint)
+            if pool is not None:
+                for vault in (pool["base_vault"],
+                              pool["quote_vault"]):
+                    addrs.append(vault)
+                    addr_kind[vault] = ("vault", mint)
+        if not addrs:
+            return
+        try:
+            client = self._rpc_client()
+            infos = client.get_multiple_accounts(addrs)
+        except Exception as exc:
+            log.warning("[helius-stream] stale refresh read failed: "
+                        "%s", exc)
+            return
+        for addr, info in infos.items():
+            kind = addr_kind.get(addr)
+            if info is None or kind is None:
+                continue
+            data = info.get("data") or b""
+            if kind[0] == "curve":
+                try:
+                    curve = parse_bonding_curve(data)
+                except ValueError:
+                    continue
+                if curve.get("complete"):
+                    # Graduated between passes — move to the pool.
+                    self._drop_mint(kind[1], "graduated",
+                                    ws=self._ws)
+                    if self._ensure_pool(kind[1], ws=self._ws):
+                        log.info("[helius-stream] %s graduated — "
+                                 "watching Raydium pool", kind[1])
+                    continue
+                price_sol = curve_spot_price_sol(curve)
+                if price_sol is None:
+                    continue
+                self._ingest_sol_price(kind[1], price_sol, now)
+            else:
+                amount = _token_account_amount(data)
+                if amount is None:
+                    continue
+                self._vault_amounts[addr] = amount
+                self._ingest_pool_price(kind[1], now)
+
+    def _refresh_stale_mints(self, now: float | None = None) -> None:
+        """Re-read every subscribed mint whose feed tick is stale
+        or missing (bounded per mint — see _refresh_mints). Called
+        on the stream's periodic wake, so a removed price is
+        replaced by a fresh tick as soon as one can be read. Never
+        kills the thread."""
+        now = self._time() if now is None else now
+        mints = sorted(set(self._subs) | set(self._pools))
+        if not mints:
+            return
+        try:
+            self._refresh_mints(mints, now=now)
+        except Exception as exc:
+            log.warning("[helius-stream] stale refresh failed: %s",
+                        exc)
 
     def _run(self) -> None:
         backoff = RECONNECT_BASE_SECONDS
@@ -319,7 +781,7 @@ class HeliusStream:
             ws = None
             try:
                 self._refresh_subscriptions()
-                if not self._subs:
+                if not self._subs and not self._pools:
                     # Nothing to stream: idle until the set changes.
                     self._sleep(SUBSCRIPTION_REFRESH_SECONDS)
                     continue
@@ -354,6 +816,7 @@ class HeliusStream:
         now = self._time()
         next_ping_at = now + HEARTBEAT_SECONDS
         next_refresh_at = now + SUBSCRIPTION_REFRESH_SECONDS
+        next_stale_at = now + STALE_REFRESH_SECONDS
         while not self._stop.is_set():
             try:
                 raw = ws.recv()
@@ -374,6 +837,12 @@ class HeliusStream:
                 if now >= next_refresh_at:
                     self._refresh_subscriptions(ws)
                     next_refresh_at = now + SUBSCRIPTION_REFRESH_SECONDS
+                if now >= next_stale_at:
+                    # A quiet coin's tick goes stale with no trades
+                    # to refresh it — re-read it from the chain so
+                    # "no data" is brief.
+                    self._refresh_stale_mints(now)
+                    next_stale_at = now + STALE_REFRESH_SECONDS
                 continue
             except websocket.WebSocketConnectionClosedException as exc:
                 raise ConnectionError("socket closed: %s" % exc)
@@ -385,6 +854,9 @@ class HeliusStream:
             if now >= next_refresh_at:
                 self._refresh_subscriptions(ws)
                 next_refresh_at = now + SUBSCRIPTION_REFRESH_SECONDS
+            if now >= next_stale_at:
+                self._refresh_stale_mints(now)
+                next_stale_at = now + STALE_REFRESH_SECONDS
 
     # --- messages ---------------------------------------------------------
     def _handle_message(self, raw, now: float | None = None) -> None:
@@ -401,12 +873,21 @@ class HeliusStream:
             return
         result = msg.get("result")
         if isinstance(result, int):
-            # Subscription confirmation: record which mint this
-            # subscription id belongs to.
-            mint = self._pending_req.pop(msg.get("id"), None)
-            if mint is not None:
+            # Subscription confirmation: record which mint (and
+            # which vault, for pool subscriptions) this id belongs
+            # to.
+            pending = self._pending_req.pop(msg.get("id"), None)
+            if pending is None:
+                return
+            if pending[0] == "curve":
+                mint = pending[1]
                 self._sub_id[result] = mint
                 self._mint_sub_id[mint] = result
+            elif pending[0] == "vault":
+                _kind, mint, vault = pending
+                self._vault_sub_id[result] = (mint, vault)
+                self._mint_vault_sub_id.setdefault(
+                    mint, {})[vault] = result
             return
         if "error" in msg:
             log.warning("[helius-stream] error message: %s",
@@ -414,15 +895,26 @@ class HeliusStream:
 
     def _handle_account_notification(self, params: dict,
                                      now: float | None = None) -> bool:
-        """One curve-account update -> one validated price. Returns
-        True when a tick was ingested. Every failure path returns
-        False and leaves the last good price standing — never a
-        guess, never a partial price."""
+        """One account update -> one validated price. Returns True
+        when a tick was ingested. Every failure path returns False
+        and leaves the last good price standing — never a guess,
+        never a partial price."""
         now = self._time() if now is None else now
+        sub = params.get("subscription")
+        mint = self._sub_id.get(sub)
+        if mint is not None:
+            return self._handle_curve_notification(mint, params,
+                                                   now=now)
+        vault = self._vault_sub_id.get(sub)
+        if vault is not None:
+            return self._handle_vault_notification(vault[0], vault[1],
+                                                   params, now=now)
+        return False
+
+    def _handle_curve_notification(self, mint: str, params: dict,
+                                   now: float) -> bool:
+        """One bonding-curve account update -> one validated price."""
         result = params.get("result") or {}
-        mint = self._sub_id.get(params.get("subscription"))
-        if mint is None:
-            return False
         slot = (result.get("context") or {}).get("slot")
         if isinstance(slot, int):
             last_slot = self._last_slot.get(mint)
@@ -445,50 +937,66 @@ class HeliusStream:
         except ValueError:
             return False
         if curve.get("complete"):
-            # Graduated: the curve no longer prices the coin — the
-            # Raydium/Jupiter price takes over via the poll.
+            # Graduated: the curve no longer prices the coin — move
+            # to its Raydium pool. No pool found = no price
+            # ("no data"), never a second-source number.
             self._drop_mint(mint, "graduated", ws=self._ws)
+            if self._ensure_pool(mint, ws=self._ws):
+                log.info("[helius-stream] %s graduated — watching "
+                         "Raydium pool", mint)
             return False
         price_sol = curve_spot_price_sol(curve)
         if price_sol is None:
             return False
-        # USD needs the feed's live SOL price. SOL refreshes from
-        # Jupiter every 60s, so a tick up to SOL_MAX_AGE_SECONDS
-        # old is accepted (see the constant's note); older than
-        # that, or no SOL tick at all, the update is skipped.
-        sol_age = self._feed.tick_age_seconds("SOL", now=now)
-        if sol_age is None or sol_age > SOL_MAX_AGE_SECONDS:
-            return False
-        sol = self._feed.snapshot(["SOL"]).get("SOL")
-        if sol is None:
+        return self._ingest_sol_price(mint, price_sol, now)
+
+    def _handle_vault_notification(self, mint: str, vault: str,
+                                   params: dict, now: float) -> bool:
+        """One Raydium pool-vault update -> one validated price for
+        a graduated mint. The price recomputes from BOTH vaults'
+        last seen balances; a vault never seen yet means no price
+        (never a partial price from one vault alone)."""
+        result = params.get("result") or {}
+        slot = (result.get("context") or {}).get("slot")
+        if isinstance(slot, int):
+            last_slot = self._last_slot.get(vault)
+            if last_slot is not None and slot <= last_slot:
+                return False
+            self._last_slot[vault] = slot
+        value = result.get("value") or {}
+        data = value.get("data") or []
+        raw = data[0] if data else None
+        if not isinstance(raw, str):
             return False
         try:
-            sol_price = float(sol["price"])
-        except (TypeError, ValueError):
+            account_bytes = base64.b64decode(raw, validate=True)
+        except Exception:
             return False
-        if not math.isfinite(sol_price) or sol_price <= 0:
+        amount = _token_account_amount(account_bytes)
+        if amount is None:
             return False
-        price_usd = price_sol * sol_price
-        if not math.isfinite(price_usd) or price_usd <= 0:
-            return False
-        return self._feed.ingest(mint, price_usd, SOURCE, now=now)
+        self._vault_amounts[vault] = amount
+        return self._ingest_pool_price(mint, now)
 
 
 def start_helius_stream(app):
     """Start the Helius stream for the app's live feed. Called
     from run.py only — create_app never starts threads, so tests
     never open sockets. Returns the HeliusStream, or None when
-    streaming is off (no HELIUS_API_KEY): the app then runs on
-    the DexScreener poll exactly as before."""
+    streaming is off (no HELIUS_API_KEY): the app then has NO coin
+    prices at all — pages show "no data" and the bot skips — until
+    a key is set. That is the fail-closed single-source rule: no
+    key, no second source to fall back to, never a stale number
+    presented as live."""
     cfg = app.config["TRADINGBOT_CONFIG"]
     feed = app.config["LIVE_FEED"]
     stream = HeliusStream(feed, cfg)
     if not stream.enabled:
         log.warning("[helius-stream] HELIUS_API_KEY is not set — "
-                    "live curve streaming is OFF; prices come from "
-                    "the DexScreener poll as before. Set "
-                    "HELIUS_API_KEY (free Helius account) to "
-                    "enable it.")
+                    "live price streaming is OFF; the app has no "
+                    "coin prices until a key is set (free Helius "
+                    "account). Pages show 'no data' and the bot "
+                    "skips — never a stale or second-source price.")
         return None
     stream.start()
     return stream

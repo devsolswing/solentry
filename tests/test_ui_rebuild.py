@@ -25,6 +25,7 @@ No SOL moves in these tests; real execution is a recording mock.
 """
 
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -35,18 +36,9 @@ from helpers import csrf, make_client, signup
 from tradingbot.solana import generate_keypair
 
 # Gate (the devnet pump.fun coin): the mint the UI tests buy and
-# hold, priced at $0.01 with a +2.50% 1h change from the mocked
-# trenches feed.
+# hold, priced at $0.01 with a +2.50% 1h change from the live
+# feed's own tick history.
 GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
-
-
-def make_prices(changes):
-    """changes: {coin: (price, change_24h)}"""
-    return {
-        "prices": {c: {"price": p, "change_24h": ch}
-                   for c, (p, ch) in changes.items()},
-        "source": "snapshot", "as_of": "test",
-    }
 
 
 class FakeRpc:
@@ -93,12 +85,8 @@ class UiBase(unittest.TestCase):
         FakeRpc.instances.clear()
         FakeRpc.balance_lamports = 0
         self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({
-                "BTC": (74000.0, -2.5), "ETH": (2100.0, 1.0),
-                "SOL": (10.0, 5.25), "USDC": (1.0, 0.0),
-                "DOGE": (0.07, 3.0), "PEPE": (0.000005, -1.0),
-                "BONK": (0.000003, 8.0), "JUP": (0.23, -0.5)}))
+            routes, "_feed_sol_price_usd",
+            return_value=10.0)
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(10.0, "snapshot", "test"))
@@ -109,16 +97,19 @@ class UiBase(unittest.TestCase):
                           "source": "dexscreener", "as_of": "test",
                           "error": None})
         self.trenches_patch.start()
-        # The trenches feed prices + names the Gate mint; coin_meta
-        # is mocked out so no test ever hits live RPC/DexScreener.
+        # The live feed prices the Gate mint (stream tick, +2.5%
+        # 1h from an hour-old tick); the batched Helius chain read
+        # is the pull twin. Coin_meta is mocked out so no test ever
+        # hits live RPC/DexScreener.
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={GATE_MINT: 0.01})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes",
-            return_value={GATE_MINT: 2.5})
-        self.mint_1h_patch.start()
+        feed = self.app.config["LIVE_FEED"]
+        now = time.time()
+        feed.ingest(GATE_MINT, 0.01 / 1.025, "helius-stream",
+                    now=now - 3600)
+        feed.ingest(GATE_MINT, 0.01, "helius-stream", now=now)
         self.mint_idents_patch = mock.patch.object(
             routes, "fetch_mint_identities",
             return_value={GATE_MINT: {"name": "Gate",
@@ -138,7 +129,6 @@ class UiBase(unittest.TestCase):
     def tearDown(self):
         self.coin_meta_patch.stop()
         self.mint_idents_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
@@ -518,6 +508,16 @@ class TestTrenchesPage(UiBase):
             return_value=fake_trenches(mint))
         self.trenches_patch.start()
         self._reset_trenches_cache()
+        # Trenches rows are repriced onto the single source: the
+        # row only lists when the live feed prices the mint, and
+        # its 1h gain comes from the feed's own tick history — so
+        # seed both (an hour-old tick, then the fresh $0.00123
+        # tick: +12.5% over the hour).
+        feed = self.app.config["LIVE_FEED"]
+        now = time.time()
+        feed.ingest(mint, 0.00123 / 1.125, "helius-stream",
+                    now=now - 3600)
+        feed.ingest(mint, 0.00123, "helius-stream", now=now)
         html = self._html("/trenches")
         self.assertIn("Moon Coin", html)
         self.assertIn("MOON", html)

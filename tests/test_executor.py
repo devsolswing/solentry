@@ -146,6 +146,9 @@ class FakePumpRpc:
     def get_account_info(self, pubkey):
         return self._accounts.get(pubkey)
 
+    def get_multiple_accounts(self, pubkeys):
+        return {p: self._accounts.get(p) for p in pubkeys}
+
     def get_token_account_balance(self, pubkey):
         return self._ata_balances.get(pubkey, 0)
 
@@ -333,7 +336,7 @@ class TestExecutorBuy(ExecutorBase):
                                     "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
                                     decision_price_age_seconds=0.0,
                                     sol_price_usd=TEST_SOL_PRICE_USD,
-                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         self.assertEqual(result["signing_bot"], self.support_id)
@@ -400,7 +403,7 @@ class TestExecutorGuards(ExecutorBase):
             CURVE_PRICE_USD, self.db, Config(env=env),
             decision_price_age_seconds=0.0,
             sol_price_usd=TEST_SOL_PRICE_USD,
-            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         self.assertEqual(len(rpc.sent), 1)
@@ -433,7 +436,7 @@ class TestExecutorGuards(ExecutorBase):
                                     "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
                                     decision_price_age_seconds=0.0,
                                     sol_price_usd=TEST_SOL_PRICE_USD,
-                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["reason"], "real swap not available in v1")
         self.assertEqual(rpc.sent, [])
@@ -445,7 +448,7 @@ class TestExecutorGuards(ExecutorBase):
                                     "buy", 3.0, CURVE_PRICE_USD, self.db, self.cfg,
                                     decision_price_age_seconds=0.0,
                                     sol_price_usd=TEST_SOL_PRICE_USD,
-                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("buy size", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -456,7 +459,7 @@ class TestExecutorGuards(ExecutorBase):
                                     "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
                                     decision_price_age_seconds=0.0,
                                     sol_price_usd=TEST_SOL_PRICE_USD,
-                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("no bonding curve", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -468,7 +471,7 @@ class TestExecutorGuards(ExecutorBase):
                                     "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
                                     decision_price_age_seconds=0.0,
                                     sol_price_usd=TEST_SOL_PRICE_USD,
-                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("migrated", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -483,7 +486,7 @@ class TestExecutorGuards(ExecutorBase):
             1.0, CURVE_PRICE_USD, self.db, self.cfg,
             decision_price_age_seconds=0.0,
             sol_price_usd=TEST_SOL_PRICE_USD,
-            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("fees", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -497,7 +500,7 @@ class TestExecutorGuards(ExecutorBase):
                                     "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
                                     decision_price_age_seconds=0.0,
                                     sol_price_usd=TEST_SOL_PRICE_USD,
-                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("no app wallet", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -519,7 +522,7 @@ class TestExecutorGuards(ExecutorBase):
                                     "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
                                     decision_price_age_seconds=0.0,
                                     sol_price_usd=TEST_SOL_PRICE_USD,
-                                    sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("not confirmed", result["reason"])
 
@@ -538,7 +541,7 @@ class TestConfirmationRecheck(ExecutorBase):
                                   "buy", 1.0, CURVE_PRICE_USD, self.db, self.cfg,
                                   decision_price_age_seconds=0.0,
                                   sol_price_usd=TEST_SOL_PRICE_USD,
-                                  sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
 
     def test_slow_confirmation_reports_executed(self):
         """The main window never sees the transaction, but the
@@ -736,7 +739,21 @@ class TestLoopRealTrade(ExecutorBase):
         self.db.commit()
         # The feed price must agree with the mock curve (the
         # price gate), and the loop's SOL prices are pinned so no
-        # live price fetch happens in the test.
+        # live price fetch happens in the test. The v1 buy signal
+        # is the 24-hour change from the loop's own marks: seed one
+        # mark 24.5 hours old at 5% below the curve price, so the
+        # signal reads about +5.3% — above the +2% buy line — and
+        # the mark survives the 25-hour marks keep. There is no
+        # second SOL source any more, so nothing patches CoinGecko.
+        from datetime import datetime, timedelta, timezone as _tz
+        _mark_at = (datetime.now(_tz.utc)
+                    - timedelta(hours=24, minutes=30)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+        self.db.execute(
+            "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?)",
+            (bot_id, self.mint, CURVE_PRICE_USD / 1.05, _mark_at))
+        self.db.commit()
         prices = {"prices": {self.mint: {"price": CURVE_PRICE_USD,
                                          "change_24h": 5.0}},
                   "source": "snapshot", "as_of": "test"}
@@ -747,9 +764,6 @@ class TestLoopRealTrade(ExecutorBase):
         with mock.patch.object(solana_mod, "SolanaRpcClient",
                               return_value=rpc), \
                 mock.patch.object(silent_loop_mod, "_live_sol_price_usd",
-                                  return_value=TEST_SOL_PRICE_USD), \
-                mock.patch.object(silent_loop_mod,
-                                  "get_coingecko_sol_price_usd",
                                   return_value=TEST_SOL_PRICE_USD):
             outcomes = run_once(
                 self.db, self.cfg,

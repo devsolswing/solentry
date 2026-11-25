@@ -103,17 +103,11 @@ class TestHomeCompactLayout(HomeMockupBase):
         self._choose_mode("paper")
         self._buy_mint()
         # The row's SOL value needs a live SOL price: the base
-        # harness prices are a snapshot, which _dashboard_data does
-        # not use for the SOL price (feed tick first, REST when
-        # live). With SOL live at the mocked $10, 990.0990 GATE
-        # at $0.01 ($9.90099) is 0.99010 SOL.
-        live_prices = {"prices": {"SOL": {"price": 10.0,
-                                          "change_24h": 5.25,
-                                          "change_1h": 2.5}},
-                       "source": "live", "as_of": "test"}
-        with mock.patch.object(routes, "get_prices",
-                              return_value=live_prices):
-            html = self._html("/wallet")
+        # harness supplies it — the feed's SOL tick at $10, with
+        # _feed_sol_price_usd patched to the same $10 — so
+        # 990.0990 GATE at $0.01 ($9.90099) is 0.99010 SOL. (The
+        # old routes.get_prices seam is gone in the Helius build.)
+        html = self._html("/wallet")
         # Circular icon (image when there is one, ticker-initial
         # fallback otherwise) + sparkline slot + SOL value + amount +
         # 1h % far right. $10 at the mocked $0.01 feed price buys

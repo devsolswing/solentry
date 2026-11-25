@@ -28,7 +28,7 @@
           <input type="radio" name="bundle_id" value="{{ b.id }}"{% if loop.first %} checked{% endif %}>
           <span class="gate-bundle-amount">{{ b.label }}</span>
           <span class="gate-bundle-trades">{{ b.trades }} trades{% if b.bonus %} (+{{ b.bonus }} free){% endif %}</span>
-          <span class="gate-bundle-price" data-gate-price data-bundle="{{ b.id }}">—</span>
+          <span class="gate-bundle-price" data-gate-price data-bundle="{{ b.id }}">no data</span>
         </label>
         {% endfor %}
       </div>
@@ -59,14 +59,14 @@
   }
   function startQuoteTimer() {
     stopQuoteTimer();
-    quoteTimer = setInterval(refreshQuotes, 15000);
+    quoteTimer = setInterval(refreshQuotes, 4000);
   }
 
   function refreshQuotes() {
     if (popup.hidden) return;
     fetch(quoteUrl).then(function (r) { return r.json(); }).then(function (d) {
       if (!d.ok || !d.prices || !d.prices.length) {
-        priceText.textContent = 'Price unavailable — try again in a moment.';
+        priceText.textContent = 'no data';
         priceNote.textContent = '';
         submit.disabled = true;
         return;
@@ -75,7 +75,7 @@
       var bestBundle = null;
       d.prices.forEach(function (p) {
         var el = popup.querySelector('[data-gate-price][data-bundle="' + p.bundle_id + '"]');
-        if (el) el.textContent = p.sol_amount != null ? p.sol_amount.toFixed(4) + ' SOL' : '—';
+        if (el) el.textContent = p.sol_amount != null ? p.sol_amount.toFixed(4) + ' SOL' : 'no data';
         if (p.best_value) bestBundle = p;
       });
       var sel = popup.querySelector('input[name="bundle_id"]:checked');
@@ -86,13 +86,13 @@
         priceNote.textContent = solPrice ? '(SOL ≈ $' + Number(solPrice).toFixed(2) + ')' : '';
         submit.disabled = false;
       } else {
-        priceText.textContent = 'Price unavailable — try again in a moment.';
+        priceText.textContent = 'no data';
         submit.disabled = true;
       }
       if (bestBundle) best.textContent = 'Best value: ' + bestBundle.label + ' for ' + bestBundle.trades + ' trades.';
       quoteBox.hidden = false;
     }).catch(function () {
-      priceText.textContent = 'Price unavailable — try again in a moment.';
+      priceText.textContent = 'no data';
       submit.disabled = true;
       quoteBox.hidden = false;
     });

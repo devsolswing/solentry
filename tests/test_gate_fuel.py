@@ -425,8 +425,8 @@ class TestGate(FuelBase):
 
         with mock.patch.object(routes, "execute_real_trade",
                                _no_executor), \
-            mock.patch.object(routes, "fetch_prices_for_mints",
-                              lambda mints: {}):
+            mock.patch.object(routes, "_chain_prices_for_mints",
+                              lambda app, mints: {}):
             token = csrf(self.client, "/wallet")
             resp = self.client.post(
                 f"/coins/{GATE}/buy",
@@ -514,8 +514,13 @@ class TestCountdownAndSupportId(FuelBase):
         mainnet too — packages buy through the pump.fun executor
         while $GATE is still bonding."""
         self.feed.ingest(GATE, 0.003, "curve")
-        with mock.patch.object(routes, "fetch_prices_for_mints",
-                               lambda mints: {}):
+        # The quote's SOL leg is the feed's SOL tick only — seed it
+        # at $150 (the same rate the bundle-buy helper uses), and
+        # keep the chain read local: the feed tick already prices
+        # $GATE, so the chain read must never be reached.
+        self.feed.ingest("SOL", 150.0, "test")
+        with mock.patch.object(routes, "_chain_prices_for_mints",
+                               lambda app, mints: {}):
             resp = self.client.get(
                 "/api/gate-quote?bundle=bundle_1m")
         self.assertEqual(resp.status_code, 200)

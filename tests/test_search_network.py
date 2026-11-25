@@ -22,6 +22,7 @@ from unittest import mock
 import tradingbot.charts as charts_mod
 import tradingbot.routes as routes
 from helpers import make_client, signup
+from tradingbot.livefeed import LiveFeed
 from tradingbot.networks import coin_network, send_refusal
 
 MINT = "11111111111111111111111111111111"
@@ -44,6 +45,15 @@ def dex_pairs(*entries):
 
 def pumpfun_pair(mint, name, sym, price=0.002, liq=50000):
     return (mint, name, sym, price, liq, "pumpfun")
+
+
+def _priced_feed(mint, price):
+    """A live feed with one fresh stream tick pricing `mint` —
+    the single price source for search results (a name search
+    drops any mint the feed / chain cannot price)."""
+    feed = LiveFeed()
+    feed.ingest(mint, price, "test")
+    return feed
 
 
 class TestCoinNetworkUnit(unittest.TestCase):
@@ -93,8 +103,11 @@ class TestSearchCoinsPumpfunOnly(unittest.TestCase):
 
     def test_name_search_returns_pumpfun_coin(self):
         payload = dex_pairs(pumpfun_pair(BFUN_MINT, "BonkFun", "BFUN"))
+        # The price comes from the feed's fresh tick, never the
+        # DexScreener priceUsd on the pair.
         data = charts_mod.search_coins(
-            "bfun", http_get=lambda url: payload)
+            "bfun", http_get=lambda url: payload,
+            feed=_priced_feed(BFUN_MINT, 0.002))
         self.assertEqual(len(data["results"]), 1)
         entry = data["results"][0]
         self.assertTrue(entry["is_mint"])
@@ -130,7 +143,8 @@ class TestSearchCoinsPumpfunOnly(unittest.TestCase):
              "raydium"),
             pumpfun_pair(BFUN_MINT, "BonkFun", "BFUN", 0.002, 50000))
         data = charts_mod.search_coins(
-            "bfun", http_get=lambda url: payload)
+            "bfun", http_get=lambda url: payload,
+            feed=_priced_feed(BFUN_MINT, 0.002))
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(data["results"][0]["coin_id"], BFUN_MINT)
         self.assertEqual(data["results"][0]["symbol"], "BFUN")
@@ -170,7 +184,8 @@ class TestSearchCoinsPumpfunOnly(unittest.TestCase):
         payload = dex_pairs(
             pumpfun_pair(BFUN_MINT, "Bitcoin Cat", "BTC"))
         data = charts_mod.search_coins(
-            "btc", http_get=lambda url: payload)
+            "btc", http_get=lambda url: payload,
+            feed=_priced_feed(BFUN_MINT, 0.002))
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(data["results"][0]["coin_id"], BFUN_MINT)
         self.assertEqual(data["results"][0]["symbol"], "BTC")
@@ -186,17 +201,27 @@ class TestSearchCoinsPumpfunOnly(unittest.TestCase):
         self.assertEqual(data["results"], [])
 
     def test_best_liquidity_pair_wins_per_mint(self):
+        # Discovery picks the highest-liquidity pair's name/symbol
+        # per mint (the thin pair's name never wins) — but the PRICE
+        # is the feed's fresh tick, never the DexScreener priceUsd
+        # on either pair: the old assertion that the result carried
+        # the winning pair's $0.003 was the deleted DexScreener
+        # fallback price, not the discovery rule.
         payload = dex_pairs(
             pumpfun_pair(BFUN_MINT, "BonkFun", "BFUN", 0.002, 1000),
-            (BFUN_MINT, "BonkFun", "BFUN", 0.003, 90000, "pumpswap"))
+            (BFUN_MINT, "BonkFun Prime", "BFUP", 0.003, 90000,
+             "pumpswap"))
         data = charts_mod.search_coins(
-            "bfun", http_get=lambda url: payload)
+            "bfun", http_get=lambda url: payload,
+            feed=_priced_feed(BFUN_MINT, 0.004))
         self.assertEqual(len(data["results"]), 1)
-        self.assertEqual(data["results"][0]["price_usd"], 0.003)
+        self.assertEqual(data["results"][0]["name"], "BonkFun Prime")
+        self.assertEqual(data["results"][0]["symbol"], "BFUP")
+        self.assertEqual(data["results"][0]["price_usd"], 0.004)
 
     def test_search_by_address_uses_feed_identity(self):
         with mock.patch.object(
-                charts_mod, "fetch_prices_for_mints",
+                charts_mod, "_chain_prices_for_mints",
                 return_value={MINT: 0.002}), \
                 mock.patch.object(
                     charts_mod, "fetch_mint_identities",
@@ -216,7 +241,7 @@ class TestSearchCoinsPumpfunOnly(unittest.TestCase):
         # metadata — the name is "Unknown coin", never the address
         # and never the old "Pump.fun token …" label.
         with mock.patch.object(
-                charts_mod, "fetch_prices_for_mints",
+                charts_mod, "_chain_prices_for_mints",
                 return_value={}), \
                 mock.patch.object(
                     charts_mod, "fetch_mint_identities",
@@ -234,7 +259,7 @@ class TestSearchCoinsPumpfunOnly(unittest.TestCase):
         # A bonding-curve mint the feed has never seen still has
         # its real name on-chain (Gate).
         with mock.patch.object(
-                charts_mod, "fetch_prices_for_mints",
+                charts_mod, "_chain_prices_for_mints",
                 return_value={}), \
                 mock.patch.object(
                     charts_mod, "fetch_mint_identities",
@@ -297,6 +322,11 @@ class TestSearchEndpointPumpfunOnly(unittest.TestCase):
         return resp.get_json()
 
     def test_endpoint_name_search_finds_pumpfun_coin(self):
+        # The route prices from the app's live feed: seed a fresh
+        # tick for the mint, or the single-source rule drops the
+        # result (a mint nobody has priced is never shown at a
+        # DexScreener price).
+        self.app.config["LIVE_FEED"].ingest(BFUN_MINT, 0.002, "test")
         data = self._search("bfun")
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(data["results"][0]["coin_id"], BFUN_MINT)

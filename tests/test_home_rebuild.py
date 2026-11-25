@@ -152,18 +152,12 @@ class TestHomeRebuildNavigation(HomeMockupBase):
              "image_url": None, "sparkline_svg": ""},
         ]
         # The row's SOL value needs a live SOL price: the base
-        # harness prices are a snapshot, which _dashboard_data does
-        # not use for the SOL price (feed tick first, REST when
-        # live). With SOL live at the mocked $10, the Pepe row's
-        # $0.90 is 0.09000 SOL.
-        live_prices = {"prices": {"SOL": {"price": 10.0,
-                                          "change_24h": 5.25,
-                                          "change_1h": 2.5}},
-                       "source": "live", "as_of": "test"}
+        # harness supplies it — the feed's SOL tick at $10, with
+        # _feed_sol_price_usd patched to the same $10 — so the
+        # Pepe row's $0.90 is 0.09000 SOL. (The old
+        # routes.get_prices seam is gone in the Helius build.)
         with mock.patch.object(routes, "_coin_rows",
-                              return_value=(rows, False)), \
-                mock.patch.object(routes, "get_prices",
-                                  return_value=live_prices):
+                              return_value=(rows, False)):
             self._choose_mode("paper")
             html = self._html("/wallet")
         self.assertIn("/coins/PEPE/detail", html)

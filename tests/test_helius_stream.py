@@ -67,7 +67,8 @@ def _curve_b64(vt, vs, complete=False):
 
 
 class FakeRpc:
-    """get_account_info only, returning one canned curve."""
+    """get_account_info / get_multiple_accounts, returning one
+    canned curve for any address."""
 
     def __init__(self, curve_bytes=None):
         self._curve_bytes = curve_bytes
@@ -77,6 +78,9 @@ class FakeRpc:
             return None
         return {"data": self._curve_bytes, "lamports": 1000,
                 "executable": False, "owner": "pump"}
+
+    def get_multiple_accounts(self, pubkeys):
+        return {p: self.get_account_info(p) for p in pubkeys}
 
 
 class FakeWS:
@@ -493,27 +497,40 @@ class TestReconnect(unittest.TestCase):
 
 
 class TestBackfill(unittest.TestCase):
-    def test_backfill_polls_rest_for_subscribed_mints(self):
-        feed = LiveFeed()
+    def _stream(self, feed, rpc_factory=None):
         cfg = Config(env={"NETWORK": "mainnet",
                           "HELIUS_API_KEY": "k",
                           "SESSION_SECRET": "x", "ENCRYPTION_KEY": "y"})
-        stream = HeliusStream(feed, cfg)
+        return HeliusStream(
+            feed, cfg,
+            rpc_factory=rpc_factory or
+            (lambda url: FakeRpc(_live_curve())))
+
+    def test_backfill_re_reads_curves_from_the_chain(self):
+        """After (re)connect the stream re-reads subscribed mints
+        straight from the chain — a direct curve read, never the
+        deleted DexScreener poll — and ingests the price."""
+        from tradingbot.pumpfun import parse_bonding_curve
+        feed = LiveFeed()
+        feed.ingest("SOL", SOL_PRICE, "test")
+        stream = self._stream(feed)
         stream._subs[GATE_MAINNET] = "curveaddr"
-        with mock.patch.object(feed, "_poll_dexscreener") as poll:
-            stream._backfill()
-        poll.assert_called_once_with([GATE_MAINNET])
+        stream._backfill()
+        snap = feed.snapshot([GATE_MAINNET])[GATE_MAINNET]
+        expected = (curve_spot_price_sol(
+            parse_bonding_curve(_live_curve())) * SOL_PRICE)
+        self.assertAlmostEqual(snap["price"], expected, places=9)
+        self.assertEqual(snap["source"], "helius-stream")
 
     def test_backfill_failure_never_raises(self):
         feed = LiveFeed()
-        cfg = Config(env={"NETWORK": "mainnet",
-                          "HELIUS_API_KEY": "k",
-                          "SESSION_SECRET": "x", "ENCRYPTION_KEY": "y"})
-        stream = HeliusStream(feed, cfg)
+        feed.ingest("SOL", SOL_PRICE, "test")
+        stream = self._stream(
+            feed,
+            rpc_factory=mock.Mock(side_effect=Exception("down")))
         stream._subs[GATE_MAINNET] = "curveaddr"
-        with mock.patch.object(feed, "_poll_dexscreener",
-                               side_effect=Exception("down")):
-            stream._backfill()  # must not raise
+        stream._backfill()  # must not raise
+        self.assertEqual(feed.snapshot([GATE_MAINNET]), {})
 
 
 class TestStartHeliusStream(unittest.TestCase):

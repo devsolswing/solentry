@@ -51,14 +51,6 @@ class FakeRpc:
         return True
 
 
-def make_prices(changes):
-    return {
-        "prices": {c: {"price": p, "change_24h": ch}
-                   for c, (p, ch) in changes.items()},
-        "source": "live", "as_of": "test",
-    }
-
-
 class CoinNetworkBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -67,8 +59,8 @@ class CoinNetworkBase(unittest.TestCase):
         self.rpc_patch.start()
         FakeRpc.instances.clear()
         self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({"SOL": (10.0, 5.25)}))
+            routes, "_feed_sol_price_usd",
+            return_value=10.0)
         self.prices_patch.start()
         self.chart_patch = mock.patch.object(
             routes, "fetch_market_chart",
@@ -173,10 +165,11 @@ class TestCoinDetailNetwork(CoinNetworkBase):
             self.assertEqual(resp.status_code, 404, coin_id)
 
     def test_mint_send_window_shows_network_and_sends_token(self):
-        with mock.patch.object(
-                routes, "fetch_prices_for_mints",
-                return_value={MINT: 0.002}):
-            html = self._html(f"/coins/{MINT}/detail")
+        # The live feed's stream tick prices the mint (the single
+        # price source) so the detail page can render it.
+        self.app.config["LIVE_FEED"].ingest(
+            MINT, 0.002, "helius-stream")
+        html = self._html(f"/coins/{MINT}/detail")
         send = self._overlay(html, "coin-send-overlay")
         self.assertIn("Solana (devnet)", send)
         self.assertIn("Review send", send)
@@ -186,10 +179,11 @@ class TestCoinDetailNetwork(CoinNetworkBase):
         self.assertNotIn("SolEntry sends SOL only", send)
 
     def test_mint_receive_window_shows_network_and_address(self):
-        with mock.patch.object(
-                routes, "fetch_prices_for_mints",
-                return_value={MINT: 0.002}):
-            html = self._html(f"/coins/{MINT}/detail")
+        # The live feed's stream tick prices the mint (the single
+        # price source) so the detail page can render it.
+        self.app.config["LIVE_FEED"].ingest(
+            MINT, 0.002, "helius-stream")
+        html = self._html(f"/coins/{MINT}/detail")
         receive = self._overlay(html, "coin-receive-overlay")
         self.assertIn("Solana (devnet)", receive)
         self.assertIn("Only send on the Solana network", receive)

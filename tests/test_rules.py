@@ -11,6 +11,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import tradingbot.routes as routes
@@ -288,6 +289,54 @@ def _empty_prices():
     return {"prices": {}, "source": "snapshot", "as_of": "test"}
 
 
+def _now(offset_seconds=0):
+    return (datetime.now(timezone.utc)
+            + timedelta(seconds=offset_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+
+
+class _FakeFeed:
+    """Live-feed stand-in: snapshot() returns the tick per mint."""
+
+    def __init__(self, ticks=None):
+        self.ticks = ticks or {}
+
+    def snapshot(self, coin_ids=None):
+        out = {}
+        for cid in (coin_ids or list(self.ticks)):
+            if cid in self.ticks:
+                out[cid] = {"coin_id": cid, "price": self.ticks[cid],
+                            "source": "test", "stale": False}
+        return out
+
+    def tick_age_seconds(self, coin_id, now=None):
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        return None
+
+    def sanitize_prices_data(self, data):
+        return data
+
+    def sanitize_trenches(self, data):
+        return data
+
+    def set_tick_listener(self, callback):
+        self._listener = callback
+
+
+
+
 class RulesEngineBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -354,13 +403,35 @@ class RulesEngineBase(unittest.TestCase):
             args.append(kind)
         return self.db.execute(q, args).fetchall()
 
+    def _seed_gain_mark(self, bot_id, mint, price, change_5m):
+        # The loop's own marks, encoding the entry's stated
+        # 5-minute change: a mark 330s old at price / (1 + chg).
+        self.db.execute(
+            "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?)",
+            (bot_id, mint,
+             price / (1.0 + (float(change_5m) + 0.05) / 100.0),
+             _now(-330)))
+        self.db.commit()
+
+    def _run(self, entries, bot_id=None):
+        # Single-price source: a scan entry survives the loop's
+        # reprice only with a live feed tick at its price. Seed
+        # ticks for entries the feed has none for.
+        feed = _FakeFeed()
+        for _e in entries:
+            feed.ticks.setdefault(_e["mint"], _e["price_usd"])
+        scan = _FakeScan(entries)
+        return run_once(self.db, self.cfg,
+                        price_fetcher=_empty_prices,
+                        trenches_fetcher=scan, feed=feed)
+
 
 class TestRulesEngine(RulesEngineBase):
     def test_buy_on_threshold(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        scan = _FakeScan([_entry("MINTA", 0.01, change_5m=6.0)])
-        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                            trenches_fetcher=scan)
+        self._seed_gain_mark(bot_id, "MINTA", 0.01, 6.0)
+        outcomes = self._run([_entry("MINTA", 0.01, change_5m=6.0)])
         self.assertEqual(len(outcomes), 1)
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertEqual(outcomes[0]["actions"][0]["coin"], "MINTA")
@@ -369,18 +440,17 @@ class TestRulesEngine(RulesEngineBase):
 
     def test_no_buy_below_threshold(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        scan = _FakeScan([_entry("MINTA", 0.01, change_5m=3.0)])
-        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                            trenches_fetcher=scan)
+        self._seed_gain_mark(bot_id, "MINTA", 0.01, 3.0)
+        outcomes = self._run([_entry("MINTA", 0.01, change_5m=3.0)])
         self.assertEqual(outcomes[0]["actions"], [])
         self.assertIsNone(self._position(bot_id, "MINTA"))
 
     def test_tiny_market_cap_coin_qualifies(self):
         """No market-cap floor: a $400 coin gaining 3.5% in 5 min buys."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        scan = _FakeScan([_entry("TINY", 0.001, change_5m=6.0, cap=400)])
-        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                            trenches_fetcher=scan)
+        self._seed_gain_mark(bot_id, "TINY", 0.001, 6.0)
+        outcomes = self._run(
+            [_entry("TINY", 0.001, change_5m=6.0, cap=400)])
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertEqual(outcomes[0]["actions"][0]["coin"], "TINY")
         self.assertIsNotNone(self._position(bot_id, "TINY"))
@@ -388,10 +458,9 @@ class TestRulesEngine(RulesEngineBase):
     def test_huge_market_cap_coin_qualifies(self):
         """No market-cap cap: a $500M coin gaining 3.5% in 5 min buys."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        scan = _FakeScan([_entry("HUGE", 2.5, change_5m=6.0,
-                                 cap=500_000_000)])
-        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                            trenches_fetcher=scan)
+        self._seed_gain_mark(bot_id, "HUGE", 2.5, 6.0)
+        outcomes = self._run([_entry("HUGE", 2.5, change_5m=6.0,
+                                     cap=500_000_000)])
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertEqual(outcomes[0]["actions"][0]["coin"], "HUGE")
         self.assertIsNotNone(self._position(bot_id, "HUGE"))
@@ -400,12 +469,12 @@ class TestRulesEngine(RulesEngineBase):
         """Ranking reads the 5-minute gain alone: the tiny-cap coin
         gaining 9% beats the huge-cap coin gaining 4%."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        scan = _FakeScan([
+        self._seed_gain_mark(bot_id, "HUGE", 2.5, 6.0)
+        self._seed_gain_mark(bot_id, "TINY", 0.001, 9.0)
+        outcomes = self._run([
             _entry("HUGE", 2.5, change_5m=6.0, cap=500_000_000),
             _entry("TINY", 0.001, change_5m=9.0, cap=400),
         ])
-        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                            trenches_fetcher=scan)
         buys = [a for a in outcomes[0]["actions"]
                 if a["action"] == "buy"]
         self.assertEqual(len(buys), 1)
@@ -415,13 +484,14 @@ class TestRulesEngine(RulesEngineBase):
 
     def test_strongest_gainer_wins_one_position(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        scan = _FakeScan([
+        self._seed_gain_mark(bot_id, "MINTA", 0.01, 3.5)
+        self._seed_gain_mark(bot_id, "MINTB", 0.01, 8.0)
+        self._seed_gain_mark(bot_id, "MINTC", 0.01, 12.0)
+        self._run([
             _entry("MINTA", 0.01, change_5m=3.5),
             _entry("MINTB", 0.01, change_5m=8.0),
             _entry("MINTC", 0.01, change_5m=12.0),
         ])
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
         positions = self.db.execute(
             "SELECT coin_id FROM bot_positions WHERE bot_id = ?",
             (bot_id,)).fetchall()
@@ -431,9 +501,7 @@ class TestRulesEngine(RulesEngineBase):
         bot_id = self._insert_bot(rules=trenches_ruleset())
         self._insert_position(bot_id, "MINTA", 1000, 0.01)
         # +3% -> sell 10% (100 coins).
-        scan = _FakeScan([_entry("MINTA", 0.0103, change_5m=0.0)])
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
+        self._run([_entry("MINTA", 0.0103, change_5m=0.0)])
         pos = self._position(bot_id, "MINTA")
         self.assertAlmostEqual(pos["amount"], 900.0)
         self.assertEqual(pos["ladder_stage"], 1)
@@ -443,9 +511,7 @@ class TestRulesEngine(RulesEngineBase):
         self.assertAlmostEqual(holding["amount"], 900.0)
         # +10% -> sell remaining 90% (900 coins), position closed.
         self._reset_scan(bot_id)
-        scan.entries = [_entry("MINTA", 0.011, change_5m=0.0)]
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
+        self._run([_entry("MINTA", 0.011, change_5m=0.0)])
         self.assertIsNone(self._position(bot_id, "MINTA"))
         self.assertEqual(len(self._activity("silent_sell")), 2)
 
@@ -454,9 +520,7 @@ class TestRulesEngine(RulesEngineBase):
         # Bought at 0.01, peaked at 0.02. A fall to 0.0186 is 7% below
         # the peak (but still +86% on entry) — must sell everything.
         self._insert_position(bot_id, "MINTA", 1000, 0.01, peak=0.02)
-        scan = _FakeScan([_entry("MINTA", 0.0186, change_5m=0.0)])
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
+        self._run([_entry("MINTA", 0.0186, change_5m=0.0)])
         self.assertIsNone(self._position(bot_id, "MINTA"))
         self.assertTrue([a for a in self._activity("silent_sell")
                          if "trailing stop" in a["detail"]])
@@ -464,17 +528,13 @@ class TestRulesEngine(RulesEngineBase):
     def test_peak_tracks_upward(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
         self._insert_position(bot_id, "MINTA", 1000, 0.01, peak=0.01)
-        scan = _FakeScan([_entry("MINTA", 0.021, change_5m=0.0)])
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
+        self._run([_entry("MINTA", 0.021, change_5m=0.0)])
         pos = self._position(bot_id, "MINTA")
         self.assertIsNotNone(pos)
         self.assertAlmostEqual(pos["peak_price"], 0.021)
         # Now 7% below the new peak sells all.
         self._reset_scan(bot_id)
-        scan.entries = [_entry("MINTA", 0.0195, change_5m=0.0)]
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
+        self._run([_entry("MINTA", 0.0195, change_5m=0.0)])
         self.assertIsNone(self._position(bot_id, "MINTA"))
 
     def test_stop_loss_still_enforced(self):
@@ -482,9 +542,7 @@ class TestRulesEngine(RulesEngineBase):
         rules["trailing_stop_pct"] = 20.0  # looser than the 7% stop loss
         bot_id = self._insert_bot(rules=rules, stop_loss=7)
         self._insert_position(bot_id, "MINTA", 1000, 0.01, peak=0.01)
-        scan = _FakeScan([_entry("MINTA", 0.0092, change_5m=0.0)])
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
+        self._run([_entry("MINTA", 0.0092, change_5m=0.0)])
         self.assertIsNone(self._position(bot_id, "MINTA"))
         self.assertTrue([a for a in self._activity("silent_stop_loss")])
 
@@ -492,9 +550,7 @@ class TestRulesEngine(RulesEngineBase):
         bad = _trenches_rules()
         bad["sell_ladder"] = [{"pct_of_position": 200, "profit_pct": 3}]
         bot_id = self._insert_bot(rules=bad)
-        scan = _FakeScan([_entry("MINTA", 0.01, change_5m=50.0)])
-        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                            trenches_fetcher=scan)
+        outcomes = self._run([_entry("MINTA", 0.01, change_5m=50.0)])
         self.assertEqual(outcomes[0]["actions"][0]["reason"],
                          "invalid rules")
         self.assertIsNone(self._position(bot_id, "MINTA"))
@@ -513,13 +569,11 @@ class TestRulesEngine(RulesEngineBase):
 
     def test_scan_interval_cadence(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        scan = _FakeScan([_entry("MINTA", 0.01, change_5m=6.0)])
-        run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                 trenches_fetcher=scan)
+        self._seed_gain_mark(bot_id, "MINTA", 0.01, 6.0)
+        self._run([_entry("MINTA", 0.01, change_5m=6.0)])
         self.assertIsNotNone(self._position(bot_id, "MINTA"))
         # Second iteration inside the 60s interval: no new scan.
-        outcomes = run_once(self.db, self.cfg, price_fetcher=_empty_prices,
-                            trenches_fetcher=scan)
+        outcomes = self._run([_entry("MINTA", 0.01, change_5m=6.0)])
         self.assertEqual(outcomes[0]["actions"][0]["reason"],
                          "scan interval not reached")
 
@@ -570,23 +624,31 @@ class TestRulesEngine(RulesEngineBase):
             def get_balance_lamports(self, pubkey):
                 return 0
 
-        with mock.patch.object(
-                silent_loop, "fetch_prices_for_mints",
-                return_value={GATE_MINT: 100.0}), \
-                mock.patch.object(
-                    silent_loop, "fetch_mint_24h_changes",
-                    return_value={GATE_MINT: 2.5}):
-            outcomes = run_once(self.db, self.cfg,
-                                price_fetcher=lambda: prices,
-                                rpc_factory=_GateRpc())
-            self.assertEqual(len(outcomes[0]["actions"]), 1)
-            self.assertEqual(outcomes[0]["actions"][0]["action"], "skip")
-            self.assertIn("signal not yet confirmed",
-                          outcomes[0]["actions"][0]["reason"])
-            self._reset_scan(bot_id)
-            outcomes = run_once(self.db, self.cfg,
-                                price_fetcher=lambda: prices,
-                                rpc_factory=_GateRpc())
+        # Signals bots price from the single source now: a live
+        # feed tick at the signal price, and the 24-hour change
+        # from the loop's own marks — a mark 24.5 hours old at
+        # 2.5% below the tick reads +2.5%, above the +2% buy line.
+        from tradingbot.livefeed import LiveFeed
+
+        feed = LiveFeed()
+        feed.ingest(GATE_MINT, 100.0, "test")
+        feed.ingest("SOL", 100.0, "test")
+        self.db.execute(
+            "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?)",
+            (bot_id, GATE_MINT, 100.0 / 1.025, _now(-24 * 3600 - 1800)))
+        self.db.commit()
+        outcomes = run_once(self.db, self.cfg,
+                            price_fetcher=lambda: prices,
+                            rpc_factory=_GateRpc(), feed=feed)
+        self.assertEqual(len(outcomes[0]["actions"]), 1)
+        self.assertEqual(outcomes[0]["actions"][0]["action"], "skip")
+        self.assertIn("signal not yet confirmed",
+                      outcomes[0]["actions"][0]["reason"])
+        self._reset_scan(bot_id)
+        outcomes = run_once(self.db, self.cfg,
+                            price_fetcher=lambda: prices,
+                            rpc_factory=_GateRpc(), feed=feed)
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertIsNotNone(self._position(bot_id, GATE_MINT))
 

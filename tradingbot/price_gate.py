@@ -1,6 +1,6 @@
 """Price-validation gate for real buys (research report §3, rules
 1–2 and 5). A price earns the right to execute only when it passes
-all three checks:
+these checks:
 
 1. Freshness — a decision price older than
    `decision_price_max_age_seconds` (default 30s) is stale: new buys
@@ -11,20 +11,29 @@ all three checks:
    the bound (the manual-trade route resolves its price fresh
    in-request; the silent loop passes the scan age). The skip is
    recorded in the returned details, never silently treated as fresh.
-2. Two-source agreement — immediately before a real buy, the feed
-   (decision) price must agree with a fresh on-chain read (the
-   bonding curve for a pump.fun coin) within
-   `two_source_tolerance_pct` (default 5%, a Remy default awaiting
-   James's call). If they disagree, the buy refuses: the feed can be
-   60–90s behind, but the buy only happens when the chain agrees the
-   signal is still true. The fill price is never the feed price —
-   the executor re-reads the curve inside the trade call.
-3. SOL-price cross-check — USD-denominated decisions refuse when
-   the Jupiter SOL price and the CoinGecko SOL price disagree by
-   more than `sol_price_disagree_pct` (default 2%, a Remy default).
-   When the second source is unavailable there is nothing to
-   disagree with: the check is skipped and recorded (closest
-   version, never a guessed agreement).
+2. Same-source consistency — immediately before a real buy, the
+   decision price (the Helius stream's latest tick for this mint)
+   must agree with a fresh on-chain read of the same bonding curve
+   within `two_source_tolerance_pct` (default 5%, a Remy default
+   awaiting James's call). The two reads are the same source
+   moments apart — the stream tick and this fresh read — so a
+   disagreement means the price moved since the tick, not that two
+   sources disagree: the buy refuses rather than executing on a
+   moved price. The fill price is never the decision price — the
+   executor re-reads the curve inside the trade call.
+
+There is no third check any more. The old check 3 (SOL-price
+cross-check: Jupiter vs CoinGecko disagreeing by more than
+`sol_price_disagree_pct`) is gone with the single-price source
+(2026-11-25): SOL has one source (Jupiter) and one number (the
+live feed's SOL tick), so there is nothing to cross-check against
+— and the cross-check was refusing real trades whenever the two
+SOL prints drifted apart. What guards a bad SOL quote now is the
+feed's tick validation on the SOL tick itself (the 50% single-tick
+jump guard and the 3-agreeing-tick re-base in livefeed.ingest):
+a bad SOL print is rejected and the last good SOL price stands;
+a SOL tick older than 90s stops the stream ingesting rather than
+converting at a stale rate.
 
 Every refusal is a plain (ok=False, reason) — the caller logs it as
 a skip, never a fill.
@@ -57,15 +66,16 @@ def curve_price_sol_per_token(curve: dict) -> float | None:
 def check_entry_price(rpc, cfg, mint: str, decision_price_usd,
                       decision_price_age_seconds=None,
                       sol_price_primary=None,
-                      sol_price_secondary=None,
                       curve=None) -> tuple:
     """(ok, reason, details) for a real buy of `mint` at
-    `decision_price_usd` (the feed price that picked the trade).
-    `curve` is an already-read parsed bonding curve (the executor
-    passes the one it just read); otherwise the curve is read fresh
-    here. `sol_price_primary` is the Jupiter SOL price (USD); when
-    None it is fetched here. A refusal always names the failed
-    check; `details` carries the numbers for the log."""
+    `decision_price_usd` (the Helius stream's latest tick for the
+    mint — the one price). `curve` is an already-read parsed
+    bonding curve (the executor passes the one it just read);
+    otherwise the curve is read fresh here. `sol_price_primary`
+    is the SOL price in USD (the live feed's SOL tick — the one
+    SOL number); when None it is fetched here. A refusal always
+    names the failed check; `details` carries the numbers for
+    the log."""
     details: dict = {"decision_price_usd": decision_price_usd,
                      "age_checked": decision_price_age_seconds is not None}
     try:
@@ -124,23 +134,11 @@ def check_entry_price(rpc, cfg, mint: str, decision_price_usd,
     diff_pct = abs(decision - onchain_usd) / onchain_usd * 100.0
     details["two_source_diff_pct"] = diff_pct
     if diff_pct > float(cfg.two_source_tolerance_pct):
-        return False, (f"feed price ${decision:.6g} disagrees with the "
-                       f"on-chain price ${onchain_usd:.6g} "
+        return False, (f"stream price ${decision:.6g} moved away from "
+                       f"the on-chain price ${onchain_usd:.6g} "
                        f"({diff_pct:.1f}% apart, tolerance "
-                       f"{cfg.two_source_tolerance_pct:.0f}%)"), details
-    if sol_price_secondary is not None:
-        from .prices import sol_prices_agree
-        agree = sol_prices_agree(sol_price_primary, sol_price_secondary,
-                                 cfg.sol_price_disagree_pct)
-        details["sol_cross_check"] = agree
-        if agree is False:
-            return False, (f"SOL price sources disagree: Jupiter "
-                           f"${float(sol_price_primary):.2f} vs "
-                           f"CoinGecko "
-                           f"${float(sol_price_secondary):.2f} "
-                           f"(more than "
-                           f"{cfg.sol_price_disagree_pct:.0f}% apart)"), \
-                details
+                       f"{cfg.two_source_tolerance_pct:.0f}%) — the "
+                       f"price moved since the tick"), details
     return True, None, details
 
 

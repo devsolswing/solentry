@@ -19,9 +19,10 @@ and numbers are never the data — rows are the user's real holdings.
 - Holdings come from LIVE on-chain balances in real mode: when
   BOTH token programs answered, a coin the chain no longer lists
   leaves the list; a partial read never hides a holding.
-- The holdings list auto-refreshes every 60s (/api/home-holdings):
-  rows update in place, exited coins drop, new coins insert, no
-  manual reload; live.js re-subscribes after a set change.
+- The holdings list auto-refreshes every 5 seconds
+  (/api/home-holdings): rows update in place, exited coins drop,
+  new coins insert, no manual reload; live.js re-subscribes after
+  a set change.
 - The balance chart is the portfolio's recorded-snapshot history:
   no snapshots at all says "History recording started today";
   snapshots but too few candles for the range says "Not enough
@@ -47,8 +48,7 @@ from test_balance_read import MINT as FAKE_MINT
 from test_balance_read import _RealModeBase
 from test_home_mockup import GATE_MINT, HomeMockupBase
 
-LIVE_SOL_PRICES = {"prices": {"SOL": {"price": 10.0}},
-                   "source": "live", "as_of": "test"}
+LIVE_SOL_PRICE = 10.0
 
 
 def _css():
@@ -73,15 +73,26 @@ def _row(coin_id=GATE_MINT, name="Gate", ticker="GATE", price=0.01,
 
 
 class _LiveSol:
-    """Stack a live SOL price over the base's snapshot prices, so
+    """Stack a live SOL price over the base harness, so
     _dashboard_data can express row values in SOL. Usable as a
-    context manager or via start()/stop()."""
+    context manager or via start()/stop(). Single source: the
+    feed's SOL tick (ingested here at LIVE_SOL_PRICE) — the old
+    routes.get_prices seam is gone — with _feed_sol_price_usd
+    patched to the same price so the conversion is deterministic
+    in tests. price=None means NO live SOL price at all: the feed
+    tick is left out and _feed_sol_price_usd returns None, so
+    rows show "—", never a stale conversion."""
 
-    def __init__(self, test=None):
+    def __init__(self, test=None, price=LIVE_SOL_PRICE):
+        self._test = test
+        self._price = price
         self._patch = mock.patch.object(
-            routes, "get_prices", return_value=LIVE_SOL_PRICES)
+            routes, "_feed_sol_price_usd", return_value=price)
 
     def start(self):
+        if self._test is not None and self._price is not None:
+            self._test.app.config["LIVE_FEED"].ingest(
+                "SOL", self._price, "test")
         return self._patch.start()
 
     def stop(self):
@@ -177,17 +188,18 @@ class TestValueSol(HomeMockupBase):
 
     def _home_with_rows(self, rows, live_sol=True):
         self._choose_mode("paper")
-        patches = [mock.patch.object(
-            routes, "_coin_rows", return_value=(rows, False))]
-        if live_sol:
-            patches.append(_LiveSol(self))
-        for p in patches:
-            p.start()
-        try:
+        # ExitStack (not start-then-finally): if a patch fails to
+        # start, the ones already entered are still unwound — a
+        # leaked _coin_rows mock here used to poison every later
+        # test in the process with these fabricated rows.
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                routes, "_coin_rows", return_value=(rows, False)))
+            stack.enter_context(
+                _LiveSol(self) if live_sol
+                else _LiveSol(self, price=None))
             return self._html("/wallet")
-        finally:
-            for p in reversed(patches):
-                p.stop()
 
     def test_value_sol_is_usd_value_over_live_sol_price(self):
         html = self._home_with_rows([_row(value=9.63, held=0.9635)])
@@ -206,8 +218,10 @@ class TestValueSol(HomeMockupBase):
         self.assertNotIn("0.00000 SOL", row)
 
     def test_value_sol_is_none_without_a_live_sol_price(self):
-        # Snapshot SOL price only: no live SOL price, so no SOL
-        # value — the page shows "—", never a stale conversion.
+        # No live SOL tick at all: _feed_sol_price_usd is None, so
+        # no SOL value — the page shows "—", never a stale
+        # conversion. (The base harness normally supplies a live
+        # $10 SOL price; this case overrides it to None.)
         html = self._home_with_rows([_row(value=10.0, held=1000.0)],
                                     live_sol=False)
         row = html.split("holdings-row")[1]
@@ -477,9 +491,9 @@ class TestLiveJsHomeRefresh(unittest.TestCase):
         self.assertIn("addCoin('SOL')", js)
         self.assertIn("toFixed(5) + ' SOL'", js)
 
-    def test_holdings_list_refreshes_every_minute(self):
+    def test_holdings_list_refreshes_every_five_seconds(self):
         js = self._js()
-        self.assertIn("HOLDINGS_POLL_MS = 60000", js)
+        self.assertIn("HOLDINGS_POLL_MS = 5000", js)
         self.assertIn("fetch('/api/home-holdings'", js)
         self.assertIn("setInterval(fetchHomeHoldings, HOLDINGS_POLL_MS)", js)
         self.assertIn("refreshLiveCollections", js)

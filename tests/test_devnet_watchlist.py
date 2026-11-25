@@ -65,6 +65,12 @@ class _FakeRpc:
     def get_account_info(self, pubkey):
         return self._curves.get(pubkey)
 
+    def get_multiple_accounts(self, pubkeys):
+        # The single-source chain read prices curves in one
+        # batched call (the real SolanaRpcClient has this); an
+        # unserved curve is None, like get_account_info.
+        return {p: self._curves.get(p) for p in (pubkeys or [])}
+
     def get_balance_lamports(self, pubkey):
         return self._balance
 
@@ -457,12 +463,19 @@ class TestWatchlistLoop(unittest.TestCase):
             (bot_id, coin)).fetchone()
 
     def _run(self, cfg=None):
+        # Single-price source: the loop reads SOL from the live
+        # feed only now (prices_data is deliberately ignored), so
+        # the watchlist's curve pricing needs a feed SOL tick.
+        from tradingbot.livefeed import LiveFeed
+
+        feed = LiveFeed()
+        feed.ingest("SOL", SOL_PRICE_USD, "test")
         rpc = self.rpc
         return run_once(
             self.db, cfg or self.cfg,
             price_fetcher=lambda: _prices_with_sol(),
             rpc_factory=lambda url: rpc,
-            trenches_fetcher=_FakeScan([]))
+            trenches_fetcher=_FakeScan([]), feed=feed)
 
     def test_trenches_buys_watchlist_mint_on_devnet(self):
         bot_id = self._insert_bot(trenches_ruleset())
@@ -509,8 +522,8 @@ class TestWatchlistLoop(unittest.TestCase):
 
     def test_scanner_buys_watchlist_mint_on_devnet(self):
         bot_id = self._insert_bot(scanner_ruleset())
-        # Mark 200s old at $0.003; curve now $0.00324 (+8% in 3m).
-        self._seed_mark(bot_id, GATE, 0.003, 200)
+        # Mark 330s old at $0.003; curve now $0.00324 (+8% in 3m).
+        self._seed_mark(bot_id, GATE, 0.003, 330)
         # First scan records the signal (2-scan confirmation).
         self._run()
         self.assertIsNone(self._position(bot_id, GATE))

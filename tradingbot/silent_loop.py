@@ -59,7 +59,7 @@ from .ledger import record_trade
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
                     paper_buy, paper_cash, paper_sell)
 from .pnl import portfolio_totals, record_snapshot
-from .prices import get_coingecko_sol_price_usd, get_prices
+from .prices import get_prices
 from .pumpfun import (bonding_curve_pda, curve_progress_pct,
                       parse_bonding_curve)
 from .rules import (GNAT_BREAKEVEN_PLUS_PCT, GNAT_BUY_SIZE_PCT,
@@ -80,7 +80,8 @@ from .rules import (GNAT_BREAKEVEN_PLUS_PCT, GNAT_BUY_SIZE_PCT,
                     MIDDY_TP_CEILING_PCT, MIDDY_TP_MID_PCT,
                     MIDDY_TP_SMALL_PCT,
                     MIDDY_TRAILING_STOP_PCT, PIT_BUY_SIZE_SOL, load_rules)
-from .scanner import (BREAKEVEN_TRIGGER_PCT, check_top10_concentration,
+from .scanner import (BREAKEVEN_TRIGGER_PCT, MARK_KEEP_24H_SECONDS,
+                      check_top10_concentration,
                       check_top10_rug, clear_watches, detect_regime,
                       gain_3m_pct, gain_window_pct, next_ladder_rung,
                       passes_buy_filter, passes_momentum_gate, record_marks,
@@ -88,8 +89,8 @@ from .scanner import (BREAKEVEN_TRIGGER_PCT, check_top10_concentration,
 from .signals import signal_for_coin
 from .solana import (SolanaRpcClient, is_valid_address,
                      lamports_to_sol, rpc_client_for_config)
-from .trenches import (fetch_mint_24h_changes, fetch_prices_for_mints,
-                       fetch_trenches_scan)
+from .streaming import SOL_MAX_AGE_SECONDS, chain_price_usd_for_mints
+from .trenches import fetch_trenches_scan
 
 MIN_PAPER_TRADE_USD = 1.0
 REAL_SWAP_UNAVAILABLE = "real swap not available in v1"
@@ -144,41 +145,143 @@ def _log(db: sqlite3.Connection, user_id: int, kind: str,
     db.commit()
 
 
-def _live_sol_price_usd(feed, prices_data):
+def _live_sol_price_usd(feed, prices_data=None):
     """The live SOL price in USD, or None.
 
-    The feed's own SOL tick first (fresh only — a stale tick is not
-    live); then prices_data, but only when its source is live — a
-    baked snapshot price is never a live price. None means the loop
-    must not price anything in USD this scan: curve pricing fails
-    closed and executed P&L is left unrecorded rather than computed
-    from a stale number. SOL is the unit of account for pump.fun
-    trades (curve prices, executed SOL in/out), not a traded major
-    here.
+    The feed's own SOL tick — the one SOL number in the app (fed
+    by the same Jupiter price every other SOL read uses). The tick
+    is accepted up to SOL_MAX_AGE_SECONDS old (90s, the stream's
+    own bound): SOL refreshes from Jupiter every 60s while the
+    feed's display staleness is 30s, so a strict 30s cut would
+    leave the loop with no SOL rate half the time; SOL moves
+    slowly, so 90s bounds the conversion error to SOL's ~90s move.
+    This is a staleness bound on the ONE source, not a second
+    source: `prices_data` is accepted for call-site compatibility
+    and deliberately ignored — there is no second SOL print to
+    cross-check against, and a disagreement between two SOL prints
+    was refusing real trades. None means the loop must not price
+    anything in USD this scan: curve pricing fails closed and
+    executed P&L is left unrecorded rather than computed from a
+    stale number. SOL is the unit of account for pump.fun trades
+    (curve prices, executed SOL in/out), not a traded major here.
     """
     if feed is not None:
         try:
-            tick = feed.snapshot(["SOL"]).get("SOL")
+            age = feed.tick_age_seconds("SOL")
         except Exception:
-            tick = None
-        if tick is not None and not tick.get("stale"):
+            age = None
+        if age is not None and age <= SOL_MAX_AGE_SECONDS:
             try:
-                price = float(tick["price"])
-            except (TypeError, ValueError):
-                price = None
-            else:
-                if price and price > 0:
-                    return price
-    if isinstance(prices_data, dict) \
-            and prices_data.get("source") == "live":
-        entry = (prices_data.get("prices") or {}).get("SOL") or {}
-        try:
-            price = float(entry.get("price"))
-        except (TypeError, ValueError):
-            return None
-        if price and price > 0:
-            return price
+                tick = feed.snapshot(["SOL"]).get("SOL")
+            except Exception:
+                tick = None
+            if tick is not None:
+                try:
+                    price = float(tick["price"])
+                except (TypeError, ValueError):
+                    price = None
+                else:
+                    if price and price > 0:
+                        return price
     return None
+
+
+def _chain_price_usd(mints, feed, cfg, rpc_factory):
+    """{mint: price_usd} for mints priced from the single source:
+    the feed's live tick first; any mint without a fresh tick is
+    priced by one batched Helius RPC read of its bonding curve
+    (graduated -> Raydium pool, same lookup the stream uses).
+    A mint no source can price is absent — never a stale, guessed
+    or second-source number. No live SOL tick means {} (no USD
+    conversion without a live SOL rate)."""
+    mints = [m for m in dict.fromkeys(mints or []) if m]
+    if not mints:
+        return {}
+    out: dict = {}
+    missing = []
+    if feed is not None:
+        try:
+            ticks = feed.snapshot(mints)
+        except Exception:
+            ticks = {}
+        for mint in mints:
+            tick = (ticks or {}).get(mint)
+            if tick is not None and not tick.get("stale"):
+                try:
+                    price = float(tick["price"])
+                except (TypeError, ValueError):
+                    price = None
+                else:
+                    if price and price > 0:
+                        out[mint] = price
+                        continue
+            missing.append(mint)
+    else:
+        missing = list(mints)
+    if not missing:
+        return out
+    sol_price = _live_sol_price_usd(feed)
+    if sol_price is None:
+        return out
+    try:
+        client = (rpc_factory(cfg.rpc_url) if rpc_factory is not None
+                  else rpc_client_for_config(cfg))
+    except Exception:
+        return out
+    try:
+        chained = chain_price_usd_for_mints(client, missing, sol_price)
+    except Exception:
+        return out
+    out.update(chained or {})
+    return out
+
+
+def _reprice_trenches_data(trenches_data, feed, cfg, rpc_factory):
+    """Rewrite a trenches scan in place onto the single source, at
+    the loop boundary — the one place a second source's numbers
+    could enter an evaluation.
+
+    * Every entry's `price_usd` becomes the chain price (feed live
+      tick first, else one batched Helius RPC curve/pool read). An
+      entry no source can price is dropped from `prices` and
+      `candidates` — unpriced means no trade, never a guess.
+    * The DexScreener change figures (`change_5m_pct`,
+      `change_1h_pct`, `change_6h_pct`, `change_24h_pct`) are nulled
+      on every kept entry. Momentum is recomputed downstream from
+      the loop's own recorded price marks (see _evaluate_rules_bot);
+      a change figure no mark can answer stays None and its gate
+      fails closed.
+    * Activity metadata is untouched: volume, buy/sell counts,
+      market cap and socials stay DexScreener's — discovery +
+      activity only, never a price. Returns the same dict."""
+    if not trenches_data or trenches_data.get("error"):
+        return trenches_data
+    prices = trenches_data.get("prices") or {}
+    if not prices:
+        trenches_data["candidates"] = []
+        return trenches_data
+    chain = _chain_price_usd(list(prices), feed, cfg, rpc_factory)
+    kept = {}
+    for mint, entry in prices.items():
+        price = chain.get(mint)
+        if price is None:
+            continue
+        entry = dict(entry)
+        entry["price_usd"] = price
+        entry["change_5m_pct"] = None
+        entry["change_1h_pct"] = None
+        entry["change_6h_pct"] = None
+        entry["change_24h_pct"] = None
+        kept[mint] = entry
+    trenches_data["prices"] = kept
+    # The candidates list holds the same entry objects the scan
+    # built — point them at the repriced copies so the buy sections
+    # read chain prices, not the dropped DexScreener ones.
+    trenches_data["candidates"] = [
+        kept[(c or {}).get("mint")]
+        for c in (trenches_data.get("candidates") or [])
+        if (c or {}).get("mint") in kept]
+    return trenches_data
 
 
 # --- tuning build 2026-11-15: shared-engine guards ---------------------
@@ -386,13 +489,15 @@ def _reconcile_sell_claim(db, cfg: Config, bot, coin: str,
 
 def _call_real_executor(real_executor, bot, user_id, coin, side, amount,
                         price, db, cfg, decision_price_as_of=None,
-                        sol_price_usd=None, sol_price_secondary=None):
+                        sol_price_usd=None):
     """Call the real executor, passing the price-gate context (how
-    old the decision price is, the two SOL prices) when it is the
+    old the decision price is, the one SOL price) when it is the
     loop's default executor — which forwards it to the pump.fun /
     Jupiter executors. An injected executor (tests, or a future
     replacement) keeps the plain 7-argument protocol: it is called
-    exactly as before, with no extra arguments."""
+    exactly as before, with no extra arguments. There is no second
+    SOL price any more: the feed's SOL tick is the one SOL number,
+    so there is nothing to cross-check against."""
     if real_executor is default_real_executor:
         age = None
         if decision_price_as_of is not None:
@@ -403,8 +508,7 @@ def _call_real_executor(real_executor, bot, user_id, coin, side, amount,
         return real_executor(
             bot, user_id, coin, side, amount, price, db, cfg,
             decision_price_age_seconds=age,
-            sol_price_usd=sol_price_usd,
-            sol_price_secondary=sol_price_secondary)
+            sol_price_usd=sol_price_usd)
     return real_executor(bot, user_id, coin, side, amount, price,
                          db, cfg)
 
@@ -891,11 +995,11 @@ def _gnat_momentum_exhausted(entry: dict, peak_price: float,
     """Gnat momentum exhaustion, closest version: the peak reached
     at least +25% and the 5-minute change is now at or below -5%
     — the flow that carried the coin has flipped, so the rest of
-    the position exits in full. The spec's 10-second net-SOL-flow
-    window does not exist in the app's data (no sub-5-minute flow,
-    no transaction stream); the 5-minute change is the fastest
-    flow proxy the feed provides. Missing data never fires. Pure
-    — no DB."""
+    the position exits in full. The 5-minute change is the loop's
+    own recorded price marks (filled in on the entry by the
+    evaluation); the spec's 10-second net-SOL-flow window does not
+    exist in the app's data (no sub-5-minute flow, no transaction
+    stream). Missing data never fires. Pure — no DB."""
     if avg_price <= 0:
         return False
     peak_gain = (float(peak_price) - avg_price) / avg_price * 100.0
@@ -942,8 +1046,10 @@ def _middy_mid_hold(entry: dict) -> bool:
     the 5-minute bucket. JAMES'S NUMBER (2026-11-24 ~12:34) — a
     stricter buy flow than the 1.35x entry dominance gate, because
     holding for MORE profit demands a stronger flow than entering
-    did. Missing or unusable data fails closed — a hold that cannot
-    be verified is a sell. Pure — no DB."""
+    did. "Still gaining" is the 5-minute change from the loop's
+    own recorded price marks (filled in on the entry by the
+    evaluation). Missing or unusable data fails closed — a hold
+    that cannot be verified is a sell. Pure — no DB."""
     if not entry:
         return False
     change_5m = entry.get("change_5m_pct")
@@ -1009,9 +1115,10 @@ def _middy_slow_reason(opened_ts: float | None, entry: dict,
                        now_ts: float) -> str | None:
     """Middy slow coins: a flat coin sells all after 120 seconds.
     Flat is the 5-minute change within +/-0.5% (the same band as
-    Pit). A position with no recorded open time, or no 5-minute
-    change, never fires — missing data exits nothing. Pure — no
-    DB."""
+    Pit), from the loop's own recorded price marks (filled in on
+    the entry by the evaluation). A position with no recorded open
+    time, or no 5-minute change, never fires — missing data exits
+    nothing. Pure — no DB."""
     if opened_ts is None:
         return None
     if now_ts - opened_ts < MIDDY_SLOW_SECONDS:
@@ -1299,8 +1406,7 @@ def _gnat_entry_gates(db, cfg, entry: dict, rpc_factory,
 def default_real_executor(bot, user_id: int, coin: str, side: str,
                          amount: float, price: float, db, cfg,
                          decision_price_age_seconds=None,
-                         sol_price_usd=None,
-                         sol_price_secondary=None) -> dict:
+                         sol_price_usd=None) -> dict:
     """Real executor: the account's dedicated signing bot executes
     pump.fun trades on mainnet and devnet (see executor.py) — and
     Jupiter swaps on mainnet for graduated coins (see
@@ -1308,8 +1414,8 @@ def default_real_executor(bot, user_id: int, coin: str, side: str,
     is the bonding curve: complete (graduated) -> Jupiter, still
     bonding -> pump.fun, unreadable -> refused plainly, never
     guessed. Anything unverified is skipped honestly — never a fake
-    fill. The price-gate context (decision price age, SOL prices)
-    is forwarded to whichever executor runs, so a real buy is
+    fill. The price-gate context (decision price age, the one SOL
+    price) is forwarded to whichever executor runs, so a real buy is
     checked against a fresh on-chain read immediately before it
     executes."""
     if not is_valid_address(coin):
@@ -1330,34 +1436,44 @@ def default_real_executor(bot, user_id: int, coin: str, side: str,
     return execute_real_trade(
         bot, user_id, coin, side, amount, price, db, cfg,
         decision_price_age_seconds=decision_price_age_seconds,
-        sol_price_usd=sol_price_usd,
-        sol_price_secondary=sol_price_secondary)
+        sol_price_usd=sol_price_usd)
 
 
-def _mint_price_map(coins) -> dict:
+def _mint_price_map(coins, db, bot_id, now_ts, feed, cfg,
+                    rpc_factory) -> dict:
     """{mint: {"price", "change_24h"}} for pump.fun mints, from the
-    trenches feed (DexScreener, Raydium fallback for graduated
-    coins). Signals bots watch named coins — in this app those are
-    mint addresses, and the price list (SOL only) has no entry for
-    them. A mint with no price is left out — unpriced means no
-    trade, never a guess. A fetch failure returns {} (the caller
-    then skips, never trades blind)."""
+    single source: the feed's live tick first, else one batched
+    Helius RPC curve/pool read. Signals bots watch named coins —
+    in this app those are mint addresses, and the price list (SOL
+    only) has no entry for them. The 24-hour change comes from the
+    loop's own recorded price marks for this bot's watched coins
+    (kept 25 hours): a watched coin with less than 24 hours of
+    marks has no 24-hour change yet, so no signal fires for it —
+    never a second source's figure, never a guess. A mint with no
+    price is left out — unpriced means no trade, never a guess."""
     mints = [c for c in (coins or []) if is_valid_address(c)]
     if not mints:
         return {}
-    try:
-        prices = fetch_prices_for_mints(mints)
-    except Exception:
-        prices = {}
-    try:
-        changes = fetch_mint_24h_changes(mints)
-    except Exception:
-        changes = {}
+    prices = _chain_price_usd(mints, feed, cfg, rpc_factory)
     out = {}
-    for mint in mints:
-        if mint in prices or mint in changes:
-            out[mint] = {"price": prices.get(mint),
-                         "change_24h": changes.get(mint)}
+    if not prices:
+        return out
+    # Record this scan's marks for the watched coins (25-hour keep)
+    # before reading the 24-hour gain off them.
+    try:
+        record_marks(db, bot_id,
+                     [{"mint": m, "price_usd": p}
+                      for m, p in prices.items()],
+                     _now(), keep_seconds=MARK_KEEP_24H_SECONDS)
+    except Exception:
+        pass
+    for mint, price in prices.items():
+        try:
+            change_24h = gain_window_pct(
+                db, bot_id, mint, price, now_ts, 86400)
+        except Exception:
+            change_24h = None
+        out[mint] = {"price": price, "change_24h": change_24h}
     return out
 
 
@@ -1426,9 +1542,10 @@ def _pit_hard_exit_reason(avg, peak, price, stop_loss_pct,
 
 
 def _pit_pullback_fires(entry, pit_settings):
-    """Pit pullback, from the 5-minute bucket: the coin fell at or
-    below -2% in the last 5 minutes — the top of the list is a
-    dead coin now, so the position closes. Returns True/False."""
+    """Pit pullback, from the loop's own 5-minute marks: the coin
+    fell at or below -2% in the last 5 minutes — the top of the
+    list is a dead coin now, so the position closes. Returns
+    True/False."""
     change = entry.get("change_5m_pct") if entry else None
     if change is None:
         return False
@@ -1440,9 +1557,9 @@ def _pit_pullback_fires(entry, pit_settings):
 
 
 def _pit_flat_fires(entry, pit_settings):
-    """Pit flat-dead, from the 5-minute bucket: the coin moved less
-    than +/-0.5% in the last 5 minutes — no movement, no signal,
-    close it and consider it dead. Returns True/False."""
+    """Pit flat-dead, from the loop's own 5-minute marks: the coin
+    moved less than +/-0.5% in the last 5 minutes — no movement,
+    no signal, close it and consider it dead. Returns True/False."""
     change = entry.get("change_5m_pct") if entry else None
     if change is None:
         return False
@@ -1931,9 +2048,9 @@ def run_exit_all_sweep(db: sqlite3.Connection, cfg: Config,
     holdings are not positions in this app — they are not sold by
     the sweep (open call for James: see the MANIFEST). Prices come
     from the live feed first, then the trenches prices for this
-    pass, then a live DexScreener fetch — a position with no live
-    price is left alone this pass and retried next time, never
-    sold blind."""
+    pass (already repriced onto the chain), then one batched Helius
+    RPC curve/pool read — a position with no live price is left
+    alone this pass and retried next time, never sold blind."""
     if not gate_fuel_mod.exit_all_pending(db, user_id):
         return {"ran": False, "reason": "no exit-all pending"}
     sweep_id = f"exit_all:{user_id}:{time.time_ns()}"
@@ -1952,17 +2069,18 @@ def run_exit_all_sweep(db: sqlite3.Connection, cfg: Config,
             out = {}
             for mint in mints:
                 entry = trenches_prices.get(mint) or {}
-                price = entry.get("price")
+                price = entry.get("price_usd")
                 if price is not None:
                     out[mint] = {"price_usd": price}
             if len(out) < len(mints):
                 try:
                     rest = _default_price_fetcher(
-                        [m for m in mints if m not in out])
+                        [m for m in mints if m not in out],
+                        feed=feed, cfg=cfg, rpc_factory=rpc_factory)
                 except Exception:
                     rest = {}
                 for mint, entry in (rest or {}).items():
-                    price = (entry or {}).get("price")
+                    price = (entry or {}).get("price_usd")
                     if price is not None:
                         out[mint] = {"price_usd": price}
             return out
@@ -2213,18 +2331,14 @@ def _buy_coin(db: sqlite3.Connection, cfg: Config, bot, coin: str,
         return
     # Price-gate context for the real executor: the decision price
     # is the scan price fetched at decision_price_as_of (the loop
-    # passes the scan time); the two SOL prices are the live feed
-    # price and the CoinGecko cross-check (cached 60s — a missing
-    # second source skips only that check, never a guessed price).
+    # passes the scan time); the SOL price is the feed's live SOL
+    # tick — the one SOL number. There is no second SOL source to
+    # cross-check against any more.
     sol_price = _live_sol_price_usd(feed, prices_data)
-    try:
-        sol_price_secondary = get_coingecko_sol_price_usd()
-    except Exception:
-        sol_price_secondary = None
     result = _call_real_executor(
         real_executor, bot, bot["user_id"], coin, "buy", amount_sol,
         price, db, cfg, decision_price_as_of=decision_price_as_of,
-        sol_price_usd=sol_price, sol_price_secondary=sol_price_secondary)
+        sol_price_usd=sol_price)
     if result.get("status") == "executed":
         coin_amount = float(result.get("coin_amount") or 0)
         trade_id = None
@@ -2322,8 +2436,9 @@ def _rug_reason(rug: dict, kind: str, coin: str, price: float,
     so a collapse exits on the same scan that sees it.
 
     Two triggers, either one sells everything:
-      * feed 5-minute change (trenches/scanner only): the feed's
-        change_5m_pct at or below -drop_5m_pct.
+      * 5-minute change (trenches/scanner only): the loop's own
+        recorded price marks, 5 minutes back, at or below
+        -drop_5m_pct.
       * fast drop since the last recorded price mark: the price fell
         drop_pct or more and the mark is at most window_seconds old
         (plus 30 seconds of scheduling jitter — scans run about a
@@ -2411,8 +2526,10 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         price_map = trenches_data["prices"]
     else:
         # Signals bots watch named coins — pump.fun mints, priced
-        # from the trenches feed (see _mint_price_map).
-        price_map = _mint_price_map(json.loads(bot["coins"]))
+        # from the single source (see _mint_price_map).
+        price_map = _mint_price_map(json.loads(bot["coins"]), db,
+                                    bot["id"], now_ts, feed, cfg,
+                                    rpc_factory)
 
     def _price_for(coin: str):
         if kind in ("trenches", "scanner", "gnat", "pit", "middy"):
@@ -2458,6 +2575,56 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 if price is not None and price > 0:
                     out[mint] = price
         return out
+
+    # Momentum from the loop's own price marks (single-price source,
+    # 2026-11-25): the scan's change figures were nulled at the loop
+    # boundary, so every 5-minute / 1-hour change below is computed
+    # here from marks this bot recorded itself. Record this scan's
+    # marks first — candidates and held coins alike — then read the
+    # changes off them. A coin with no mark at least as old as the
+    # window has no change yet: its gates fail closed, never on a
+    # second source's number. The documented consequence: a fresh
+    # coin cannot show a 5-minute gain until the loop has watched
+    # it for ~5 minutes, and a 6-hour / 24-hour buy metric has no
+    # marks to read at all, so it never fires.
+    if kind in ("trenches", "scanner", "gnat", "pit", "middy"):
+        _candidates = list(
+            (trenches_data or {}).get("candidates") or [])
+        _held_coins = [coin for coin in _positions(db, bot["id"])]
+        _mark_entries = [c for c in _candidates
+                         if (c or {}).get("price_usd") is not None]
+        for _coin in _held_coins:
+            _p = _price_for(_coin)
+            if _p is not None:
+                _mark_entries.append({"mint": _coin, "price_usd": _p})
+        if _mark_entries:
+            try:
+                record_marks(db, bot["id"], _mark_entries, _now())
+            except Exception:
+                pass
+        for _entry in _candidates:
+            _mint = (_entry or {}).get("mint")
+            _p = (_entry or {}).get("price_usd")
+            if not _mint or _p is None:
+                continue
+            try:
+                _entry["change_5m_pct"] = gain_window_pct(
+                    db, bot["id"], _mint, _p, now_ts, 300)
+                _entry["change_1h_pct"] = gain_window_pct(
+                    db, bot["id"], _mint, _p, now_ts, 3600)
+            except Exception:
+                _entry["change_5m_pct"] = None
+                _entry["change_1h_pct"] = None
+        for _coin in _held_coins:
+            _entry = price_map.get(_coin)
+            _p = _price_for(_coin)
+            if _entry is None or _p is None:
+                continue
+            try:
+                _entry["change_5m_pct"] = gain_window_pct(
+                    db, bot["id"], _coin, _p, now_ts, 300)
+            except Exception:
+                _entry["change_5m_pct"] = None
 
     stop_loss_pct = float(bot["stop_loss_pct"])
     trailing_pct = float(rules["trailing_stop_pct"])
@@ -2961,11 +3128,11 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             ranked.append((gain, entry))
         ranked.sort(key=lambda item: item[0], reverse=True)
     elif kind == "pit":
-        # Pit ranks by the 5-minute gain from the feed itself — the
-        # feed provides change_5m_pct, so no loop marks are needed.
-        # A coin gaining 6.3% or more in 5 minutes goes to the top
-        # of the watch list; a coin above the mcap cap is logged as
-        # a miss for the shared brain instead of being bought.
+        # Pit ranks by the 5-minute gain from the loop's own price
+        # marks (recorded + filled in above). A coin gaining 6.3%
+        # or more in 5 minutes goes to the top of the watch list;
+        # a coin above the mcap cap is logged as a miss for the
+        # shared brain instead of being bought.
         pit_settings = rules["pit"]
         threshold = float(rules["buy"]["threshold_pct"])
         held = set(_positions(db, bot["id"]))
@@ -3076,13 +3243,13 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
                 ranked.append((change, entry))
             ranked.sort(key=lambda item: item[0], reverse=True)
     elif kind == "middy":
-        # Middy ranks by the 5-minute gain from the feed itself —
-        # the feed provides change_5m_pct, so no loop marks are
-        # needed. A coin gaining at least 1% in 5 minutes is a
-        # candidate; the buy filter, the four-part momentum gate,
-        # the dominance gate and the scam gate then decide, and
-        # the signal must still be passing on a second scan —
-        # NO BLIND TRADES.
+        # Middy ranks by the 5-minute gain from the loop's own
+        # price marks (recorded + filled in above — the scan's
+        # change figures were nulled at the loop boundary). A coin
+        # gaining at least 1% in 5 minutes is a candidate; the buy
+        # filter, the four-part momentum gate, the dominance gate
+        # and the scam gate then decide, and the signal must still
+        # be passing on a second scan — NO BLIND TRADES.
         threshold = float(rules["buy"]["threshold_pct"])
         held = set(_positions(db, bot["id"]))
         for entry in trenches_data["candidates"]:
@@ -3140,22 +3307,13 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
         threshold = float(rules["buy"]["threshold_pct"])
         change_key = _BUY_METRIC_TO_CHANGE_KEY[rules["buy"]["metric"]]
         held = set(_positions(db, bot["id"]))
-        # DEVNET-TEST-ONLY (remove before mainnet): watchlist mints
-        # have no DexScreener 5-minute change — record price marks
-        # for them so the 5-minute gain comes from the loop's own
-        # marks, scanner-style. A mint with no mark at least 5
-        # minutes old has no gain yet and is not bought.
-        _watch = [e for e in trenches_data["candidates"]
-                  if e.get("devnet_watchlist")]
-        if _watch:
-            record_marks(db, bot["id"], _watch, _now())
+        # The change figure is the loop's own marks (recorded +
+        # filled in above) for every candidate, devnet watchlist
+        # included — the old devnet-only marks path is subsumed
+        # by the general fill. A mint with no mark at least as old
+        # as the window has no gain yet and is not bought.
         for entry in trenches_data["candidates"]:
-            if entry.get("devnet_watchlist"):
-                change = gain_window_pct(
-                    db, bot["id"], entry["mint"], entry["price_usd"],
-                    now_ts, 300)
-            else:
-                change = entry.get(change_key)
+            change = entry.get(change_key)
             if change is None or float(change) < threshold:
                 continue
             if entry["mint"] in held:
@@ -3356,9 +3514,11 @@ def _evaluate_bot(db: sqlite3.Connection, cfg: Config, bot,
     actions: list = []
     coins = json.loads(bot["coins"])
     # The price list is SOL only; a signals bot's coins are pump.fun
-    # mints, priced from the trenches feed (see _mint_price_map).
+    # mints, priced from the single source (see _mint_price_map).
+    now_ts = datetime.now(timezone.utc).timestamp()
     prices = dict(prices_data["prices"])
-    prices.update(_mint_price_map(coins))
+    prices.update(_mint_price_map(coins, db, bot["id"], now_ts, feed,
+                                  cfg, rpc_factory))
     prices_usd = {c: e.get("price", 0.0) for c, e in prices.items()}
     positions = _positions(db, bot["id"])
     stop_loss_pct = float(bot["stop_loss_pct"])
@@ -3418,10 +3578,12 @@ def _held_price(price_fetcher, coin: str, feed=None, cfg=None,
     """Current USD price for one held mint, or None when no source
     can serve it. The live feed first (fresh ticks only — now
     including devnet curve prices); a devnet watchlist mint with no
-    feed tick is priced straight from its bonding curve; the
-    trenches feed last. The watcher only needs a price when a top-10
-    trigger has already fired — a missing price means the sell waits
-    for the next check, never a guess."""
+    feed tick is priced straight from its bonding curve; then the
+    injected price fetcher when one was passed (a test seam — the
+    production callers pass the chain-based default below), else
+    one batched Helius RPC curve/pool read. The watcher only needs
+    a price when a top-10 trigger has already fired — a missing
+    price means the sell waits for the next check, never a guess."""
     if feed is not None:
         try:
             tick = feed.snapshot([coin]).get(coin)
@@ -3450,14 +3612,27 @@ def _held_price(price_fetcher, coin: str, feed=None, cfg=None,
                         return float(price)
         except Exception:
             pass
+    if price_fetcher is not None:
+        try:
+            prices = price_fetcher([coin])
+        except Exception:
+            return None
+        if not isinstance(prices, dict):
+            return None
+        entry = prices.get(coin) or {}
+        price = entry.get("price_usd")
+        try:
+            price = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            return None
+        return price if price and price > 0 else None
+    if cfg is None:
+        return None
     try:
-        prices = price_fetcher([coin])
+        prices = _chain_price_usd([coin], feed, cfg, rpc_factory)
     except Exception:
         return None
-    if not isinstance(prices, dict):
-        return None
-    entry = prices.get(coin) or {}
-    price = entry.get("price_usd")
+    price = (prices or {}).get(coin)
     try:
         price = float(price) if price is not None else None
     except (TypeError, ValueError):
@@ -3465,10 +3640,19 @@ def _held_price(price_fetcher, coin: str, feed=None, cfg=None,
     return price if price and price > 0 else None
 
 
-def _default_price_fetcher(mints):
-    from .trenches import fetch_trenches_scan
-    data = fetch_trenches_scan(mints=mints) or {}
-    return data.get("prices", {}) or {}
+def _default_price_fetcher(mints, feed=None, cfg=None,
+                           rpc_factory=None):
+    """Default price fetcher for the top-10 watch and the exit-all
+    sweep: {mint: {"price_usd": price}} from the single source
+    (feed tick first, else one batched Helius RPC curve/pool read).
+    A mint no source can price is absent — never a second-source
+    number."""
+    try:
+        prices = _chain_price_usd(mints, feed, cfg, rpc_factory)
+    except Exception:
+        return {}
+    return {mint: {"price_usd": price}
+            for mint, price in (prices or {}).items()}
 
 
 def top10_watch_once(db: sqlite3.Connection, cfg: Config,
@@ -3494,7 +3678,9 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
     never faked — and the next pass retries it. Returns the actions
     taken.
     """
-    price_fetcher = price_fetcher or _default_price_fetcher
+    price_fetcher = price_fetcher or (
+        lambda mints: _default_price_fetcher(
+            mints, feed=feed, cfg=cfg, rpc_factory=rpc_factory))
     actions: list = []
     now_ts = datetime.now(timezone.utc).timestamp()
     bots = db.execute("SELECT * FROM bots WHERE silent = 1").fetchall()
@@ -3612,7 +3798,8 @@ def top10_watch_loop(db_path: str, cfg: Config,
     Opens a fresh DB connection per pass. A failed pass is logged and
     the next one still runs. `feed` is the live feed, so a fired
     trigger prices from fresh ticks (including devnet curve prices)
-    instead of DexScreener alone."""
+    first, then one batched Helius RPC read — never a second-source
+    price."""
     rpc_factory = rpc_factory or _default_rpc_factory(cfg)
     while True:
         db = init_db(db_path)
@@ -3775,14 +3962,19 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     """One loop iteration over every silent-enabled bot.
 
     Returns a list of per-bot outcome dicts. A failure for one bot is
-    recorded and never stops the others. The trenches feed (DexScreener)
-    is fetched at most once per iteration, only when at least one
-    silent bot has a valid trenches or scanner rule set. When a live
-    feed is passed, both price sources are sanitized against it first:
-    a price the feed rejects as an absurd single-tick jump never
-    reaches an evaluation or a snapshot — the coin reads as unpriced
-    for this iteration instead. With no feed, prices pass through
-    exactly as before.
+    recorded and never stops the others. The trenches scan
+    (DexScreener — discovery + activity metadata only) is fetched at
+    most once per iteration, only when at least one silent bot has a
+    valid trenches or scanner rule set, and is repriced onto the
+    single source before any evaluation sees it: every price becomes
+    the chain price (feed tick first, else a batched Helius RPC
+    curve/pool read) and every DexScreener change figure is nulled,
+    so momentum comes from the loop's own recorded price marks.
+    When a live feed is passed, both price sources are sanitized
+    against it first: a price the feed rejects as an absurd
+    single-tick jump never reaches an evaluation or a snapshot —
+    the coin reads as unpriced for this iteration instead. With no
+    feed, prices pass through exactly as before.
     """
     price_fetcher = price_fetcher or get_prices
     rpc_factory = rpc_factory or _default_rpc_factory(cfg)
@@ -3822,6 +4014,12 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
         sol_price_usd = _live_sol_price_usd(feed, prices_data)
         trenches_data = enrich_scan(trenches_data, cfg, rpc_factory,
                                     sol_price_usd)
+        # Single-price source: reprice the scan onto the chain
+        # before any evaluation sees it (see _reprice_trenches_data).
+        # Enriched BEFORE the reprice so a devnet curve price is
+        # re-verified against the chain like any other entry.
+        trenches_data = _reprice_trenches_data(
+            trenches_data, feed, cfg, rpc_factory)
     if feed is not None:
         # Bad-tick guard: an absurd price never becomes a buy/sell
         # signal or a snapshot value. The sanitizers return copies;

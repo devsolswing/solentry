@@ -27,8 +27,8 @@ from tradingbot.trenches import _entry as feed_entry
 
 # Gate (the devnet pump.fun coin): the mint every paper-buy test
 # uses — SOL is not a buyable coin any more (no SOL detail page,
-# no SOL buy route), so buys price the mint from the mocked
-# trenches feed.
+# no SOL buy route), so buys price the mint from the live feed's
+# stream tick.
 GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
 GATE_PRICE = 0.01
 
@@ -193,17 +193,16 @@ class TestPnlPage(PnlBase):
         self.assertNotIn("$100.00 CAD", html)
 
     def test_paper_buy_records_snapshot_and_home_shows_it(self):
-        # A real paper buy of the Gate mint: $10 at the mocked
-        # $0.01 feed price buys 1000 GATE. The trenches feed +
-        # coin_meta are mocked out so no test hits live
-        # RPC/DexScreener.
+        # A real paper buy of the Gate mint: $10 at the $0.01 live
+        # feed price buys 1000 GATE. The live feed prices the mint
+        # (stream tick) and SOL ($100); coin_meta is mocked out so
+        # no test hits live RPC/DexScreener.
         token = csrf(self.client, "/dashboard")
+        self.app.config["LIVE_FEED"].ingest(
+            GATE_MINT, GATE_PRICE, "helius-stream")
         with mock.patch.object(
-                routes, "fetch_prices_for_mints",
+                routes, "_chain_prices_for_mints",
                 return_value={GATE_MINT: GATE_PRICE}), \
-                mock.patch.object(
-                    routes, "fetch_mint_1h_changes",
-                    return_value={GATE_MINT: 2.5}), \
                 mock.patch.object(
                     routes, "fetch_mint_identities",
                     return_value={GATE_MINT: {"name": "Gate",
@@ -211,11 +210,8 @@ class TestPnlPage(PnlBase):
                 mock.patch.object(routes, "ensure_coin_meta",
                                   return_value=None), \
                 mock.patch.object(
-                    routes, "get_prices",
-                    return_value={"prices": {"SOL": {"price": 100.0,
-                                                     "change_24h": 5.0,
-                                                     "change_1h": None}},
-                                  "source": "live", "as_of": "test"}):
+                    routes, "_feed_sol_price_usd",
+                    return_value=100.0):
             resp = self.client.post(f"/coins/{GATE_MINT}/buy", data={
                 "csrf_token": token, "usd": "10", "bot_id": ""},
                 follow_redirects=False)
@@ -226,11 +222,10 @@ class TestPnlPage(PnlBase):
             "SELECT * FROM portfolio_snapshots WHERE user_id = ?",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1)
-        # $10 buy: cash $90 + 990.099 GATE at cost ($10.00) =
-        # $100.00. The snapshot values holdings at cost when the
-        # price feed does not cover them (get_prices here returns
-        # SOL only), and the cost basis is the $10 actually spent.
-        self.assertAlmostEqual(rows[0]["total_value_usd"], 100.0,
+        # $10 buy: cash $90 + 990.099 GATE at the live $0.01 mark
+        # price ($9.90) = $99.90. The snapshot values holdings at
+        # the live stream tick now, not at cost.
+        self.assertAlmostEqual(rows[0]["total_value_usd"], 99.90,
                                places=1)
         # The home page now shows the portfolio total (the old /pnl
         # page is gone): $99.90 CAD — the holding at its $0.01 mark

@@ -8,7 +8,7 @@
    far right. NO unit price anywhere on the row: the big number
    is the position's SOL value. The hidden USD value stays so
    live.js still recomputes the paper portfolio total from it.
-   data-coin-id lets the 60s holdings refresh match this row to
+   data-coin-id lets the 5s holdings refresh match this row to
    the server's rows (update in place, or remove it when the coin
    is gone). #}
 <a class="coin-row holdings-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}" data-coin-id="{{ row.coin_id }}">

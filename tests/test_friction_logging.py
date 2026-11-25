@@ -65,7 +65,7 @@ class TestExecutorSolAmounts(ExecutorBase):
             CURVE_PRICE_USD, self.db, self.cfg,
             decision_price_age_seconds=0.0,
             sol_price_usd=TEST_SOL_PRICE_USD,
-            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "executed")
         self.assertEqual(result["signature"], FAKE_SIGNATURE)
         # 1.0 SOL swapped + 5,000 lamports network fee, from the

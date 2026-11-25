@@ -661,6 +661,68 @@ class SolanaRpcClient:
                 "executable": bool(value.get("executable")),
                 "owner": value.get("owner") or ""}
 
+    def get_multiple_accounts(self, pubkeys: list) -> dict:
+        """Many accounts in as few RPC calls as possible
+        (getMultipleAccounts, chunked at 100 per call — the node's
+        limit). Returns {pubkey: get_account_info-shaped dict, or
+        None when that account does not exist}. A missing account
+        is a normal answer; a bad response raises RpcError. Used
+        by the single-price pipeline to re-price a whole scan from
+        bonding curves in one round trip instead of one call per
+        mint."""
+        out: dict = {}
+        wanted = list(dict.fromkeys(pubkeys or []))
+        for i in range(0, len(wanted), 100):
+            chunk = wanted[i:i + 100]
+            result = self._call(
+                "getMultipleAccounts",
+                [chunk, {"encoding": "base64"}])
+            if not result or "value" not in result:
+                raise RpcError("bad getMultipleAccounts result")
+            for pubkey, value in zip(chunk, result["value"]):
+                if not value:
+                    out[pubkey] = None
+                    continue
+                raw = value.get("data") or []
+                if not raw:
+                    out[pubkey] = None
+                    continue
+                out[pubkey] = {
+                    "data": base64.b64decode(raw[0]),
+                    "lamports": int(value.get("lamports") or 0),
+                    "executable": bool(value.get("executable")),
+                    "owner": value.get("owner") or ""}
+        return out
+
+    def get_program_accounts(self, program_id: str,
+                             filters: list | None = None) -> list:
+        """Accounts owned by `program_id` matching `filters`
+        (getProgramAccounts). Each entry is {"pubkey": str,
+        "account": {"data": bytes, "lamports": int, "owner": str}}.
+        An empty list means no match — a normal answer. Used by the
+        single-price pipeline to find a graduated coin's Raydium
+        pool account (memcmp on the pool's baseMint) through Helius
+        alone, so the stream can watch the pool's vaults."""
+        params = [program_id, {"encoding": "base64"}]
+        if filters:
+            params[1]["filters"] = filters
+        result = self._call("getProgramAccounts", params)
+        if result is None:
+            raise RpcError("bad getProgramAccounts result")
+        out = []
+        for entry in result:
+            account = (entry or {}).get("account") or {}
+            raw = account.get("data") or []
+            if not raw:
+                continue
+            out.append({
+                "pubkey": (entry or {}).get("pubkey") or "",
+                "account": {
+                    "data": base64.b64decode(raw[0]),
+                    "lamports": int(account.get("lamports") or 0),
+                    "owner": account.get("owner") or ""}})
+        return out
+
     def get_token_account_balance(self, pubkey: str) -> int:
         """Token balance in base units (smallest denomination)."""
         result = self._call("getTokenAccountBalance", [pubkey])

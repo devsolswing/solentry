@@ -3,7 +3,7 @@ real SOL moves, no live RPC. Covers the gate lift, the v3 layout
 (17 accounts, fee_config present, no fee_program), priority-fee
 capping, 5% exit slippage (entries stay 1%), pending-trade
 reconciliation, persistent sell claims, RPC failover, the Jupiter
-fee budget, ATA rent in the reserve check, the two-source price
+fee budget, ATA rent in the reserve check, the single-source price
 gate, the startup guardrail, and the trades-left chip / mainnet
 copy fixes.
 
@@ -100,7 +100,7 @@ class MainnetFixBase(unittest.TestCase):
             CURVE_PRICE_USD, self.db, cfg or self.cfg,
             decision_price_age_seconds=0.0,
             sol_price_usd=TEST_SOL_PRICE_USD,
-            sol_price_secondary=TEST_SOL_PRICE_USD,
+ 
             rpc_client=rpc, **kwargs)
 
 
@@ -397,7 +397,7 @@ class TestAtaRentReserve(MainnetFixBase):
             1.0, CURVE_PRICE_USD, self.db, self.cfg,
             decision_price_age_seconds=0.0,
             sol_price_usd=TEST_SOL_PRICE_USD,
-            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "skipped")
         self.assertIn("fees", result["reason"])
         self.assertEqual(rpc.sent, [])
@@ -411,17 +411,23 @@ class TestAtaRentReserve(MainnetFixBase):
             1.0, CURVE_PRICE_USD, self.db, self.cfg,
             decision_price_age_seconds=0.0,
             sol_price_usd=TEST_SOL_PRICE_USD,
-            sol_price_secondary=TEST_SOL_PRICE_USD, rpc_client=rpc)
+ rpc_client=rpc)
         self.assertEqual(result["status"], "executed", result)
         self.assertEqual(len(rpc.sent), 1)
 
 
-class TestTwoSourceGate(MainnetFixBase):
-    def _gate(self, price, age=0.0, sol=TEST_SOL_PRICE_USD,
-              sol2=TEST_SOL_PRICE_USD):
+class TestSingleSourceGate(MainnetFixBase):
+    """The price gate after the single-source build (2026-11-25):
+    one stream price, one SOL price — no second source to agree
+    with, so no cross-check can refuse a trade. What remains is
+    the same-source consistency check (the stream tick against a
+    fresh on-chain curve read moments apart) and the staleness
+    check."""
+
+    def _gate(self, price, age=0.0, sol=TEST_SOL_PRICE_USD):
         rpc = FakePumpRpc(self.pubkey, self.mint, curve=make_curve())
         return check_entry_price(rpc, self.cfg, self.mint, price, age,
-                                 sol, sol2)
+                                 sol)
 
     def test_agreeing_prices_pass(self):
         ok, reason, details = self._gate(CURVE_PRICE_USD)
@@ -436,18 +442,16 @@ class TestTwoSourceGate(MainnetFixBase):
     def test_disagreeing_onchain_price_refuses(self):
         ok, reason, _ = self._gate(CURVE_PRICE_USD * 2)
         self.assertFalse(ok)
-        self.assertIn("disagrees", reason)
+        self.assertIn("moved away", reason)
 
-    def test_sol_source_disagreement_refuses(self):
-        ok, reason, _ = self._gate(CURVE_PRICE_USD, sol=100.0,
-                                   sol2=110.0)
-        self.assertFalse(ok)
-        self.assertIn("disagree", reason)
-
-    def test_missing_secondary_source_skips_the_cross_check(self):
-        ok, reason, details = self._gate(CURVE_PRICE_USD, sol2=None)
+    def test_single_sol_price_has_no_cross_check(self):
+        """One SOL price only: the gate passes with the single
+        feed SOL tick and there is no second source to disagree
+        with — the old Jupiter-vs-CoinGecko refusal cannot fire."""
+        ok, reason, details = self._gate(CURVE_PRICE_USD)
         self.assertTrue(ok, reason)
         self.assertNotIn("sol_cross_check", details)
+        self.assertNotIn("sol_price_secondary", details)
 
 
 class TestStartupGuardrail(unittest.TestCase):

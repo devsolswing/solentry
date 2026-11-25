@@ -2,10 +2,10 @@
    once a second while the page is visible, updates the big price
    and shows when the price was actually fetched. Pauses while the
    tab is hidden so the feed is not hammered for a page nobody is
-   looking at. Prices are never invented: on a failed tick the last
-   real price stays on screen with its time, and the note says the
-   feed is unavailable. The "last updated" time comes from the
-   tick's own as_of — for a cached feed price that is when the
+   looking at. Prices are never invented: on a failed tick the big
+   price reads "no data" — never the last real price, never a stale
+   number — and the note says so. The "last updated" time comes from
+   the tick's own as_of — for a cached feed price that is when the
    price was fetched, not when this tick arrived.
 
    The CHART does not redraw every second. The detail chart is a
@@ -35,7 +35,6 @@
   var updatedEl = document.getElementById('live-updated');
   var note = document.getElementById('live-chart-note');
   var detailChart = document.getElementById('detail-chart');
-  var lastOkAt = null;
   var timer = null;
   /* The server-rendered chart is fresh on page load, so the first
      live re-render waits a full candle interval. */
@@ -89,14 +88,19 @@
      update the price, the "last updated" time and the note, then
      let the chart re-render if a candle interval has passed.
      asOf is a Date (the tick's own time); source names the feed
-     the tick came from. */
+     the tick came from. Significant-figure formatting, same as
+     live.js: decimals = clamp(floor(-log10(p)) + 3, 2, 12). */
+  function fmtPrice(p) {
+    var decimals = Math.floor(-Math.log10(p)) + 3;
+    decimals = Math.max(2, Math.min(12, decimals));
+    return '$' + p.toFixed(decimals);
+  }
   function applyTick(price, asOf, source) {
     if (typeof price !== 'number' || isNaN(price)) return;
     if (!(asOf instanceof Date) || isNaN(asOf.getTime())) {
       asOf = new Date();
     }
-    lastOkAt = asOf;
-    if (priceEl) priceEl.textContent = '$' + price.toFixed(price < 0.0001 ? 8 : 4);
+    if (priceEl) priceEl.textContent = fmtPrice(price);
     if (updatedEl) updatedEl.textContent = fmtTime(asOf);
     if (note) {
       note.textContent = 'Live · source: ' + (source || 'feed');
@@ -122,13 +126,10 @@
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
         if (!data || !data.ok || typeof data.price !== 'number') {
-          if (note) {
-            note.textContent = (data && data.error
-              ? data.error + ' ' : 'Price unavailable right now. ')
-              + (lastOkAt
-                ? 'Showing the last price from ' + fmtTime(lastOkAt)
-                  + '.' : 'No live price yet.');
-          }
+          /* No live price: the big number reads "no data" — never
+             the last price, never an error string in its place. */
+          if (priceEl) priceEl.textContent = 'no data';
+          if (note) note.textContent = 'no data';
           return;
         }
         var asOf = data.as_of ? new Date(data.as_of) : new Date();
@@ -136,10 +137,8 @@
         applyTick(data.price, asOf, data.source);
       })
       .catch(function () {
-        if (note) {
-          note.textContent = 'Feed unavailable — showing the last price'
-            + (lastOkAt ? ' from ' + fmtTime(lastOkAt) : '') + '.';
-        }
+        if (priceEl) priceEl.textContent = 'no data';
+        if (note) note.textContent = 'no data';
       });
   }
 

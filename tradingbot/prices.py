@@ -13,6 +13,16 @@ None — the caller refuses plainly instead of converting at a guessed
 rate. There is no fallback snapshot: the old baked CoinGecko
 snapshot (2026-11-09) once served 4-day-old prices as if they were
 live after a reload, and it is gone for good.
+
+ONE SOL NUMBER (single-price source, 2026-11-25): Jupiter is the
+only SOL source. The CoinGecko second source and the
+Jupiter-vs-CoinGecko cross-check are gone — with one source there
+is nothing to disagree with, and a disagreement between two SOL
+prints was refusing real trades. Inside the app every price path
+reads the live feed's SOL tick (fed by the same Jupiter price);
+get_sol_price_usd() below is the same Jupiter fetch used only
+where no feed exists (the price gate's last-resort fallback and
+tests) — never a second live number beside the feed's tick.
 """
 
 from __future__ import annotations
@@ -24,76 +34,9 @@ import urllib.request
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 JUPITER_PRICE_URL = "https://lite-api.jup.ag/price/v3?ids={}"
-# Second SOL price source (CoinGecko free, no key): the cross-check
-# for the Jupiter SOL price. A fetch failure returns None — the
-# caller never guesses a price from it.
-COINGECKO_SOL_PRICE_URL = ("https://api.coingecko.com/api/v3/"
-                           "simple/price?ids=solana&vs_currencies=usd")
 
 _CACHE_TTL_SECONDS = 60
 _cache: dict = {"at": 0.0, "price": None, "change_24h": None}
-# CoinGecko is rate-limited on the free tier; cache it separately
-# for 60s too so a burst of checks does not hammer it.
-_cg_cache: dict = {"at": 0.0, "price": None}
-
-
-def _fetch_coingecko_sol_price(http_get=None) -> float | None:
-    """SOL price in USD from CoinGecko free, or None when it does
-    not answer. `http_get` is a test injection (url -> parsed JSON).
-    """
-    try:
-        if http_get is not None:
-            raw = http_get(COINGECKO_SOL_PRICE_URL)
-        else:
-            req = urllib.request.Request(
-                COINGECKO_SOL_PRICE_URL,
-                headers={"User-Agent": "trading-bot-app"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                raw = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
-    try:
-        price = float((raw or {}).get("solana", {}).get("usd"))
-    except (TypeError, ValueError, AttributeError):
-        return None
-    if not math.isfinite(price) or price <= 0:
-        return None
-    return price
-
-
-def get_coingecko_sol_price_usd(http_get=None) -> float | None:
-    """Current SOL price in USD from CoinGecko, or None when the
-    feed does not answer. Cached 60 seconds. Never guessed."""
-    now = time.time()
-    if _cg_cache["price"] is not None \
-            and now - _cg_cache["at"] < _CACHE_TTL_SECONDS:
-        return _cg_cache["price"]
-    price = _fetch_coingecko_sol_price(http_get=http_get)
-    _cg_cache["at"] = now
-    _cg_cache["price"] = price
-    return price
-
-
-def clear_coingecko_sol_price_cache() -> None:
-    """Drop the cached CoinGecko SOL price (tests reset it)."""
-    _cg_cache["at"] = 0.0
-    _cg_cache["price"] = None
-
-
-def sol_prices_agree(primary: float | None, secondary: float | None,
-                     tolerance_pct: float = 2.0) -> bool | None:
-    """Do two SOL prices agree within `tolerance_pct`? True when
-    they agree, False when they disagree by more than the
-    tolerance, None when either price is missing (no cross-check
-    possible — the caller decides, never a guessed agreement)."""
-    try:
-        a = float(primary)
-        b = float(secondary)
-    except (TypeError, ValueError):
-        return None
-    if not (math.isfinite(a) and math.isfinite(b)) or a <= 0 or b <= 0:
-        return None
-    return abs(a - b) / a * 100.0 <= float(tolerance_pct)
 
 
 def _fetch_sol_price() -> tuple[float | None, float | None]:

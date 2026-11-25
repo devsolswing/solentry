@@ -206,11 +206,15 @@ class TestLiveSolPrice(unittest.TestCase):
         self.assertEqual(
             _live_sol_price_usd(feed, _live_prices(79.0)), 80.0)
 
-    def test_stale_feed_tick_is_ignored(self):
+    def test_stale_feed_tick_is_no_price(self):
+        """A SOL tick older than the 90s conversion bound is no
+        price at all — the old REST fallback is gone with the
+        second source, so the loop prices nothing in USD this scan
+        rather than converting at a stale rate."""
         feed = LiveFeed()
         feed.ingest("SOL", 80.0, "kraken", now=time.time() - 120)
-        self.assertEqual(
-            _live_sol_price_usd(feed, _live_prices(79.0)), 79.0)
+        self.assertIsNone(
+            _live_sol_price_usd(feed, _live_prices(79.0)))
 
     def test_snapshot_price_is_never_live(self):
         snap = {"prices": {"SOL": {"price": 86.14}},
@@ -218,50 +222,23 @@ class TestLiveSolPrice(unittest.TestCase):
         self.assertIsNone(_live_sol_price_usd(None, snap))
         self.assertIsNone(_live_sol_price_usd(LiveFeed(), snap))
 
-    def test_live_rest_price_used_without_feed(self):
-        self.assertEqual(
-            _live_sol_price_usd(None, _live_prices(79.0)), 79.0)
+    def test_no_feed_is_no_price(self):
+        """No feed means no SOL tick — and the REST price is the
+        same Jupiter fetch the feed would have made, not a second
+        source to fall back to, so there is no SOL price at all."""
+        self.assertIsNone(
+            _live_sol_price_usd(None, _live_prices(79.0)))
 
 
-class TestFeedCurvePrices(AccuracyBase):
-    def test_poll_curves_ingests_devnet_watchlist(self):
-        """Gate/AuditTest have no DEX pool — the feed prices them
-        from their bonding curves, labelled source 'curve'."""
-        self.feed.ingest("SOL", 80.0, "kraken")
-        with mock.patch(
-                "tradingbot.devnet_watchlist.curve_price_usd",
-                return_value=(0.00012, {})), \
-                mock.patch("tradingbot.solana.SolanaRpcClient", FakeRpc):
-            self.feed._poll_curves()
-        snap = self.feed.snapshot([GATE, AUDT])
-        self.assertIn(GATE, snap)
-        self.assertEqual(snap[GATE]["price"], 0.00012)
-        self.assertEqual(snap[GATE]["source"], "curve")
-        self.assertFalse(snap[GATE]["stale"])
-        self.assertIn(AUDT, snap)
-
-    def test_poll_curves_needs_a_fresh_sol_tick(self):
-        """No live SOL price, no curve price — fail closed, never a
-        guess from a stale SOL."""
-        with mock.patch(
-                "tradingbot.devnet_watchlist.curve_price_usd",
-                return_value=(0.00012, {})), \
-                mock.patch("tradingbot.solana.SolanaRpcClient", FakeRpc):
-            self.feed._poll_curves()
-        self.assertEqual(self.feed.snapshot([GATE]), {})
-
-    def test_poll_curves_inert_off_devnet(self):
-        """active_mints returns [] unless NETWORK is devnet."""
-        feed = LiveFeed(config=mock.Mock(network="mainnet"))
-        feed.ingest("SOL", 80.0, "kraken")
-        with mock.patch(
-                "tradingbot.devnet_watchlist.curve_price_usd",
-                return_value=(0.00012, {})) as curve_fn, \
-                mock.patch("tradingbot.solana.SolanaRpcClient", FakeRpc):
-            feed._poll_curves()
-        curve_fn.assert_not_called()
-        self.assertEqual(feed.snapshot([GATE]), {})
-
+# NOTE (single-price source, 2026-11-25): the devnet curve poll
+# (_poll_curves) is deleted with the DexScreener poll - curve
+# prices now arrive through the Helius stream (curve subscriptions
+# + the stale-refresh chain re-read), never a feed poller. The
+# equivalent coverage lives in tests/test_helius_single_source.py
+# (stream backfill / stale refresh ingests a curve price; no SOL
+# tick means no ingest). The old TestFeedCurvePrices class tested
+# the deleted poller and is removed, not weakened: its fail-closed
+# rule (no live SOL price, no curve price) is re-proven there.
 
 class TestChange24h(AccuracyBase):
     def _snap(self, when, total):
@@ -337,12 +314,10 @@ class TestCoinRowsFeedFirst(AccuracyBase):
         self.db.commit()
 
     def _no_dex(self):
+        # No second source at all: the feed tick is the only price,
+        # and the chain read is off (no app passed to _coin_rows).
         return (
-            mock.patch.object(routes, "fetch_prices_for_mints",
-                              return_value={}),
             mock.patch.object(routes, "fetch_mint_identities",
-                              return_value={}),
-            mock.patch.object(routes, "fetch_mint_1h_changes",
                               return_value={}),
         )
 
@@ -352,8 +327,8 @@ class TestCoinRowsFeedFirst(AccuracyBase):
         returns nothing."""
         self._hold_gate()
         self.feed.ingest(GATE, 0.05, "curve")
-        p1, p2, p3 = self._no_dex()
-        with p1, p2, p3:
+        (p1,) = self._no_dex()
+        with p1:
             rows, _stale = _coin_rows(
                 self.db, self.user_id, "paper",
                 self._prices(), feed=self.feed)
@@ -365,8 +340,8 @@ class TestCoinRowsFeedFirst(AccuracyBase):
     def test_stale_feed_tick_is_not_a_live_price(self):
         self._hold_gate()
         self.feed.ingest(GATE, 0.05, "curve", now=time.time() - 120)
-        p1, p2, p3 = self._no_dex()
-        with p1, p2, p3:
+        (p1,) = self._no_dex()
+        with p1:
             rows, _stale = _coin_rows(
                 self.db, self.user_id, "paper",
                 self._prices(), feed=self.feed)
@@ -393,14 +368,17 @@ class TestRealAvgPrice(AccuracyBase):
             self.assertEqual(
                 _real_avg_price(self.app, GATE, 0.13, 1000.0), 0.0)
 
-    def test_live_rest_sol_price_used_without_feed_tick(self):
+    def test_stale_feed_tick_is_no_cost_basis(self):
+        """A stale feed SOL tick means no cost basis — the old
+        live-REST fallback is gone with the second source, so the
+        holding shows P&L '—' rather than a cost from a price the
+        feed no longer stands behind."""
         self.feed.ingest("SOL", 80.0, "kraken", now=time.time() - 120)
         with mock.patch.object(
                 routes, "_paper_price",
                 return_value=(80.0, "live", "test")):
-            self.assertAlmostEqual(
-                _real_avg_price(self.app, GATE, 0.13, 1000.0), 0.0104,
-                places=4)
+            self.assertEqual(
+                _real_avg_price(self.app, GATE, 0.13, 1000.0), 0.0)
 
     def test_zero_amounts_are_unknown(self):
         self.feed.ingest("SOL", 80.0, "kraken")
@@ -420,22 +398,23 @@ class TestHomeAccuracy(AccuracyBase):
         self.db.commit()
         prices = {"prices": {"SOL": {"price": 80.0, "change_24h": 0.0}},
                   "source": "snapshot", "as_of": "2026-11-09T10:10:11Z"}
-        with mock.patch.object(routes, "get_prices",
-                              return_value=prices), \
-                mock.patch.object(routes, "fetch_prices_for_mints",
+        # No price anywhere for the mint: the feed has no tick
+        # and the chain read returns nothing, so the holding counts
+        # at cost.
+        with mock.patch.object(routes, "_feed_sol_price_usd",
+                              return_value=80.0), \
+                mock.patch.object(routes, "_chain_prices_for_mints",
                                   return_value={}), \
                 mock.patch.object(routes, "fetch_mint_identities",
-                                  return_value={}), \
-                mock.patch.object(routes, "fetch_mint_1h_changes",
                                   return_value={}):
             resp = self.client.get("/wallet")
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         # $100 paper cash + 100 Gate at $0.50 cost = $150.00.
         self.assertIn("$150.00 CAD", html)
-        self.assertIn(
-            "Prices: snapshot (snapshot from 2026-11-09T10:10:11Z, "
-            "not live)", html)
+        # The row itself shows the honest empty state, never a
+        # guessed price.
+        self.assertIn("no data", html)
 
 
 if __name__ == "__main__":

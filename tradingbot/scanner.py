@@ -49,7 +49,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 MARK_WINDOW_SECONDS = 180
-MARK_KEEP_SECONDS = 600
+# How long price marks are kept: 65 minutes, so the loop's own
+# marks can answer the 1-hour trend (the momentum gate and the
+# regime check) as well as the 3/5-minute gains. Marks are the
+# loop's own momentum source now that no second source's change
+# figures are read (single-price source, 2026-11-25).
+MARK_KEEP_SECONDS = 3900
+# Watched-mint marks (a v1 signals bot's own coin list) are kept
+# 25 hours, so the 24-hour buy/sell signal can also come from the
+# loop's own marks. Scan candidates are never kept this long —
+# only the small watched lists use this tier.
+MARK_KEEP_24H_SECONDS = 90000
 
 # --- Scanner profit ladders (James's spec) ---------------------------
 # Rungs are % of the ORIGINAL position, executed in order as profit
@@ -546,8 +556,17 @@ def _fmt(ts: float) -> str:
         "%Y-%m-%dT%H:%M:%SZ")
 
 
-def record_marks(db, bot_id: int, entries, now_str: str) -> None:
-    """One price mark per mint, then prune marks older than 10 minutes."""
+def record_marks(db, bot_id: int, entries, now_str: str,
+                 keep_seconds: int = MARK_KEEP_SECONDS) -> None:
+    """One price mark per mint, then prune. Marks older than
+    `keep_seconds` are dropped for the recorded mints (the index
+    on (bot_id, mint, recorded_at) makes this cheap), and any mark
+    older than the 25-hour ceiling is dropped for the bot, so a
+    coin that stops being recorded cannot grow the table without
+    bound. The default keep (65 minutes) covers the 5-minute and
+    1-hour windows; watched-mint marks pass MARK_KEEP_24H_SECONDS
+    so the 24-hour signal has marks to read."""
+    mints = set()
     for entry in entries or []:
         mint = entry.get("mint")
         price = entry.get("price_usd")
@@ -557,14 +576,22 @@ def record_marks(db, bot_id: int, entries, now_str: str) -> None:
             price = float(price)
         except (TypeError, ValueError):
             continue
+        mints.add(mint)
         db.execute(
             "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
             "recorded_at) VALUES (?, ?, ?, ?)",
             (bot_id, mint, price, now_str))
-    cutoff = _fmt(datetime.now(timezone.utc).timestamp()
-                  - MARK_KEEP_SECONDS)
+    now_ts = datetime.now(timezone.utc).timestamp()
+    if mints:
+        cutoff = _fmt(now_ts - keep_seconds)
+        for mint in sorted(mints):
+            db.execute(
+                "DELETE FROM scanner_marks WHERE bot_id = ? AND "
+                "mint = ? AND recorded_at < ?",
+                (bot_id, mint, cutoff))
+    ceiling = _fmt(now_ts - MARK_KEEP_24H_SECONDS)
     db.execute("DELETE FROM scanner_marks WHERE bot_id = ? AND "
-               "recorded_at < ?", (bot_id, cutoff))
+               "recorded_at < ?", (bot_id, ceiling))
     db.commit()
 
 

@@ -1,35 +1,26 @@
 """Live price feed: one service that subscribes to upstream live sources,
 validates every tick, and serves the app's own WebSocket.
 
-Pump.fun-only. Upstream sources (all free, no key):
-- DexScreener REST (api.dexscreener.com) — polled every 5s for the
-  pump.fun mints the app is watching (held coins + coins a browser
-  subscribed to), plus graduated coins' Raydium pairs. DexScreener
-  has no public price stream, so polling at its fastest sensible
-  rate is the only option there; 5s polling of at most a few dozen
-  mints is far inside its 300 req/min limit.
-- Bonding curves (devnet watchlist only) — a bonding-curve mint has
-  no DexScreener pair at all, so the feed also ingests its price
-  straight from its curve (virtual SOL / virtual token reserves x
-  the live SOL price), via tradingbot.devnet_watchlist. Same hard
-  devnet gate as the silent loop's watchlist: inert on any other
-  network. This is what puts Gate and AuditTest on every display
-  stream — the trenches feed alone can never price them.
-- Jupiter lite-api v3 (lite-api.jup.ag, no key) — the SOL price every
-  60s. SOL is the unit of account only (base currency for curve
-  quotes, gas, balances) — never a listed or buyable coin.
-- CoinGecko is gone, and so is the Kraken WebSocket: the app no
-  longer lists major coins, so there is nothing for either to price.
+Pump.fun-only. ONE price pipeline (single-price source, 2026-11-25):
+every coin price in the app comes from the Helius stream — on-chain
+bonding-curve reads for bonding coins (accountSubscribe on the curve
+account, ~1 tick per slot, ~400ms) and Raydium pool-vault reads for
+graduated coins — ingested here through `ingest` and served from this
+store. There is exactly one other upstream: Jupiter lite-api v3 for
+the SOL price every 60s (the unit of account only — never a listed
+or buyable coin). That is the whole price system: Helius for coins,
+Jupiter for SOL, this store as the single validated source.
 
-Left OUT, deliberately:
-- Binance: its REST and WebSocket both return HTTP 451 from US IPs
-  (geo-blocked), and Railway runs in US East. Documented, not retried.
-- PumpPortal's WebSocket (wss://pumpportal.fun/api/data) streams
-  pump.fun new-token and trade events and was verified working, but
-  turning trade events into per-mint prices needs per-mint
-  subscriptions and reconnect handling that would not be finished and
-  tested in this pass. It is the candidate real-time mint source for a
-  later step; the DexScreener poll covers mints until then.
+GONE (2026-11-25, "Do we need two streams?" — no): the DexScreener
+5-second REST poll was the second stream and it is deleted — nothing
+reads DexScreener for prices any more. The devnet curve poll is
+deleted too: the Helius stream covers devnet curves the same way
+it covers mainnet ones. DexScreener remains only the discovery
+index (which tokens are new) and activity metadata (volume, txns,
+mcap) in the trenches scan — never a price. A coin the stream
+cannot tick (no curve, no known pool) has NO price here: the
+pages say "no data" and the bot skips it, never a stale or
+second-source number.
 
 Tick validation (the $709,599.60 lesson — one bad print once inflated
 a portfolio by ~$706,000 for a minute): a tick is accepted only if its
@@ -44,8 +35,10 @@ yet accepts its first tick (nothing to compare against), and when the
 feed has no reference at all the loop's sanitizer accepts prices too —
 fail-open without a reference is safer than halting all trading
 whenever the feed hiccups; the moment a reference exists, the bound
-applies. A tick older than STALE_AFTER_SECONDS (30s) is stale: shown
-with its age, never as fresh.
+applies. A tick older than STALE_AFTER_SECONDS (30s) is stale: it is
+NO price at all — pages show "no data" and the bot skips — never
+shown as live, never decided on. Accuracy first: a wrong number is
+worse than no number.
 
 The feed runs as daemon threads inside the web process (started from
 run.py, never from create_app, so tests never open sockets). Kill it
@@ -81,11 +74,9 @@ REBASE_TOLERANCE = 0.05
 STALE_AFTER_SECONDS = 30.0
 
 # --- upstream sources -----------------------------------------------------
-# DexScreener (pump.fun mints) + bonding curves (devnet watchlist
-# mints, which have no DexScreener pair) + Jupiter (SOL, the unit of
-# account). No Kraken, no CoinGecko — the app lists no major coins.
-DEXSCREENER_POLL_SECONDS = 5.0
-HELD_MINTS_REFRESH_SECONDS = 60.0
+# ONE price pipeline (2026-11-25): the Helius stream ingests coin
+# ticks (bonding curves + Raydium vaults); Jupiter ingests the SOL
+# price. No DexScreener poll, no devnet curve poll — both deleted.
 JUPITER_CHECK_SECONDS = 60.0
 JUPITER_SOL_MINT = "So11111111111111111111111111111111111111112"
 JUPITER_PRICE_URL = "https://lite-api.jup.ag/price/v3?ids={}"
@@ -119,12 +110,13 @@ class LiveFeed:
         # default: the feed works exactly as before without it.
         self._tick_listener = None
         # coin_id -> deque of (epoch_seconds, price): every ACCEPTED
-        # tick, oldest first, capped at the last ~2,000 per coin
-        # (about 3 hours at the 5-second mint poll). Rejected ticks
-        # never enter it. This is the recorded history the
-        # candlestick chart builds mint candles from — it is
-        # in-memory only, so a fresh deploy starts with no history
-        # and the page says the candles are still building.
+        # tick, oldest first, capped at the last ~10,000 per coin
+        # (about an hour at stream cadence for a busy coin — enough
+        # for the 1-hour change to come from the stream's own
+        # history). Rejected ticks never enter it. This is the
+        # recorded history the candlestick chart builds mint candles
+        # from — it is in-memory only, so a fresh deploy starts with
+        # no history and the page says the candles are still building.
         self._history: dict = {}
         self._stop = threading.Event()
         self._started = False
@@ -219,7 +211,7 @@ class LiveFeed:
             self._ticks[coin_id] = entry
             history = self._history.get(coin_id)
             if history is None:
-                history = deque(maxlen=2000)
+                history = deque(maxlen=10000)
                 self._history[coin_id] = history
             history.append((now, price))
             accepted = True
@@ -298,6 +290,66 @@ class LiveFeed:
             return None
         return now - tick["as_of"]
 
+    def live_tick(self, coin_id: str,
+                  now: float | None = None) -> dict | None:
+        """The stored tick for a coin when it is FRESH, else None.
+        A stale tick is no price at all — pages show "no data" and
+        the bot skips — never shown as live, never decided on.
+        This is the one verified-price read: every price shown or
+        decided on in the app goes through here (or `live_price`
+        below)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            tick = self._ticks.get(coin_id)
+        if tick is None:
+            return None
+        if (now - tick["as_of"]) > STALE_AFTER_SECONDS:
+            return None
+        return dict(tick)
+
+    def live_price(self, coin_id: str,
+                   now: float | None = None) -> float | None:
+        """The fresh price for a coin, or None when there is no
+        fresh tick. Never a stale number, never a guess."""
+        tick = self.live_tick(coin_id, now=now)
+        if tick is None:
+            return None
+        try:
+            price = float(tick["price"])
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(price) or price <= 0:
+            return None
+        return price
+
+    def change_over(self, coin_id: str, window_seconds: float,
+                    now: float | None = None) -> float | None:
+        """% change between the latest tick and the tick closest to
+        (now - window) in the recorded history, or None when the
+        history does not reach that far back. Computed from the
+        stream's own ticks — never a second source's change figure.
+        A coin the stream has watched for less than the window has
+        no change figure yet ("—" on the page), never a guessed one."""
+        now = time.time() if now is None else now
+        with self._lock:
+            points = self._history.get(coin_id)
+            points = list(points) if points else []
+        if len(points) < 2:
+            return None
+        latest_ts, latest_price = points[-1]
+        if (now - latest_ts) > STALE_AFTER_SECONDS:
+            return None
+        target = now - float(window_seconds)
+        old_price = None
+        for ts, price in points:
+            if ts <= target:
+                old_price = price
+            else:
+                break
+        if old_price is None or old_price <= 0 or latest_price <= 0:
+            return None
+        return (latest_price / old_price - 1.0) * 100.0
+
     # --- mint subscriptions (what the DexScreener poller watches) --------
     def subscribe_mint(self, mint: str) -> None:
         with self._lock:
@@ -365,23 +417,25 @@ class LiveFeed:
 
     # --- upstream threads -------------------------------------------------
     def start(self) -> None:
-        """Start the DexScreener poller and Jupiter SOL check as daemon
-        threads. Idempotent. A thread that dies logs and reconnects on
-        its own schedule; a dead upstream never stops the app — the
-        last good ticks stand, marked stale."""
+        """Start the Jupiter SOL check as a daemon thread.
+        Idempotent. Coin ticks come only from the Helius stream
+        (started separately from run.py) — there is no poller any
+        more: the DexScreener 5s poll and the devnet curve poll
+        were deleted with the single-price source (2026-11-25).
+        A thread that dies logs and reconnects on its own
+        schedule; a dead upstream never stops the app — the last
+        good ticks stand, marked stale, and stale reads as no
+        price until a fresh tick lands."""
         if self._started:
             return
         self._started = True
         self._stop.clear()
-        for name, target in (
-                ("livefeed-dexscreener", self._dexscreener_loop),
-                ("livefeed-jupiter", self._jupiter_loop)):
-            thread = threading.Thread(target=target, daemon=True,
-                                      name=name)
-            thread.start()
-            self._threads.append(thread)
-        log.info("[live-feed] started (dexscreener poll + jupiter "
-                 "check)")
+        thread = threading.Thread(target=self._jupiter_loop,
+                                  daemon=True, name="livefeed-jupiter")
+        thread.start()
+        self._threads.append(thread)
+        log.info("[live-feed] started (jupiter SOL check; coin "
+                 "ticks come from the Helius stream)")
 
     def stop(self) -> None:
         self._stop.set()
@@ -412,96 +466,6 @@ class LiveFeed:
         except Exception as exc:
             log.warning("[live-feed] held-mints db read failed: %s", exc)
             return set()
-
-    def _poll_dexscreener(self, mints) -> None:
-        from .trenches import (
-            _CHUNK, TOKENS_URL, _best_pair_incl_graduated, _default_get,
-            _entry)
-        for i in range(0, len(mints), _CHUNK):
-            chunk = mints[i:i + _CHUNK]
-            try:
-                data = _default_get(TOKENS_URL.format(",".join(chunk)))
-            except Exception as exc:
-                log.warning("[live-feed] dexscreener fetch failed: %s",
-                            exc)
-                return
-            by_mint: dict = {}
-            for pair in data.get("pairs") or []:
-                base = pair.get("baseToken") or {}
-                addr = base.get("address")
-                if addr:
-                    by_mint.setdefault(addr, []).append(pair)
-            for mint, pairs in by_mint.items():
-                best = _best_pair_incl_graduated(pairs)
-                if best is None:
-                    continue
-                entry = _entry(mint, best)
-                self.ingest(mint, entry["price_usd"], "dexscreener",
-                            change_24h=entry.get("change_24h_pct"),
-                            change_1h=entry.get("change_1h_pct"))
-
-    def _poll_curves(self) -> None:
-        """Price the devnet watchlist mints from their bonding curves.
-
-        DEVNET-TEST-ONLY (remove before mainnet): Gate/AuditTest have
-        no DEX pool, so DexScreener returns no pair for them and can
-        never price them — the bonding curve is the only live price
-        (curve reserves x the feed's own fresh SOL tick). Inert unless
-        NETWORK is devnet (active_mints returns [] otherwise). A
-        missing/stale SOL tick, an unreachable RPC, or an unpriceable
-        mint skips that mint this pass — never a guess. Curve ticks go
-        through the same ingest validation as every other tick (50%
-        jump guard, stale after 30s), labelled source "curve", so the
-        pages, /api/live, /tick, sparklines, mint candles and the
-        top-10 watch all price devnet mints from the one live feed.
-        """
-        if self._config is None:
-            return
-        try:
-            from .devnet_watchlist import active_mints, curve_price_usd
-            from .solana import SolanaRpcClient
-        except Exception:
-            return
-        mints = active_mints(self._config)
-        if not mints:
-            return
-        sol = self.snapshot(["SOL"]).get("SOL")
-        if sol is None or sol["stale"]:
-            return
-        try:
-            client = SolanaRpcClient(self._config.rpc_url)
-        except Exception as exc:
-            log.warning("[live-feed] curve poll: no RPC client: %s", exc)
-            return
-        for mint in mints:
-            try:
-                price, _curve = curve_price_usd(
-                    client, mint, sol["price"])
-            except Exception:
-                continue
-            if price is None:
-                continue
-            self.ingest(mint, price, "curve")
-
-    def _dexscreener_loop(self) -> None:
-        held_refresh_at = 0.0
-        held: set = set()
-        while not self._stop.is_set():
-            try:
-                now = time.time()
-                if now >= held_refresh_at:
-                    held = self._held_mints_from_db()
-                    held_refresh_at = now + HELD_MINTS_REFRESH_SECONDS
-                mints = sorted(self.watched_mints() | held)
-                if mints:
-                    self._poll_dexscreener(mints)
-                # Devnet watchlist mints have no DEX pool — price
-                # them from their bonding curves on the same cadence.
-                self._poll_curves()
-            except Exception as exc:  # never kill the feed thread
-                log.warning("[live-feed] dexscreener poll error: %s", exc)
-            self._stop.wait(DEXSCREENER_POLL_SECONDS)
-
 
     def _jupiter_check(self) -> None:
         try:

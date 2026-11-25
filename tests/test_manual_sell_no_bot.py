@@ -62,15 +62,6 @@ class FakeRpc:
         return True
 
 
-def make_prices(changes=None):
-    prices = {"SOL": {"price": 100.0, "change_24h": 0.0,
-                      "change_1h": 0.0}}
-    if changes:
-        prices.update({c: {"price": p, "change_24h": ch}
-                       for c, (p, ch) in changes.items()})
-    return {"prices": prices, "source": "live", "as_of": "test"}
-
-
 def set_fuel(db, user_id, n):
     """Set fuel to exactly `n` credits by consuming down from the
     current balance with distinct fake signatures (the honest
@@ -94,12 +85,10 @@ class ManualSellBase(unittest.TestCase):
         FakeRpc.balance_lamports = 0
         self._patches = [
             mock.patch.object(routes, "SolanaRpcClient", FakeRpc),
-            mock.patch.object(routes, "get_prices",
-                              return_value=make_prices()),
-            mock.patch.object(routes, "fetch_prices_for_mints",
-                              return_value=dict(MINT_PRICES)),
-            mock.patch.object(routes, "fetch_mint_1h_changes",
-                              return_value={}),
+            # get_prices / fetch_prices_for_mints /
+            # fetch_mint_1h_changes are deleted in the Helius
+            # single-source build: coins are priced from the live
+            # feed's ticks, seeded below (SOL + both test mints).
             mock.patch.object(routes, "fetch_mint_identities",
                               return_value={}),
             mock.patch.object(routes, "ensure_coin_meta",
@@ -124,6 +113,14 @@ class ManualSellBase(unittest.TestCase):
         self.user_id = self.db.execute(
             "SELECT id FROM users WHERE username = 'alice'"
         ).fetchone()["id"]
+        # Single-price source: seed the app's live feed with the
+        # SOL tick and both test-mint ticks the pages and the sell
+        # path price from (the deleted fetch_* mocks used to
+        # provide these numbers).
+        feed = self.app.config["LIVE_FEED"]
+        feed.ingest("SOL", 100.0, "test")
+        for _mint, _price in MINT_PRICES.items():
+            feed.ingest(_mint, _price, "test")
         grant_fuel(self.db, self.user_id, 100)
 
     def tearDown(self):

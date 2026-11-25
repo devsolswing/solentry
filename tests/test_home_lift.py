@@ -13,11 +13,11 @@ holdings:
   holdings panel grows with the list and never scrolls internally
   (supersedes the compact build's internal scroll).
 - 1h data: SOL's 1h change is always None (the SOL price feed
-  carries no 1h figure); pump.fun mints get theirs from
-  DexScreener best-pair priceChange.h1 (new fetch_mint_1h_changes,
-  mirroring fetch_prices_for_mints). A price feed that cannot be
-  reached reports "unavailable" with no price at all — there is no
-  snapshot fallback any more.
+  carries no 1h figure); pump.fun mints get theirs from the live
+  feed's own tick history (feed.change_over, 1h) — never a
+  DexScreener figure. A price feed that cannot be reached reports
+  "unavailable" with no price at all — there is no snapshot
+  fallback any more.
 - The portfolio chart moved off the home page to make room; the
   total and the 24h change stay. The candlestick build (2026-11-10)
   brings a COMPACT chart back into the balance card — candlestick
@@ -32,13 +32,14 @@ No SOL moves in these tests; sends are never confirmed.
 
 import json
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 import tradingbot.prices as prices
 import tradingbot.routes as routes
-import tradingbot.trenches as trenches
 from helpers import csrf, make_client, signup
+from tradingbot.livefeed import LiveFeed
 
 MINT = "11111111111111111111111111111111"
 # Gate (the devnet pump.fun coin): the mint the lift tests buy
@@ -47,7 +48,6 @@ MINT = "11111111111111111111111111111111"
 # the no-data dash test.
 GATE_MINT = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
 GATE_PRICE = 0.01
-GATE_CHANGE_1H = 2.5
 
 
 def make_prices(changes):
@@ -67,11 +67,12 @@ class HomeLiftBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
         # SOL only now — the app prices no major coins; pump.fun
-        # mints are priced by the trenches feed (mocked below).
+        # mints are priced by the live feed's stream tick (with the
+        # batched Helius chain read as the pull twin), and their
+        # 1h change comes from the feed's own tick history.
         self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({
-                "SOL": (10.0, 5.25, 2.5)}))
+            routes, "_feed_sol_price_usd",
+            return_value=10.0)
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(10.0, "live", "test"))
@@ -83,13 +84,16 @@ class HomeLiftBase(unittest.TestCase):
                           "error": None})
         self.trenches_patch.start()
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={GATE_MINT: GATE_PRICE})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes",
-            return_value={GATE_MINT: GATE_CHANGE_1H})
-        self.mint_1h_patch.start()
+        # Gate's +2.5% 1h change, from real feed history: an
+        # hour-old tick, then the fresh $0.01 tick.
+        feed = self.app.config["LIVE_FEED"]
+        now = time.time()
+        feed.ingest(GATE_MINT, GATE_PRICE / 1.025, "helius-stream",
+                    now=now - 3600)
+        feed.ingest(GATE_MINT, GATE_PRICE, "helius-stream", now=now)
         self.mint_idents_patch = mock.patch.object(
             routes, "fetch_mint_identities",
             return_value={GATE_MINT: {"name": "Gate",
@@ -109,7 +113,6 @@ class HomeLiftBase(unittest.TestCase):
     def tearDown(self):
         self.coin_meta_patch.stop()
         self.mint_idents_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
@@ -318,45 +321,35 @@ class TestChange1hFeed(unittest.TestCase):
         self.assertIsNone(data["prices"]["SOL"]["price"])
         self.assertIsNone(data["prices"]["SOL"]["change_1h"])
 
-    def _dex_pair(self, mint, h1, liq=1000.0):
-        return {"chainId": "solana", "dexId": "pumpfun",
-                "priceUsd": "0.5",
-                "priceChange": {"m5": 1.0, "h1": h1, "h6": 2.0,
-                                "h24": 3.0},
-                "liquidity": {"usd": liq},
-                "baseToken": {"address": mint, "symbol": "TEST",
-                              "name": "Test"}}
+    def test_feed_change_over_from_tick_history(self):
+        # The 1h change now comes from the live feed's own tick
+        # history — never a DexScreener figure. An hour-old tick
+        # at $1.00 and a fresh tick at $0.901 is a −9.9% 1h move.
+        feed = LiveFeed()
+        now = time.time()
+        feed.ingest(MINT, 1.0, "helius-stream", now=now - 3600)
+        feed.ingest(MINT, 0.901, "helius-stream", now=now)
+        self.assertAlmostEqual(feed.change_over(MINT, 3600, now),
+                               -9.9, places=1)
 
-    def test_fetch_mint_1h_changes_from_best_pair(self):
-        payload = {"pairs": [
-            self._dex_pair(MINT, 7.5, liq=1000.0),
-            self._dex_pair(MINT, -9.9, liq=5000.0),
-        ]}
+    def test_feed_change_over_needs_history_reaching_back(self):
+        # One fresh tick only: the history does not reach back an
+        # hour, so there is no 1h figure — None, never a guess.
+        feed = LiveFeed()
+        now = time.time()
+        feed.ingest(MINT, 1.0, "helius-stream", now=now)
+        self.assertIsNone(feed.change_over(MINT, 3600, now))
 
-        def fake_get(url):
-            return payload
-
-        out = trenches.fetch_mint_1h_changes([MINT], http_get=fake_get)
-        # Highest-liquidity pair wins, not the first one.
-        self.assertEqual(out, {MINT: -9.9})
-
-    def test_fetch_mint_1h_changes_skips_missing_h1(self):
-        pair = self._dex_pair(MINT, None)
-        del pair["priceChange"]["h1"]
-        out = trenches.fetch_mint_1h_changes(
-            [MINT], http_get=lambda url: {"pairs": [pair]})
-        self.assertEqual(out, {})
-
-    def test_fetch_mint_1h_changes_failure_is_empty(self):
-        out = trenches.fetch_mint_1h_changes(
-            [MINT], http_get=lambda url: (_ for _ in ()).throw(
-                Exception("boom")))
-        self.assertEqual(out, {})
+    def test_feed_change_over_is_none_with_no_ticks(self):
+        # A coin the feed has never priced has no 1h figure at
+        # all — None, never an invented number.
+        feed = LiveFeed()
+        self.assertIsNone(feed.change_over(MINT, 3600, time.time()))
 
 
 class TestCoinRowsChange1h(HomeLiftBase):
     def test_mint_rows_carry_change_1h_and_legacy_sol_has_none(self):
-        # Two mints, priced by the trenches feed: each row carries
+        # Two mints, priced by the live feed: each row carries
         # its own 1h change and value. A legacy SOL holding (bought
         # when the app still listed major coins) has no feed any
         # more — it is shown at cost with no live price and no 1h
@@ -368,19 +361,26 @@ class TestCoinRowsChange1h(HomeLiftBase):
         self._hold_mint()
         self._hold_mint(amount=50.0, avg_price=0.2, mint=GATE_MINT)
         self.db.commit()
-        with mock.patch.object(
-                routes, "fetch_prices_for_mints",
-                return_value={MINT: 0.5, GATE_MINT: 0.25}), \
-                mock.patch.object(
-                routes, "fetch_mint_1h_changes",
-                return_value={MINT: -3.25, GATE_MINT: 4.0}):
-            rows, _stale = routes._coin_rows(
-                self.db, self.user_id, "paper",
-                make_prices({"SOL": (10.0, 5.25, 2.5)}))
+        # A fresh feed seeded with the rows' prices and their 1h
+        # history (MINT −3.25%, Gate +4.0% over the last hour).
+        feed = LiveFeed()
+        now = time.time()
+        feed.ingest(MINT, 0.5 / 0.9675, "helius-stream",
+                    now=now - 3600)
+        feed.ingest(MINT, 0.5, "helius-stream", now=now)
+        feed.ingest(GATE_MINT, 0.25 / 1.04, "helius-stream",
+                    now=now - 3600)
+        feed.ingest(GATE_MINT, 0.25, "helius-stream", now=now)
+        rows, _stale = routes._coin_rows(
+            self.db, self.user_id, "paper",
+            make_prices({"SOL": (10.0, 5.25, 2.5)}),
+            feed=feed, app=self.app)
         by_id = {r["coin_id"]: r for r in rows}
-        self.assertEqual(by_id[MINT]["change_1h"], -3.25)
+        self.assertAlmostEqual(by_id[MINT]["change_1h"], -3.25,
+                               places=1)
         self.assertEqual(by_id[MINT]["value"], 50.0)
-        self.assertEqual(by_id[GATE_MINT]["change_1h"], 4.0)
+        self.assertAlmostEqual(by_id[GATE_MINT]["change_1h"], 4.0,
+                               places=1)
         self.assertEqual(by_id[GATE_MINT]["value"], 12.5)
         self.assertIsNone(by_id["SOL"]["change_1h"])
         self.assertIsNone(by_id["SOL"]["price"])
@@ -392,13 +392,14 @@ class TestCoinRowsChange1h(HomeLiftBase):
             (self.user_id,))
         self._hold_mint()
         self.db.commit()
-        with mock.patch.object(
-                routes, "fetch_prices_for_mints",
-                return_value={MINT: 0.5}), mock.patch.object(
-                routes, "fetch_mint_1h_changes", return_value={}):
-            rows, _stale = routes._coin_rows(
-                self.db, self.user_id, "paper",
-                make_prices({"SOL": (10.0, 5.25)}))
+        # The mint has one fresh tick only: a price, but no history
+        # reaching back an hour, so its 1h figure is None.
+        feed = LiveFeed()
+        feed.ingest(MINT, 0.5, "helius-stream")
+        rows, _stale = routes._coin_rows(
+            self.db, self.user_id, "paper",
+            make_prices({"SOL": (10.0, 5.25)}),
+            feed=feed, app=self.app)
         by_id = {r["coin_id"]: r for r in rows}
         self.assertIsNone(by_id["SOL"]["change_1h"])
         self.assertIsNone(by_id[MINT]["change_1h"])

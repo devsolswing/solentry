@@ -37,6 +37,7 @@ import json
 import re
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import tradingbot.jupiter as jupiter_mod
@@ -105,12 +106,10 @@ class SplitBase(unittest.TestCase):
         FakeRpc.balance_lamports = 0
         self._patches = [
             mock.patch.object(routes, "SolanaRpcClient", FakeRpc),
-            mock.patch.object(routes, "get_prices",
-                              return_value=make_prices()),
-            mock.patch.object(routes, "fetch_prices_for_mints",
-                              return_value=dict(MINT_PRICES)),
-            mock.patch.object(routes, "fetch_mint_1h_changes",
-                              return_value={}),
+            # get_prices / fetch_prices_for_mints /
+            # fetch_mint_1h_changes are deleted in the Helius
+            # single-source build: coins are priced from the live
+            # feed's ticks, seeded below (SOL + both test mints).
             mock.patch.object(routes, "fetch_mint_identities",
                               return_value={}),
             mock.patch.object(routes, "ensure_coin_meta",
@@ -138,6 +137,14 @@ class SplitBase(unittest.TestCase):
         self.user_id = self.db.execute(
             "SELECT id FROM users WHERE username = 'alice'"
         ).fetchone()["id"]
+        # Single-price source: seed the app's live feed with the
+        # SOL tick and both test-mint ticks the pages and the loop
+        # price from (the deleted fetch_* mocks used to provide
+        # these numbers).
+        feed = self.app.config["LIVE_FEED"]
+        feed.ingest("SOL", 100.0, "test")
+        for _mint, _price in MINT_PRICES.items():
+            feed.ingest(_mint, _price, "test")
         self.wallet_pubkey = self.db.execute(
             "SELECT pubkey FROM wallets WHERE user_id = ?",
             (self.user_id,)).fetchone()["pubkey"]
@@ -832,21 +839,40 @@ class TestLoopCurveDispatch(SplitBase):
     completeness, and it can only ever watch pump.fun mints."""
 
     def _run(self, prices, executor, change_24h=5.0):
-        with mock.patch.object(
-                silent_loop, "fetch_prices_for_mints",
-                return_value={GRAD_MINT: 0.002,
-                              BONDING_MINT: 0.001}), \
-                mock.patch.object(
-                    silent_loop, "fetch_mint_24h_changes",
-                    return_value={GRAD_MINT: change_24h,
-                                  BONDING_MINT: change_24h}), \
-                mock.patch.object(silent_loop, "ensure_coin_meta",
-                                  return_value=None):
+        # Single-price source: the v1 24-hour signal now comes
+        # from the loop's own marks, and mint prices from the live
+        # feed's ticks (seeded in setUp). Seed a 24.5-hour-old
+        # mark per watched mint at the price the requested 24h
+        # change implies, so a 5.0% change reads +5% (a buy) and
+        # a 0.0% change reads flat (no signal).
+        feed = self.app.config["LIVE_FEED"]
+        for _mint, _price in MINT_PRICES.items():
+            feed.ingest(_mint, _price, "test")
+        _mark_at = (datetime.now(timezone.utc)
+                    - timedelta(hours=24, minutes=30)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+        for _row in self.db.execute(
+                "SELECT id, coins FROM bots WHERE silent = 1").fetchall():
+            try:
+                _coins = json.loads(_row["coins"])
+            except Exception:
+                _coins = []
+            for _coin in _coins:
+                if _coin in MINT_PRICES:
+                    self.db.execute(
+                        "INSERT INTO scanner_marks (bot_id, mint, "
+                        "price_usd, recorded_at) VALUES (?, ?, ?, ?)",
+                        (_row["id"], _coin,
+                         MINT_PRICES[_coin]
+                         / (1.0 + change_24h / 100.0), _mark_at))
+        self.db.commit()
+        with mock.patch.object(silent_loop, "ensure_coin_meta",
+                              return_value=None):
             return run_once(
                 self.db, self.cfg,
                 price_fetcher=lambda: prices,
                 rpc_factory=lambda url: FakeRpc(url, 0),
-                real_executor=executor)
+                real_executor=executor, feed=feed)
 
     def _bot_row(self, bot_id):
         return self.db.execute(

@@ -187,6 +187,27 @@ class _FakeFeed:
                             "source": "test", "stale": False}
         return out
 
+
+    def tick_age_seconds(self, coin_id, now=None):
+        # The loop's SOL read: a tick the feed holds is fresh
+        # (age 0.0); a coin with no tick has no age at all.
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        # The fake feed carries no history: no change figure,
+        # never a guessed one.
+        return None
+
     def sanitize_prices_data(self, data):
         return data
 
@@ -290,6 +311,16 @@ class PitBase(unittest.TestCase):
             (bot_id, coin)).fetchone()
 
     def _run(self, entries, feed=None, executor=None):
+        # Single-price source: a scan entry survives the loop's
+        # reprice only with a live feed tick at its price (the
+        # chain cannot price these test mints). Seed ticks for
+        # entries the feed has none for — never overwriting a tick
+        # a test set deliberately — and never a SOL tick, so tests
+        # asserting "no live SOL price" still see none.
+        if feed is None:
+            feed = _FakeFeed()
+        for _e in entries:
+            feed.ticks.setdefault(_e["mint"], _e["price_usd"])
         scan = _FakeScan(entries)
         return run_once(self.db, self.cfg, price_fetcher=_empty_prices,
                         trenches_fetcher=scan,
@@ -307,7 +338,18 @@ class PitBase(unittest.TestCase):
     def _buy_twice(self, bot_id, entry, feed=None):
         """Run two scans (2-scan confirmation) and return the
         outcomes of the second scan."""
-        self._insert_mark(bot_id, entry["mint"], 0.01, _now(-200))
+        # The 5-minute gain now comes from the loop's own marks:
+        # seed one 330s old at the price the entry's stated
+        # change implies (0.0106 at +6.3% -> 0.009972) — a flat
+        # 0.01 mark would read only +6.0%, under Pit's 6.3% bar.
+        change = entry.get("change_5m_pct")
+        # Encode the stated change plus 0.05pp: a mark encoding
+        # exactly +6.3% reads 6.299999999999987% in floats, a hair
+        # under Pit's 6.3% bar, and the mover is skipped.
+        mark_price = (entry["price_usd"]
+                      / (1.0 + (float(change) + 0.05) / 100.0)
+                      if change is not None else 0.01)
+        self._insert_mark(bot_id, entry["mint"], mark_price, _now(-330))
         self._run([entry], feed=feed)
         self._reset_scan(bot_id)
         return self._run([entry], feed=feed)
@@ -565,7 +607,7 @@ class TestPitLoopBuys(PitBase):
 
     def test_first_scan_only_confirms_no_buy(self):
         bot_id = self._insert_bot(rules=pit_ruleset())
-        self._insert_mark(bot_id, PIT_MINT, 0.01, _now(-200))
+        self._insert_mark(bot_id, PIT_MINT, 0.0106 / 1.0635, _now(-330))
         outcomes = self._run([_pit_entry(PIT_MINT, 0.0106)])
         self.assertEqual(self._buys(outcomes), [])
         self.assertIsNone(self._position(bot_id, PIT_MINT))
@@ -679,7 +721,9 @@ class TestPitLoopExits(PitBase):
     def test_pullback_needs_two_ticks(self):
         bot_id = self._insert_bot(rules=pit_ruleset())
         self._held(bot_id)
-        # First tick at -2% in 5 minutes: one vote, no sell.
+        # First tick at -2% in 5 minutes: one vote, no sell. The
+        # -2% now comes from the loop's own marks (0.01 at -330s).
+        self._insert_mark(bot_id, PIT_MINT, 0.01, _now(-330))
         outcomes = self._run([_pit_entry(PIT_MINT, 0.0098,
                                          change_5m=-2.0)])
         self.assertEqual(self._sells(outcomes), [])
@@ -697,6 +741,8 @@ class TestPitLoopExits(PitBase):
         # never reaches +12% — the exit precedence from the spec.
         bot_id = self._insert_bot(rules=pit_ruleset())
         self._held(bot_id, price=0.0111, peak=0.0111)
+        # -2% in 5 minutes from the loop's own marks.
+        self._insert_mark(bot_id, PIT_MINT, 0.0111 / 0.98, _now(-330))
         self._run([_pit_entry(PIT_MINT, 0.0111, change_5m=-2.0)])
         self._reset_scan(bot_id)
         outcomes = self._run([_pit_entry(PIT_MINT, 0.0111,
@@ -709,6 +755,9 @@ class TestPitLoopExits(PitBase):
     def test_flat_dead_needs_two_ticks(self):
         bot_id = self._insert_bot(rules=pit_ruleset())
         self._held(bot_id)
+        # Flat in 5 minutes from the loop's own marks (0.01 at
+        # -330s vs 0.01 now reads 0%, inside +/-0.5%).
+        self._insert_mark(bot_id, PIT_MINT, 0.01, _now(-330))
         outcomes = self._run([_pit_entry(PIT_MINT, 0.01,
                                          change_5m=0.3)])
         self.assertEqual(self._sells(outcomes), [])

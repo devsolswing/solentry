@@ -103,10 +103,12 @@ class CandleBase(unittest.TestCase):
         self.rpc_patch.start()
         FakeRpc.instances.clear()
         FakeRpc.balance_lamports = 0
-        # get_prices() is SOL-only now: SOL is the unit of account.
+        # Single price source: SOL is the feed's SOL tick only
+        # (get_prices is gone); mint prices come from one batched
+        # Helius chain read; the 1h change comes from the feed's
+        # own tick history (feed.change_over).
         self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({"SOL": (10.0, 5.25, 2.5)}))
+            routes, "_feed_sol_price_usd", return_value=10.0)
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(10.0, "snapshot", "test"))
@@ -122,15 +124,15 @@ class CandleBase(unittest.TestCase):
         # Mint feeds: keep every render local — no live DexScreener
         # or RPC calls from the routes under test.
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
-            side_effect=lambda mints: {
+            routes, "_chain_prices_for_mints",
+            side_effect=lambda app, mints: {
                 m: MINT_PRICES[m] for m in (mints or [])
                 if m in MINT_PRICES})
         self.mint_prices_patch.start()
+        self.feed = self.app.config["LIVE_FEED"]
         self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes",
-            side_effect=lambda mints: {
-                m: MINT_1H[m] for m in (mints or []) if m in MINT_1H})
+            self.feed, "change_over",
+            side_effect=lambda coin, window, now=None: MINT_1H.get(coin))
         self.mint_1h_patch.start()
         self.mint_ident_patch = mock.patch.object(
             routes, "fetch_mint_identities",

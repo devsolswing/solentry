@@ -11,6 +11,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import tradingbot.routes as routes
@@ -48,6 +49,54 @@ class _FakeScan:
 
 def _empty_prices():
     return {"prices": {}, "source": "snapshot", "as_of": "test"}
+
+
+def _now(offset_seconds=0):
+    return (datetime.now(timezone.utc)
+            + timedelta(seconds=offset_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+
+
+class _FakeFeed:
+    """Live-feed stand-in: snapshot() returns the tick per mint."""
+
+    def __init__(self, ticks=None):
+        self.ticks = ticks or {}
+
+    def snapshot(self, coin_ids=None):
+        out = {}
+        for cid in (coin_ids or list(self.ticks)):
+            if cid in self.ticks:
+                out[cid] = {"coin_id": cid, "price": self.ticks[cid],
+                            "source": "test", "stale": False}
+        return out
+
+    def tick_age_seconds(self, coin_id, now=None):
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        return None
+
+    def sanitize_prices_data(self, data):
+        return data
+
+    def sanitize_trenches(self, data):
+        return data
+
+    def set_tick_listener(self, callback):
+        self._listener = callback
+
+
 
 
 class TestBuyFilterUnit(unittest.TestCase):
@@ -371,14 +420,37 @@ class TestBuyFilterLoop(unittest.TestCase):
             "SELECT * FROM activity WHERE user_id = ? AND kind = ?",
             (self.user_id, "silent_skip")).fetchall()
 
+    def _run(self, bot_id, entries):
+        # Single-price source: seed a feed tick per entry, and the
+        # loop's own marks encoding the entry's stated 5-minute
+        # change (-330s) and a +25% 1-hour trend (-3700s) — the
+        # loop reads both from marks now, never from the feed.
+        feed = _FakeFeed()
+        for e in entries:
+            feed.ticks[e["mint"]] = e["price_usd"]
+            chg = e.get("change_5m_pct")
+            if chg is not None:
+                self.db.execute(
+                    "INSERT INTO scanner_marks (bot_id, mint, "
+                    "price_usd, recorded_at) VALUES (?, ?, ?, ?)",
+                    (bot_id, e["mint"],
+                     e["price_usd"] / (1.0 + float(chg) / 100.0),
+                     _now(-330)))
+                self.db.execute(
+                    "INSERT INTO scanner_marks (bot_id, mint, "
+                    "price_usd, recorded_at) VALUES (?, ?, ?, ?)",
+                    (bot_id, e["mint"], e["price_usd"] / 1.25,
+                     _now(-3700)))
+        self.db.commit()
+        return run_once(self.db, self.cfg,
+                        price_fetcher=_empty_prices,
+                        trenches_fetcher=_FakeScan(entries), feed=feed)
+
     def test_trenches_weak_gain_filtered_not_bought(self):
         """A 3.5% gainer passes the 3.4% buy threshold but fails the
         5% filter bar — the effective bar is 5% unless tuned down."""
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        outcomes = run_once(self.db, self.cfg,
-                            price_fetcher=_empty_prices,
-                            trenches_fetcher=_FakeScan(
-                                [_entry(change_5m=3.5)]))
+        outcomes = self._run(bot_id, [_entry(change_5m=3.5)])
         self.assertIsNone(self._position(bot_id, "MINTA"))
         self.assertEqual(outcomes[0]["actions"][0]["action"], "skip")
         self.assertIn("buy filter",
@@ -389,28 +461,21 @@ class TestBuyFilterLoop(unittest.TestCase):
 
     def test_trenches_low_volume_filtered_not_bought(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        outcomes = run_once(
-            self.db, self.cfg, price_fetcher=_empty_prices,
-            trenches_fetcher=_FakeScan(
-                [_entry(change_5m=8.0, volume_m5=50)]))
+        outcomes = self._run(
+            bot_id, [_entry(change_5m=8.0, volume_m5=50)])
         self.assertIsNone(self._position(bot_id, "MINTA"))
         self.assertEqual(outcomes[0]["actions"][0]["action"], "skip")
 
     def test_trenches_sellers_in_control_filtered(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        run_once(
-            self.db, self.cfg, price_fetcher=_empty_prices,
-            trenches_fetcher=_FakeScan(
-                [_entry(change_5m=8.0, buys=5, sells=50)]))
+        self._run(bot_id, [_entry(change_5m=8.0, buys=5, sells=50)])
         self.assertIsNone(self._position(bot_id, "MINTA"))
 
     def test_trenches_strong_signal_buys_and_records_signals(self):
         bot_id = self._insert_bot(rules=trenches_ruleset())
-        outcomes = run_once(
-            self.db, self.cfg, price_fetcher=_empty_prices,
-            trenches_fetcher=_FakeScan(
-                [_entry(change_5m=8.0, volume_m5=5000, buys=40,
-                        sells=10)]))
+        outcomes = self._run(
+            bot_id, [_entry(change_5m=8.0, volume_m5=5000, buys=40,
+                            sells=10)])
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertIsNotNone(self._position(bot_id, "MINTA"))
         trade = self.db.execute(
@@ -434,10 +499,7 @@ class TestBuyFilterLoop(unittest.TestCase):
         rules = trenches_ruleset()
         rules["buy_filter"]["min_signal_pct"] = 3.4
         bot_id = self._insert_bot(rules=rules)
-        outcomes = run_once(self.db, self.cfg,
-                            price_fetcher=_empty_prices,
-                            trenches_fetcher=_FakeScan(
-                                [_entry(change_5m=3.5)]))
+        outcomes = self._run(bot_id, [_entry(change_5m=3.5)])
         self.assertEqual(outcomes[0]["actions"][0]["action"], "buy")
         self.assertIsNotNone(self._position(bot_id, "MINTA"))
 

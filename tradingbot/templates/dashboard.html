@@ -22,7 +22,7 @@
   {% for row in coin_rows %}
   <a class="coin-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
     <span class="coin-name"><strong>{{ row.name }}</strong></span><span class="coin-ticker muted small">{{ row.ticker }}</span>
-    <span class="coin-price" data-live-price="{{ row.coin_id }}">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">price unavailable</span>{% endif %}</span>
+    <span class="coin-price" data-live-price="{{ row.coin_id }}">{% if row.price is not none %}${{ "%.4f"|format(row.price) }}{% else %}<span class="muted">no data</span>{% endif %}</span>
     <span data-live-change-24h="{{ row.coin_id }}" class="coin-change">{% if row.change_24h is not none %}<span class="{{ 'up' if row.change_24h >= 0 else 'down' }}">{% if row.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(row.change_24h) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</span>
     <span class="coin-pnl" data-live-pnl="{{ row.coin_id }}" data-live-amount="{{ row.held }}" data-live-avg="{{ row.avg_price }}">{% if row.pnl is not none %}{% if row.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(row.pnl) }}{% elif row.held > 0 %}<span class="muted">—</span>{% else %}<span class="muted">—</span>{% endif %}</span>
   </a>
@@ -79,7 +79,7 @@
     <p class="popup-head"><a class="popup-close" href="{{ url_for('dashboard') }}" aria-label="Close">✕</a></p>
     <h2>{{ popup_coin.name }} <span class="muted">({{ popup_coin.ticker }})</span></h2>
     <p class="muted small">{{ mode_label }}</p>
-    <p class="big-num">{% if popup_coin.price is not none %}${{ popup_coin.price|usd_price }}{% else %}Price unavailable{% endif %}</p>
+    <p class="big-num">{% if popup_coin.price is not none %}${{ popup_coin.price|usd_price }}{% else %}no data{% endif %}</p>
     <p class="muted small">{% if popup_coin.change_24h is not none %}24h <span class="{{ 'up' if popup_coin.change_24h >= 0 else 'down' }}">{% if popup_coin.change_24h >= 0 %}+{% endif %}{{ "%.1f"|format(popup_coin.change_24h) }}%</span>{% else %}24h change unavailable{% endif %}</p>
     <p>{% if popup_coin.held > 0 %}You hold <strong>{{ "%.4f"|format(popup_coin.held) }}</strong>{% if popup_coin.avg_price is not none %} at avg ${{ popup_coin.avg_price|usd_price }}{% endif %}{% if popup_coin.pnl is not none %} · P&amp;L <strong>{% if popup_coin.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(popup_coin.pnl) }}</strong>{% endif %}{% else %}You hold none of this coin in {{ mode_label }}.{% endif %}</p>
 

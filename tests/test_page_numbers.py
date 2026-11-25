@@ -72,23 +72,17 @@ class TestPageNumbersRender(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
-        # The coin pages price the Gate mint from the mocked
-        # trenches feed; coin_meta / trade flow / trenches scan are
-        # mocked out so no test ever hits live RPC/DexScreener.
+        # Single price source: SOL is the feed's SOL tick only
+        # (get_prices is gone); the Gate mint comes from one
+        # batched Helius chain read; the 1h change comes from the
+        # feed's own tick history (no history here, so None).
         self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value={"prices": {"SOL": {"price": 10.0,
-                                             "change_24h": 5.0,
-                                             "change_1h": None}},
-                          "source": "live", "as_of": "test"})
+            routes, "_feed_sol_price_usd", return_value=10.0)
         self.prices_patch.start()
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={GATE_MINT: 0.002})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes", return_value={})
-        self.mint_1h_patch.start()
         self.mint_idents_patch = mock.patch.object(
             routes, "fetch_mint_identities",
             return_value={GATE_MINT: {"name": "Gate",
@@ -117,7 +111,6 @@ class TestPageNumbersRender(unittest.TestCase):
         self.flow_patch.stop()
         self.coin_meta_patch.stop()
         self.mint_idents_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.prices_patch.stop()
         self.tmp.cleanup()

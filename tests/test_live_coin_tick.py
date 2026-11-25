@@ -2,10 +2,10 @@
 proof case).
 
 The coin detail page's 1-second tick serves pump.fun mints and SOL
-only: a fresh live-feed tick wins, a stale one falls through to the
-trenches feed's price for the mint, and a mint nobody has priced
-says so plainly ("Price unavailable right now") instead of showing
-a made-up number. Symbols (ZEC, BTC, …) are not coins any more —
+only, from the single Helius source: a fresh live-feed tick wins,
+a stale one is no price at all ("no data"), and a mint nobody has
+priced says so plainly ("no data") instead of showing a made-up
+number. There is no second-source fallback any more. Symbols (ZEC, BTC, …) are not coins any more —
 the tick endpoint answers ok:false "Unknown coin" for them and
 their detail pages 404. Search returns pump.fun coins only: a name
 search returns the Solana mint(s) DexScreener finds (real name +
@@ -50,9 +50,12 @@ class LiveCoinTickBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
-        self.prices_patch = mock.patch.object(
-            routes, "get_prices", return_value=make_prices())
-        self.prices_patch.start()
+        self.feed = self.app.config["LIVE_FEED"]
+        # Single price source: the feed's SOL tick is the SOL price
+        # (the old get_prices / fetch_prices_for_mints mocks are
+        # gone with the second source). Mint prices come from feed
+        # ticks seeded per test.
+        self.feed.ingest("SOL", 100.0, "jupiter")
         self.price_patch = mock.patch.object(
             prices, "get_price", side_effect=fake_get_price)
         self.price_patch.start()
@@ -62,9 +65,6 @@ class LiveCoinTickBase(unittest.TestCase):
                           "source": "dexscreener", "as_of": "test",
                           "error": None})
         self.trenches_patch.start()
-        self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints", return_value={})
-        self.mint_prices_patch.start()
         self.meta_patch = mock.patch.object(
             routes, "ensure_coin_meta", return_value=None)
         self.meta_patch.start()
@@ -72,14 +72,11 @@ class LiveCoinTickBase(unittest.TestCase):
             {"at": 0.0, "rows": None, "error": None})
         signup(self.client, "alice")
         self.db = self.app.config["DB"]
-        self.feed = self.app.config["LIVE_FEED"]
 
     def tearDown(self):
         self.meta_patch.stop()
-        self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
-        self.prices_patch.stop()
         self.tmp.cleanup()
 
     def _tick(self, coin_id):
@@ -88,20 +85,22 @@ class LiveCoinTickBase(unittest.TestCase):
         return json.loads(resp.get_data(as_text=True))
 
     def _mint_price(self, mint, price):
-        """Run the block with the trenches feed pricing `mint`."""
-        return mock.patch.object(
-            routes, "fetch_prices_for_mints",
-            return_value={mint: price})
+        """Seed the feed with a fresh stream tick pricing `mint`
+        (the single source) and return a no-op context, so the old
+        call sites keep reading the same way."""
+        self.feed.ingest(mint, price, "helius-stream")
+        return mock.patch.object(routes, "_TRENCHES_CACHE",
+                                 routes._TRENCHES_CACHE)
 
 
 class TestMintTick(LiveCoinTickBase):
     def test_tick_serves_fresh_feed_price_for_mint(self):
-        self.feed.ingest(BOND_MINT, 0.0015, "dexscreener")
+        self.feed.ingest(BOND_MINT, 0.0015, "helius-stream")
         data = self._tick(BOND_MINT)
         self.assertTrue(data["ok"])
         self.assertEqual(data["coin_id"], BOND_MINT)
         self.assertEqual(data["price"], 0.0015)
-        self.assertEqual(data["source"], "dexscreener")
+        self.assertEqual(data["source"], "helius-stream")
 
     def test_tick_lowercase_sol(self):
         # SOL is the one case-insensitive coin id: "sol" resolves
@@ -113,26 +112,27 @@ class TestMintTick(LiveCoinTickBase):
         self.assertEqual(data["coin_id"], "SOL")
         self.assertEqual(data["price"], 101.5)
 
-    def test_tick_falls_back_to_trenches_feed_when_feed_empty(self):
-        with self._mint_price(BOND_MINT, 0.001):
-            data = self._tick(BOND_MINT)
-        self.assertTrue(data["ok"])
+    def test_tick_no_feed_tick_says_no_data(self):
+        # No stream tick for the mint: no second source to fall
+        # back to — the endpoint says "no data", never a number
+        # from anywhere else.
+        data = self._tick(BOND_MINT)
+        self.assertFalse(data["ok"])
         self.assertEqual(data["coin_id"], BOND_MINT)
-        self.assertEqual(data["price"], 0.001)
-        self.assertEqual(data["source"], "trenches feed")
-        self.assertIsNotNone(data["as_of"])
+        self.assertIsNone(data["price"])
+        self.assertEqual(data["error"], "no data")
 
-    def test_tick_stale_feed_tick_falls_back(self):
-        # A feed tick older than 30s is never served as fresh: the
-        # endpoint falls back to the trenches feed price instead of
-        # showing the stale number with a fresh face.
-        self.feed.ingest(BOND_MINT, 0.0009, "dexscreener",
+    def test_tick_stale_feed_tick_says_no_data(self):
+        # A feed tick older than 30s is never served as fresh, and
+        # there is no fallback any more: the endpoint says "no
+        # data" instead of showing the stale number with a fresh
+        # face.
+        self.feed.ingest(BOND_MINT, 0.0009, "helius-stream",
                          now=time.time() - 60)
-        with self._mint_price(BOND_MINT, 0.001):
-            data = self._tick(BOND_MINT)
-        self.assertTrue(data["ok"])
-        self.assertEqual(data["price"], 0.001)
-        self.assertEqual(data["source"], "trenches feed")
+        data = self._tick(BOND_MINT)
+        self.assertFalse(data["ok"])
+        self.assertIsNone(data["price"])
+        self.assertEqual(data["error"], "no data")
 
     def test_tick_unknown_coin_says_so(self):
         data = self._tick("NOPE")
@@ -145,18 +145,17 @@ class TestMintTick(LiveCoinTickBase):
         data = self._tick("ZEC")
         self.assertFalse(data["ok"])
         self.assertIsNone(data["price"])
-        self.assertEqual(data["error"], "Unknown coin — no live price.")
+        self.assertEqual(data["error"], "no data")
 
     def test_tick_mint_with_no_price_says_so(self):
         data = self._tick(BOND_MINT)
         self.assertFalse(data["ok"])
         self.assertIsNone(data["price"])
-        self.assertEqual(data["error"], "Price unavailable right now.")
+        self.assertEqual(data["error"], "no data")
 
     def test_tick_known_coin_prefers_feed_over_cached_price(self):
-        # SOL has a mocked price of $100.00; a fresh feed tick of
-        # $101.50 wins — the page shows the live number, not the
-        # up-to-60-second-old cached one.
+        # The feed's SOL tick is $100.00; a fresher tick of $101.50
+        # wins — the page shows the live number, never a stale one.
         self.feed.ingest("SOL", 101.5, "jupiter")
         data = self._tick("SOL")
         self.assertTrue(data["ok"])
@@ -214,7 +213,7 @@ class TestMintDetail(LiveCoinTickBase):
             resp = self.client.get(f"/coins/{BOND_MINT}/detail")
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
-        self.assertIn("Price unavailable", html)
+        self.assertIn("no data", html)
         self.assertIn("<h1>Unknown coin", html)
         self.assertIn("Candles are still building", html)
 
@@ -248,13 +247,11 @@ class TestMintSearch(LiveCoinTickBase):
     def test_search_by_pasted_mint_resolves_directly(self):
         # A pasted mint address resolves to that mint, with the
         # feed's real name/ticker/price — never a name search.
+        self.feed.ingest(BOND_MINT, 0.001, "helius-stream")
         with mock.patch.object(
-                charts_mod, "fetch_prices_for_mints",
-                return_value={BOND_MINT: 0.001}), \
-                mock.patch.object(
-                    charts_mod, "fetch_mint_identities",
-                    return_value={BOND_MINT: {"name": "BondCoin",
-                                              "symbol": "BOND"}}):
+                charts_mod, "fetch_mint_identities",
+                return_value={BOND_MINT: {"name": "BondCoin",
+                                          "symbol": "BOND"}}):
             charts_mod._search_cache.clear()
             resp = self.client.get(
                 f"/api/coins/search?q={BOND_MINT}")

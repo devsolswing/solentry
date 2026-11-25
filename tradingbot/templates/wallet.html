@@ -33,7 +33,7 @@
 {# +5.82%, Pepe / Bitcoin / Solana / Dogecoin / Ethereum) are        #}
 {# mockup examples, never the user's data — every number here comes   #}
 {# from the route's live data (balance, holdings, prices,            #}
-{# sparklines, 1h %). A missing price is "—", never invented.        #}
+{# sparklines, 1h %). A missing price is "no data", never invented.   #}
 {# The features the mockup predates (Logs, support ID, Trenches)    #}
 {# live BELOW the holdings, so the photo layout stays exact above   #}
 {# them. (The fees card moved to the wallet page, 2026-11-12.)      #}
@@ -140,7 +140,7 @@
      truncated), a true market chart next to the name (GeckoTerminal
      OHLCV first, then the feed's recorded ticks — only when at
      least 2 real recent prices exist, never faked; the span stays
-     in the DOM, empty, while the chart builds, so the 60s refresh
+     in the DOM, empty, while the chart builds, so the 5s refresh
      can fill it), the position value in SOL to 5 decimals with the
      amount held underneath it, and the 1-hour % change far right.
      NO unit price anywhere on the rows. EVERY row is a button to
@@ -151,7 +151,7 @@
      recomputes the paper portfolio total from it. Rows come from
      the LIVE on-chain balances in real mode (one source of truth:
      the chain) — a coin leaves the list the moment its balance
-     hits 0, and the 60s auto-refresh (/api/home-holdings) drops
+     hits 0, and the 5s auto-refresh (/api/home-holdings) drops
      or adds rows without a manual reload. #}
   <h2 class="section-title">HOLDINGS</h2>
   <div class="coin-list-panel holdings-panel">

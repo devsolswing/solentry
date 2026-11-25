@@ -9,9 +9,10 @@ Rules under test:
   graduated mint goes through the Jupiter executor, a mint still
   bonding through the pump.fun executor, and an unreadable curve
   refuses plainly — the venue is never guessed.
-- Paper buys price from the live Jupiter quote when the coin has
-  one (a graduated coin); a failed quote falls back to the live
-  price and never blocks the trade.
+- Paper buys price from the single source only (the Helius
+  stream tick, else one chain read): a Jupiter quote never sets
+  the fill price any more, and no quote is needed for the trade
+  to go through.
 - There is NO per-coin wallet step: the coin page shows no
   "Create wallet" button and no wallet indicator, the Buy button
   is enabled, and a Buy goes through with no wallet tap first.
@@ -29,7 +30,6 @@ import tradingbot.jupiter as jup
 import tradingbot.prices as prices
 import tradingbot.routes as routes
 from helpers import csrf, grant_fuel, make_client, signup
-from test_jupiter import REAL_QUOTE
 
 # A graduated pump.fun mint (6 decimals by construction).
 MINT = "Grad1111111111111111111111111111111111111111"
@@ -68,17 +68,6 @@ def make_prices():
             "source": "live", "as_of": "test"}
 
 
-def grad_buy_quote():
-    """A normalised SOL -> graduated-mint buy quote, from the real
-    captured quote shape: 0.1 SOL in, 0.853837 tokens out."""
-    quote = jup._parse_quote(
-        dict(REAL_QUOTE, outputMint=MINT, outAmount="853837"),
-        side="buy", symbol=MINT, wrapped=False, display_name=MINT)
-    quote["in_amount_ui"] = 0.1
-    quote["out_amount_ui"] = 0.853837
-    return quote
-
-
 class JupiterRoutesBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -86,9 +75,15 @@ class JupiterRoutesBase(unittest.TestCase):
         self.rpc_patch = mock.patch.object(routes, "SolanaRpcClient",
                                            FakeRpc)
         self.rpc_patch.start()
-        self.prices_patch = mock.patch.object(
-            routes, "get_prices", return_value=make_prices())
-        self.prices_patch.start()
+        # Single price source: SOL from the feed's SOL tick
+        # ($100.00); mint prices from one batched Helius chain read
+        # (patched here). The old get_prices / fetch_prices_for_mints
+        # mocks are gone with the second source.
+        self.feed = self.app.config["LIVE_FEED"]
+        self.feed.ingest("SOL", 100.0, "jupiter")
+        self.sol_patch = mock.patch.object(
+            routes, "_feed_sol_price_usd", return_value=100.0)
+        self.sol_patch.start()
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(100.0, "live", "test"))
         self.price_patch.start()
@@ -107,7 +102,7 @@ class JupiterRoutesBase(unittest.TestCase):
                           "error": None})
         self.trenches_patch.start()
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={MINT: 0.002, BONDING_MINT: 0.001})
         self.mint_prices_patch.start()
         self.meta_patch = mock.patch.object(
@@ -132,7 +127,7 @@ class JupiterRoutesBase(unittest.TestCase):
         self.flow_patch.stop()
         self.chart_patch.stop()
         self.price_patch.stop()
-        self.prices_patch.stop()
+        self.sol_patch.stop()
         self.rpc_patch.stop()
         self.tmp.cleanup()
 
@@ -207,11 +202,11 @@ class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
             "csrf_token": csrf(self.client, f"/coins/{MINT}")})
         self.assertEqual(resp.status_code, 404)
 
-    def test_paper_buy_prices_from_jupiter_quote(self):
-        # 0.1 SOL at a $100 SOL price is $10; the Jupiter quote
-        # says that buys 0.853837 tokens, so the fill price is
-        # ~$11.71/token — not the $0.002 feed price (which would
-        # fill 5,000 tokens). No fee (removed 2026-11-12).
+    def test_paper_buy_prices_from_stream_tick_not_jupiter_quote(self):
+        # 0.1 SOL at a $100 SOL price is $10; the fill is at the
+        # $0.002 stream price (5,000 tokens before the 1% haircut)
+        # even when a Jupiter quote says $11.71/token — the quote
+        # never sets the price any more. No fee (removed 2026-11-12).
         with mock.patch.object(
                 jup, "jupiter_usd_price_mint", return_value=11.71):
             resp = self.client.post(f"/coins/{MINT}/buy", data={
@@ -222,12 +217,13 @@ class TestBuyNeedsNoWalletStep(JupiterRoutesBase):
             "SELECT amount FROM paper_holdings WHERE user_id = ? "
             "AND coin_id = ?", (self.user_id, MINT)
             ).fetchone()["amount"]
-        self.assertAlmostEqual(amount, 10.0 / (11.71 * 1.01), places=5)
-        self.assertNotAlmostEqual(amount, 5000.0, places=3)
+        self.assertAlmostEqual(amount, 10.0 / (0.002 * 1.01), places=3)
+        self.assertNotAlmostEqual(amount, 10.0 / (11.71 * 1.01),
+                                  places=3)
 
-    def test_paper_buy_falls_back_to_feed_when_quote_fails(self):
-        # Jupiter cannot quote (bonding coin, no route): the buy
-        # still goes through at the live feed price.
+    def test_paper_buy_needs_no_quote_at_all(self):
+        # No Jupiter quote exists (bonding coin, no route): the buy
+        # still goes through at the live stream price.
         with mock.patch.object(
                 jup, "jupiter_usd_price_mint", return_value=None):
             resp = self.client.post(f"/coins/{MINT}/buy", data={

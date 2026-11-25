@@ -389,13 +389,16 @@ class HomeMockupBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
-        # SOL only now — the app prices no major coins; pump.fun
-        # mints are priced by the trenches feed (mocked below).
-        self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({
-                "SOL": (10.0, 5.25, 2.5)}))
-        self.prices_patch.start()
+        # Single price source: SOL from the feed's SOL tick
+        # ($10.00); the Gate mint from one batched Helius chain read
+        # (mocked below); its 1h change from the feed's own tick
+        # history. The old get_prices / fetch_prices_for_mints /
+        # fetch_mint_1h_changes mocks are gone with the second source.
+        self.feed = self.app.config["LIVE_FEED"]
+        self.feed.ingest("SOL", 10.0, "jupiter")
+        self.sol_patch = mock.patch.object(
+            routes, "_feed_sol_price_usd", return_value=10.0)
+        self.sol_patch.start()
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(10.0, "live", "test"))
         self.price_patch.start()
@@ -405,16 +408,16 @@ class HomeMockupBase(unittest.TestCase):
                           "source": "dexscreener", "as_of": "test",
                           "error": None})
         self.trenches_patch.start()
-        # The trenches feed prices + names the Gate mint; coin_meta
-        # is mocked out so no test ever hits live RPC/DexScreener.
+        # The chain read prices + the feed names the Gate mint;
+        # coin_meta is mocked out so no test ever hits live
+        # RPC/DexScreener.
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={GATE_MINT: GATE_PRICE})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes",
-            return_value={GATE_MINT: GATE_CHANGE_1H})
-        self.mint_1h_patch.start()
+        self.feed.change_over = (
+            lambda mint, window, now=None:
+            GATE_CHANGE_1H if mint == GATE_MINT else None)
         self.mint_idents_patch = mock.patch.object(
             routes, "fetch_mint_identities",
             return_value={GATE_MINT: {"name": "Gate",
@@ -434,11 +437,10 @@ class HomeMockupBase(unittest.TestCase):
     def tearDown(self):
         self.coin_meta_patch.stop()
         self.mint_idents_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.trenches_patch.stop()
         self.price_patch.stop()
-        self.prices_patch.stop()
+        self.sol_patch.stop()
         self.tmp.cleanup()
 
     def _html(self, path):
@@ -516,17 +518,11 @@ class TestHomeMockupLayout(HomeMockupBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Bought", resp.get_data(as_text=True))
         # The row's SOL value needs a live SOL price: the base
-        # harness prices are a snapshot, which _dashboard_data does
-        # not use for the SOL price (feed tick first, REST when
-        # live). With SOL live at the mocked $10, 990.0990 GATE
-        # at $0.01 ($9.90099) is 0.99010 SOL.
-        live_prices = {"prices": {"SOL": {"price": 10.0,
-                                          "change_24h": 5.25,
-                                          "change_1h": 2.5}},
-                       "source": "live", "as_of": "test"}
-        with mock.patch.object(routes, "get_prices",
-                              return_value=live_prices):
-            html = self._html("/wallet")
+        # harness supplies it — the feed's SOL tick at $10, with
+        # _feed_sol_price_usd patched to the same $10 — so
+        # 990.0990 GATE at $0.01 ($9.90099) is 0.99010 SOL. (The
+        # old routes.get_prices seam is gone in the Helius build.)
+        html = self._html("/wallet")
         self.assertIn("Gate", html)
         self.assertIn("(GATE)", html)
         # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee

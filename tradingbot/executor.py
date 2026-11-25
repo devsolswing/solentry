@@ -475,7 +475,7 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                  db, cfg: Config, rpc, signing_bot: dict,
                  decision_price_usd=None,
                  decision_price_age_seconds=None,
-                 sol_price_usd=None, sol_price_secondary=None) -> dict:
+                 sol_price_usd=None) -> dict:
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
@@ -506,12 +506,11 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
             return _skip("bonding curve complete (token migrated)")
         # Price-validation gate (report §3): the decision price
         # must be fresh and agree with this fresh on-chain curve
-        # read, or the buy refuses — a stale feed never blesses a
-        # real-money entry.
+        # read, or the buy refuses — a stale stream tick never
+        # blesses a real-money entry.
         gate_ok, gate_reason, _gate_details = check_entry_price(
             rpc, cfg, mint, decision_price_usd,
-            decision_price_age_seconds, sol_price_usd,
-            sol_price_secondary, curve=curve)
+            decision_price_age_seconds, sol_price_usd, curve=curve)
         if not gate_ok:
             return _skip(gate_reason)
 
@@ -785,8 +784,7 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
                        amount: float, price: float, db, cfg: Config,
                        rpc_client=None,
                        decision_price_age_seconds=None,
-                       sol_price_usd=None,
-                       sol_price_secondary=None) -> dict:
+                       sol_price_usd=None) -> dict:
     """Execute one real trade for a silent bot, signed by the user's
     dedicated signing bot. Same (bot, user_id, coin, side, amount,
     price, db, cfg) protocol as the silent loop's real executor.
@@ -800,8 +798,9 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
     signed. `decision_price_age_seconds` is how old that price is
     (None when the caller cannot say — the freshness check is then
     skipped and recorded, never treated as fresh).
-    `sol_price_usd` / `sol_price_secondary` are the two SOL prices
-    for the cross-check (None fetches the primary live). Returns
+    `sol_price_usd` is the one SOL price (the live feed's SOL tick;
+    None fetches it live). There is no second SOL source any more
+    (single-price source, 2026-11-25). Returns
     {"status": "executed", "signature", "coin_amount",
     "signing_bot", plus "sol_spent" on buys / "sol_received" on
     sells — the executed SOL from the wallet's own balance delta,
@@ -846,7 +845,7 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
                                 db, cfg, rpc, signing_bot,
                                 price,
                                 decision_price_age_seconds,
-                                sol_price_usd, sol_price_secondary)
+                                sol_price_usd)
         last = None
         for _attempt in range(max(1, int(cfg.sell_requote_attempts))):
             last = _execute_sell(bot, user_id, coin, float(amount),

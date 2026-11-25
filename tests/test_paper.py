@@ -19,7 +19,7 @@ import tradingbot.prices as prices
 import tradingbot.routes as routes
 from helpers import csrf, make_client, signup
 
-# A pump.fun mint priced at $0.01 in the mocked trenches feed, so
+# A pump.fun mint priced at $0.01 in the live feed's stream tick, so
 # $10 buys exactly 1000 tokens.
 MINT = "Bond1111111111111111111111111111111111111111"
 MINT_PRICE = 0.01
@@ -33,17 +33,18 @@ class TestPaper(unittest.TestCase):
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(100.0, "snapshot", "test"))
         self.price_patch.start()
-        self.prices_patch = mock.patch.object(routes, "get_prices", return_value={
-            "prices": {"SOL": {"price": 100.0, "change_24h": 0.0}},
-            "source": "snapshot", "as_of": "test"})
+        self.prices_patch = mock.patch.object(
+            routes, "_feed_sol_price_usd", return_value=100.0)
         self.prices_patch.start()
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
+            routes, "_chain_prices_for_mints",
             return_value={MINT: MINT_PRICE})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes", return_value={})
-        self.mint_1h_patch.start()
+        # The live feed's stream tick prices the mint (the single
+        # price source); no 1h history is seeded, so the 1h change
+        # is None — no test here asserts one.
+        self.app.config["LIVE_FEED"].ingest(
+            MINT, MINT_PRICE, "helius-stream")
         self.mint_id_patch = mock.patch.object(
             routes, "fetch_mint_identities", return_value={})
         self.mint_id_patch.start()
@@ -76,7 +77,6 @@ class TestPaper(unittest.TestCase):
         self.trenches_patch.stop()
         self.meta_patch.stop()
         self.mint_id_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()

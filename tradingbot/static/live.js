@@ -9,15 +9,17 @@
    every 60 seconds (/api/home-holdings), so a coin leaves the
    list the moment its balance hits 0 without a manual reload.
    If the socket drops, the page says so plainly (status pill) and
-   falls back to polling /api/live every 10 seconds, while the
+   falls back to polling /api/live every 4 seconds, while the
    socket reconnects with backoff. A socket that connects but never
    delivers a message within 10s counts as down too — the status
    pill only says "Live" after the first tick arrives, never on
    connect alone. The coin detail page's own
    1-second REST poller (coin_tick.js) stands down while the socket
    is up and resumes when it drops, so the live chart never gaps.
-   A stale tick (older than 30s at the server) is shown dimmed,
-   never as fresh. Pages with no live nodes do nothing at all. */
+   A stale tick (older than 30s at the server) renders the node
+   text "no data" — never the dimmed old number — and a subscribed
+   coin absent from a snapshot renders "no data" the same way.
+   Pages with no live nodes do nothing at all. */
 (function () {
   'use strict';
 
@@ -42,15 +44,17 @@
      SOL price from the same feed). */
   var lastPrices = {};
 
-  /* Holdings sparklines (home page): each coin row's small
-     market chart refreshes every 60 seconds from /api/sparklines,
-     so the chart keeps moving with the live market instead of
-     sitting static from page load. A coin with fewer than 2 real
-     recent points returns null -- its sparkline is left alone
-     (chart building), never faked. The poll stops when the page
-     is hidden or closed, so it never runs in the background. */
+  /* Holdings 1hr sparklines (home page): each coin row's small
+     chart refreshes every 5 seconds from /api/sparklines, so the
+     1hr chart keeps moving with the live feed instead of sitting
+     static from page load. Held coins refresh on the 5-second
+     cadence; other data pages poll every 4 seconds. A coin with
+     fewer than 2 real points in the last hour returns null -- its
+     sparkline is left alone (chart building), never faked. The
+     poll stops when the page is hidden or closed, so it never runs
+     in the background. */
   var sparkEls = collect('[data-sparkline-coin]');
-  var SPARK_POLL_MS = 60000;
+  var SPARK_POLL_MS = 5000;
   var sparkTimer = null;
   function fetchSparklines() {
     /* Re-collect every poll: the holdings refresh can swap rows
@@ -103,7 +107,7 @@
      the page is visible and stops when hidden, like the
      sparkline poll. */
   var holdingsList = document.querySelector('[data-home-holdings-list]');
-  var HOLDINGS_POLL_MS = 60000;
+  var HOLDINGS_POLL_MS = 5000;
   var holdingsTimer = null;
   function refreshLiveCollections() {
     priceNodes = collect('[data-live-price]');
@@ -235,7 +239,16 @@
     return d.toLocaleTimeString([], {
       hour: '2-digit', minute: '2-digit', second: '2-digit'});
   }
-  function fmtPrice(p) { return '$' + p.toFixed(p < 0.0001 ? 8 : 4); }
+  /* Significant-figure price formatting: decimals fit the size,
+     so a sub-$0.0001 price never renders as $0.0000 and a $100
+     price never carries eight decimals. Three significant figures
+     (decimals = clamp(floor(-log10(p)) + 3, 2, 12)). */
+  function fmtPrice(p) {
+    if (!(p > 0) || !isFinite(p)) return 'no data';
+    var decimals = Math.floor(-Math.log10(p)) + 3;
+    decimals = Math.max(2, Math.min(12, decimals));
+    return '$' + p.toFixed(decimals);
+  }
   function fmtMoney(v) {
     return (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US',
       { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -280,7 +293,7 @@
       + (tick.stale ? ' · stale' : '');
   }
   /* The visible text of a live node: its first child span when it has
-     one (a "—" or "price unavailable" placeholder), else the node
+     one (a "—" or "no data" placeholder), else the node
      itself. Updating the target leaves sibling labels (e.g. the
      wallet's "1h") untouched. */
   function liveTarget(node) {
@@ -313,7 +326,7 @@
       statusEl.classList.remove('live-up');
       statusEl.classList.add('live-down');
     } else {
-      statusEl.textContent = '↻ Live feed down — last prices, refreshing';
+      statusEl.textContent = '↻ Live feed down — refreshing';
       statusEl.classList.remove('live-up');
       statusEl.classList.add('live-down');
     }
@@ -353,9 +366,37 @@
     });
   }
 
+  /* No live price for a coin: every node that shows its price,
+     value or P&L reads "no data" (the change nodes keep their last
+     value — a % change is not a price). Value/P&L totals clear
+     their computed figure so a total never sums a stale price. */
+  function renderNoData(id) {
+    function noData(nodes, attr, clearComputed) {
+      nodes.forEach(function (n) {
+        if (attrOf(n, attr) !== id) return;
+        if (clearComputed) n.dataset.liveComputed = '';
+        var target = liveTarget(n);
+        target.textContent = 'no data';
+        target.classList.add('muted');
+        target.classList.remove('up', 'down');
+      });
+    }
+    noData(priceNodes, 'data-live-price', false);
+    noData(valueNodes, 'data-live-value', true);
+    noData(pnlNodes, 'data-live-pnl', true);
+    recomputeTotals();
+  }
+
   function applyTick(t) {
-    if (!t || !t.coin_id || typeof t.price !== 'number') return;
+    if (!t || !t.coin_id) return;
     var id = t.coin_id;
+    /* A stale tick is no price at all: its nodes read "no data",
+       never the dimmed old number — and its value/P&L nodes clear
+       too, so no total is computed from a stale price. */
+    if (t.stale || typeof t.price !== 'number') {
+      renderNoData(id);
+      return;
+    }
     var asOf = t.as_of ? new Date(t.as_of) : new Date();
     if (isNaN(asOf.getTime())) asOf = new Date();
     lastTickAt = asOf;
@@ -411,14 +452,21 @@
         Object.keys(data.ticks).forEach(function (k) {
           applyTick(data.ticks[k]);
         });
+        /* A subscribed coin the snapshot does not carry has no live
+           price right now: its nodes read "no data", never the
+           last number. */
+        coinList.forEach(function (id) {
+          if (!data.ticks[id]) renderNoData(id);
+        });
       })
-      .catch(function () { /* next poll retries; last prices stand */ });
+      .catch(function () { /* next poll retries; nodes already
+                              read "no data" until a tick lands */ });
   }
 
   function startFallback() {
     if (fallbackTimer) return;
     fetchSnapshot();
-    fallbackTimer = setInterval(fetchSnapshot, 10000);
+    fallbackTimer = setInterval(fetchSnapshot, 4000);
   }
   function stopFallback() {
     if (fallbackTimer) {
@@ -461,6 +509,9 @@
       if (data.type === 'snapshot' && data.ticks) {
         Object.keys(data.ticks).forEach(function (k) {
           applyTick(data.ticks[k]);
+        });
+        coinList.forEach(function (id) {
+          if (!data.ticks[id]) renderNoData(id);
         });
       } else if (data.type === 'tick') {
         applyTick(data);

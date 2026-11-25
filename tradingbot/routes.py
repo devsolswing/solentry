@@ -42,7 +42,6 @@ from . import analysis as analysis_mod
 from . import candles as candles_mod
 from . import donations as donations_mod
 from . import gate_fuel as gate_fuel_mod
-from . import jupiter as jupiter_mod
 from . import networks as networks_mod
 from . import passkey as passkey_mod
 from . import pnl as pnl_mod
@@ -62,7 +61,7 @@ from .jupiter_executor import execute_jupiter_swap
 from .paper import (PAPER_BUY_HAIRCUT_PCT, InsufficientCash,
                     InsufficientHolding, paper_buy as ledger_buy,
                     paper_sell as ledger_sell)
-from .prices import clear_price_cache, get_prices
+from .prices import clear_price_cache
 from .builderbot import list_adjustments
 from .home_holdings import (enrich_row, fetch_chain_token_balances,
                             reconcile_holdings, sparkline_svg_1h)
@@ -96,9 +95,9 @@ from .solana import (SolanaRpcClient, base58_encode,
                      is_valid_address, lamports_to_sol,
                      rpc_client_for_config, rpc_client_for_url,
                      sol_to_lamports)
-from .trenches import (fetch_mint_1h_changes, fetch_mint_24h_changes,
-                       fetch_mint_identities, fetch_prices_for_mints,
-                       fetch_trenches_scan)
+from .streaming import (SOL_MAX_AGE_SECONDS,
+                        chain_price_usd_for_mints)
+from .trenches import (fetch_mint_identities, fetch_trenches_scan)
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
@@ -573,38 +572,124 @@ def _real_avg_price(app, mint: str, amount_sol: float,
     price is never the cost basis — that is what the coin is worth
     now, not what was paid, and using it erases the trade's P&L from
     the first render. 0.0 when the executed cost cannot be computed
-    — the holding is then shown with P&L '—', never guessed. The live
-    SOL price comes from the feed first, else the REST price only
-    when its source is live (never the baked snapshot). `mint` is
+    — the holding is then shown with P&L '—', never guessed. The
+    live SOL price comes from the feed's SOL tick only — the one
+    SOL number (Jupiter-fed, via the feed) — else 0.0. `mint` is
     kept for the caller's signature; it is not priced here."""
     if not amount_sol or amount_sol <= 0 or not coin_amount \
             or coin_amount <= 0:
         return 0.0
-    sol_price = None
-    feed = app.config.get("LIVE_FEED") if app is not None else None
-    if feed is not None:
-        try:
-            tick = feed.snapshot(["SOL"]).get("SOL")
-        except Exception:
-            tick = None
-        if tick is not None and not tick.get("stale"):
-            try:
-                sol_price = float(tick["price"])
-            except (TypeError, ValueError):
-                sol_price = None
-    if sol_price is None:
-        try:
-            price, source, _as_of = _paper_price("SOL")
-        except Exception:
-            price, source = None, None
-        if source == "live" and price:
-            try:
-                sol_price = float(price)
-            except (TypeError, ValueError):
-                sol_price = None
+    sol_price = _feed_sol_price_usd(app)
     if sol_price and sol_price > 0:
         return amount_sol * sol_price / coin_amount
     return 0.0
+
+
+def _feed_sol_price_usd(app) -> float | None:
+    """The ONE SOL price in USD, or None: the live feed's SOL tick
+    (Jupiter-fed) only — never a direct Jupiter/CoinGecko call, never
+    a snapshot. A SOL tick is usable up to SOL_MAX_AGE_SECONDS (90s,
+    the stream's own SOL bound in streaming.py): the feed refreshes
+    SOL every 60s, so the 30s fresh-tick cut would leave the SOL
+    number empty about half the time, and SOL moves slowly enough
+    that 90s bounds the conversion error. Older than that, or no
+    tick at all, is None — "no data", never a stale number."""
+    if app is None:
+        return None
+    feed = app.config.get("LIVE_FEED")
+    if feed is None:
+        return None
+    try:
+        age = feed.tick_age_seconds("SOL")
+    except Exception:
+        age = None
+    if age is None or age > SOL_MAX_AGE_SECONDS:
+        return None
+    try:
+        tick = feed.snapshot(["SOL"]).get("SOL")
+    except Exception:
+        return None
+    if tick is None:
+        return None
+    try:
+        price = float(tick["price"])
+    except (TypeError, ValueError):
+        return None
+    return price if price > 0 else None
+
+
+def _feed_price_list(app) -> dict:
+    """The get_prices-shaped price list, from the feed only: exactly
+    one entry, SOL — the unit of account — at the feed's SOL tick,
+    with source "live" when the tick is there and "unavailable"
+    when it is not. This is what the dashboard / coin-detail
+    templates read for their "Prices: live" label and what
+    _coin_rows takes as its price seed (SOL only; mints are priced
+    from the feed ticks / chain read inside _coin_rows). No
+    Jupiter/CoinGecko read happens here."""
+    sol_price = _feed_sol_price_usd(app)
+    return {"prices": {"SOL": {"price": sol_price,
+                               "change_24h": None,
+                               "change_1h": None}},
+            "source": "live" if sol_price is not None else "unavailable",
+            "as_of": _now()}
+
+
+def _chain_prices_for_mints(app, mints) -> dict:
+    """{mint: price_usd} from the single source's pull twin: one
+    batched Helius RPC read of the bonding curves (graduated ->
+    Raydium pool, the same lookup the stream uses). Mints it cannot
+    price are ABSENT — never guessed, never a second source. Needs
+    the feed's SOL tick for the USD conversion; no SOL tick means
+    {} (no conversion without a live SOL rate). Never raises."""
+    wanted = [m for m in dict.fromkeys(mints or []) if m]
+    if not wanted or app is None:
+        return {}
+    sol_price = _feed_sol_price_usd(app)
+    if sol_price is None:
+        return {}
+    try:
+        client = rpc_client_for_config(_cfg(app))
+    except Exception:
+        return {}
+    try:
+        return chain_price_usd_for_mints(client, wanted, sol_price) or {}
+    except Exception:
+        return {}
+
+
+def _snapshot_price_map(app, user_id: int) -> dict:
+    """{mint: price_usd} for a P&L snapshot, from the single source:
+    the feed's fresh ticks for the user's paper holdings, else one
+    batched Helius chain read for the uncovered mints; SOL from the
+    feed tick. A mint the source cannot price is LEFT OUT — the
+    snapshot then values it at cost (pnl.current_holdings), never
+    $0 and never a second source's number. This replaces the old
+    get_prices() map, which carried SOL only and silently valued
+    every coin holding at cost after every trade and refresh."""
+    feed = app.config.get("LIVE_FEED") if app is not None else None
+    try:
+        mints = [r["coin_id"] for r in _db(app).execute(
+            "SELECT coin_id FROM paper_holdings WHERE user_id = ?",
+            (user_id,)).fetchall()]
+    except Exception:
+        mints = []
+    out = {}
+    if feed is not None:
+        for mint in mints:
+            try:
+                price = feed.live_price(mint)
+            except Exception:
+                price = None
+            if price is not None and price > 0:
+                out[mint] = price
+    sol = _feed_sol_price_usd(app)
+    if sol is not None:
+        out["SOL"] = sol
+    uncovered = [m for m in mints if m not in out]
+    if uncovered:
+        out.update(_chain_prices_for_mints(app, uncovered))
+    return out
 
 
 def _coin_rows(db, user_id: int, mode: str, prices: dict,
@@ -625,12 +710,16 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     A holding with no 1h figure in the feed has change_1h None
     ("—" on the page). When a live feed is passed, held mints are
     priced from its fresh ticks first — that is the only live price
-    for a devnet mint with no DEX pool (bonding-curve price) — and
-    only mints the feed has no fresh tick for fall back to
-    DexScreener; any price the feed rejects against its last good
-    tick is dropped too, so a bad tick can never inflate a balance
-    on render; with no feed (or no reference yet) every price passes
-    unchanged. In devnet
+    for a mint with no DEX pool (bonding-curve price) — and only
+    mints the feed has no fresh tick for fall back to ONE batched
+    Helius RPC read of their bonding curves (graduated -> Raydium
+    pool, the same lookup the stream uses); a mint neither can
+    price stays unpriced — valued at cost, P&L None, never
+    guessed. The 1h change comes from the feed's own recorded tick
+    history (feed.change_over, 1h) — never a DexScreener figure.
+    A price the feed rejects against its last good tick is dropped
+    too, so a bad tick can never inflate a balance on render; with
+    no feed (or no reference yet) every price passes unchanged. In devnet
     mode with `app`, holdings are reconciled with the wallet's
     on-chain token balances first (see _reconciled_real_holdings),
     so coins the chain holds but the DB never recorded appear —
@@ -669,64 +758,56 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
         held = {h["coin_id"]: h for h in db.execute(
             "SELECT coin_id, amount, avg_price FROM paper_holdings "
             "WHERE user_id = ?", (user_id,)).fetchall()}
+    # Only current coins: a zero-balance row drops off the list on
+    # the next refresh (a coin whose balance hit 0 is gone, never
+    # shown at 0). This is the filter the holdings list serves —
+    # reconcile_holdings keeps DB rows the chain does not list (a
+    # partial chain read must never hide a holding), so the
+    # balance > 0 cut happens here, on what the page renders.
+    held = {c: h for c, h in held.items()
+            if float(h["amount"] or 0) > 0}
     mint_ids = [c for c in held if c not in price_map
                 and is_valid_address(c)]
     changes_1h: dict = {}
     identities: dict = {}
     if mint_ids:
-        # The live feed first: a fresh validated tick (DexScreener
-        # poll, or the bonding-curve price for a devnet mint with no
-        # DEX pool) is the price — that is how Gate/AuditTest get a
-        # live price here at all. Only mints the feed has no fresh
-        # tick for fall through to DexScreener; a stale feed tick is
-        # never presented as live.
-        feed_ticks = {}
-        if feed is not None:
-            try:
-                feed_ticks = feed.snapshot(mint_ids)
-            except Exception:
-                feed_ticks = {}
-        uncovered = []
+        # The live feed first: a fresh validated tick (the Helius
+        # stream, or the bonding-curve price for a mint with no DEX
+        # pool) is the price — that is how Gate/AuditTest get a live
+        # price here at all. Only mints the feed has no fresh tick
+        # for fall through to ONE batched Helius chain read; a stale
+        # feed tick is never presented as live, and a mint neither
+        # can price stays unpriced (valued at cost, P&L None).
         for mint in mint_ids:
-            tick = feed_ticks.get(mint)
-            if tick is not None and not tick.get("stale"):
-                try:
-                    price = float(tick["price"])
-                except (TypeError, ValueError):
-                    price = None
-                if price is not None and price > 0:
-                    price_map[mint] = price
-                    continue
-            uncovered.append(mint)
-        if uncovered:
             try:
-                for mint, price in fetch_prices_for_mints(
-                        uncovered).items():
-                    price_map[mint] = price
+                price = feed.live_price(mint) if feed is not None \
+                    else None
             except Exception:
-                pass
+                price = None
+            if price is not None and price > 0:
+                price_map[mint] = price
+        uncovered = [m for m in mint_ids if m not in price_map]
+        if uncovered and app is not None:
+            price_map.update(_chain_prices_for_mints(app, uncovered))
+        if feed is not None:
+            now = time.time()
+            for mint in mint_ids:
+                try:
+                    changes_1h[mint] = feed.change_over(
+                        mint, 3600, now)
+                except Exception:
+                    changes_1h[mint] = None
+            changes_1h = {m: v for m, v in changes_1h.items()
+                          if v is not None}
         try:
-            changes_1h = fetch_mint_1h_changes(mint_ids)
-        except Exception:
-            changes_1h = {}
-        try:
-            # Real name + ticker for held mints, from the same feed.
-            # A mint the feed does not name is resolved from the
-            # stored coin_meta / on-chain metadata below — never
-            # guessed, never an address.
+            # Real name + ticker for held mints, from the discovery
+            # index (identity, not price). A mint the index does
+            # not name is resolved from the stored coin_meta /
+            # on-chain metadata below — never guessed, never an
+            # address.
             identities = fetch_mint_identities(mint_ids)
         except Exception:
             identities = {}
-    # A bonding-curve mint has no DexScreener pair, so the feed
-    # above never prices it — but the live feed ingests its curve
-    # price (devnet watchlist), so take the feed's tick when the
-    # trenches fetch left the mint unpriced.
-    if feed is not None:
-        for mint in mint_ids:
-            if mint not in price_map:
-                tick = feed.snapshot([mint]).get(mint)
-                if tick is not None and not tick["stale"]:
-                    price_map[mint] = tick["price"]
     # A bad tick must never inflate a balance on render either: drop
     # any price the live feed rejects against its last good tick. No
     # reference yet (feed empty or off) means everything passes.
@@ -840,13 +921,16 @@ def _gate_fuel_trades_left(app, user):
         return None
 
 
-def _decision_price_age(app, coin: str) -> float:
+def _decision_price_age(app, coin: str) -> float | None:
     """How old the decision price for a manual trade is, in
-    seconds. The live feed's fresh tick carries its own time; a
-    price resolved just now in-request (DexScreener fetch) is 0.
-    The real executor refuses a buy on a price older than the
-    freshness window, so this age is the honest bound the route
-    can state — never a guessed zero for a tick it did not see."""
+    seconds — or None when no fresh decision price exists at all.
+    The live feed's fresh tick carries its own time; a price
+    resolved just now in-request (one batched Helius chain read)
+    is 0. The caller refuses the buy outright on None: a buy with
+    no fresh decision price must not execute. The real executor
+    refuses a buy on a price older than the freshness window, so
+    this age is the honest bound the route can state — never a
+    guessed zero for a tick it did not see."""
     feed = app.config.get("LIVE_FEED")
     if feed is not None:
         try:
@@ -862,24 +946,22 @@ def _decision_price_age(app, coin: str) -> float:
                                  - as_of).total_seconds())
             except (TypeError, ValueError):
                 return 0.0
-    return 0.0
+    # No fresh feed tick: a chain read just now is still a fresh
+    # decision price (age 0). Only when that fails too is there
+    # no decision price — None — and the caller refuses the buy.
+    if _chain_prices_for_mints(app, [coin]).get(coin):
+        return 0.0
+    return None
 
 
 def _trade_sol_prices(app):
     """(primary, secondary) SOL prices in USD for a manual trade's
-    price-gate cross-check: Jupiter (the app's price list) and
-    CoinGecko. Either may be None — the gate skips only the check
-    it cannot run, never a guessed price."""
-    try:
-        sol = get_prices()["prices"]["SOL"]["price"]
-    except Exception:
-        sol = None
-    try:
-        from .prices import get_coingecko_sol_price_usd
-        sol2 = get_coingecko_sol_price_usd()
-    except Exception:
-        sol2 = None
-    return sol, sol2
+    price-gate context: the feed's SOL tick only (the one SOL
+    number, Jupiter-fed via the feed), and None — there is no
+    second SOL source any more (single-price source). Either may
+    be None — the gate skips only the check it cannot run, never a
+    guessed price."""
+    return _feed_sol_price_usd(app), None
 
 
 def _header_balance(app, user):
@@ -889,7 +971,9 @@ def _header_balance(app, user):
     prices). Real mode: the app wallet's on-chain SOL balance.
     Never faked — an unreachable price feed or RPC shows
     'unavailable' instead of a made-up number. The label names
-    the network the app actually runs on (Mainnet now).
+    the network the app actually runs on (Mainnet now). The SOL
+    in the paper total is valued at the feed's SOL tick only — no
+    REST/Jupiter read here.
     """
     db = _db(app)
     mode = _active_mode(db, user["id"])
@@ -901,16 +985,9 @@ def _header_balance(app, user):
         label = ("Mainnet" if _cfg(app).network == "mainnet"
                  else "Devnet")
         return {"mode": "devnet", "label": label, "text": text}
-    prices = get_prices()
-    price_map = {}
-    for c, e in prices["prices"].items():
-        price = (e or {}).get("price")
-        try:
-            price = float(price) if price is not None else None
-        except (TypeError, ValueError):
-            price = None
-        if price is not None and price > 0:
-            price_map[c] = price
+    sol_price = _feed_sol_price_usd(app)
+    price_map = ({"SOL": sol_price}
+                 if sol_price is not None and sol_price > 0 else {})
     # Same totals as the P&L page: a holding with no usable price is
     # valued at its average cost, never $0.
     totals = pnl_mod.portfolio_totals(db, user["id"], price_map)
@@ -985,19 +1062,75 @@ def _clear_login_fails(app, username: str):
 # the DexScreener feed, cached two minutes so the coins page does not
 # hit the feed on every render. A feed failure returns an error and
 # the page says the trenches are unavailable right now — never fake
-# rows. The cache is module-level so tests can reset it.
+# rows. The cache is module-level so tests can reset it. The scan
+# is DISCOVERY only: its DexScreener prices never reach the page —
+# _reprice_trenches_rows rewrites every row onto the single source
+# (feed tick, else one batched Helius chain read) before it is
+# returned, and a row neither can price is dropped.
 # ----------------------------------------------------------------------
 _TRENCHES_CACHE: dict = {"at": 0.0, "rows": None, "error": None}
 
 
-def _trenches_list() -> tuple[list, str | None]:
+def _reprice_trenches_rows(app, rows: list) -> list:
+    """Rewrite trenches rows onto the single price source: each
+    row's price_usd becomes the feed's fresh tick, else one batched
+    Helius chain read for the rows the feed cannot price; the 1h
+    change becomes the feed's own tick history (None when the
+    history does not reach back an hour — "—" on the page). A row
+    neither source can price is dropped — unpriced means no trade,
+    never a guess. Returns new dicts; the cached scan rows are
+    never mutated."""
+    if not rows:
+        return []
+    feed = app.config.get("LIVE_FEED") if app is not None else None
+    now = time.time()
+    priced: dict = {}
+    uncovered = []
+    for row in rows:
+        price = None
+        if feed is not None:
+            try:
+                price = feed.live_price(row["mint"])
+            except Exception:
+                price = None
+        if price is not None and price > 0:
+            priced[row["mint"]] = price
+        else:
+            uncovered.append(row["mint"])
+    if uncovered and app is not None:
+        priced.update(_chain_prices_for_mints(app, uncovered))
+    out = []
+    for row in rows:
+        price = priced.get(row["mint"])
+        if price is None or price <= 0:
+            continue
+        change_1h = None
+        if feed is not None:
+            try:
+                change_1h = feed.change_over(row["mint"], 3600, now)
+            except Exception:
+                change_1h = None
+        out.append({**row, "price_usd": float(price),
+                    "change_1h_pct": change_1h})
+    return out
+
+
+def _trenches_list(app=None) -> tuple[list, str | None]:
     """Top trenches rows: [{mint, symbol, name, price_usd,
     change_1h_pct}], best 1-hour gain first, at most 10. Returns
-    (rows, error)."""
+    (rows, error). The scan's order is its own 1-hour-gain ranking
+    (discovery order); the prices and 1h changes on the rows are
+    the single source (see _reprice_trenches_rows). Without `app`
+    the raw scan rows are returned (name/symbol lookup only —
+    _trenches_entry never shows a price)."""
     now = time.time()
     if (_TRENCHES_CACHE["rows"] is not None
             and now - _TRENCHES_CACHE["at"] < 120):
-        return _TRENCHES_CACHE["rows"], _TRENCHES_CACHE["error"]
+        cached = _TRENCHES_CACHE["rows"]
+        if app is None:
+            return cached, _TRENCHES_CACHE["error"]
+        return (_reprice_trenches_rows(app, cached),
+                _TRENCHES_CACHE["error"])
     try:
         scan = fetch_trenches_scan()
     except Exception as exc:
@@ -1019,7 +1152,9 @@ def _trenches_list() -> tuple[list, str | None]:
     _TRENCHES_CACHE["at"] = now
     _TRENCHES_CACHE["rows"] = rows
     _TRENCHES_CACHE["error"] = error
-    return rows, error
+    if app is None:
+        return rows, error
+    return _reprice_trenches_rows(app, rows), error
 
 
 def _trenches_entry(mint: str) -> dict | None:
@@ -2312,14 +2447,11 @@ def register_routes(app: Flask) -> None:
     # Dashboard
     # ------------------------------------------------------------------
     def _sol_price_usd() -> float | None:
-        """Current SOL price in USD from the price feed, or None when
-        the feed has none — SOL-denominated manual trades refuse
-        plainly instead of converting at a guessed rate."""
-        price = get_prices()["prices"].get("SOL", {}).get("price")
-        try:
-            return float(price) if price is not None else None
-        except (TypeError, ValueError):
-            return None
+        """Current SOL price in USD from the feed's SOL tick only —
+        the one SOL number — or None when the feed has none.
+        SOL-denominated manual trades refuse plainly instead of
+        converting at a guessed rate."""
+        return _feed_sol_price_usd(app)
 
     def _dashboard_data(app, user, popup_coin=None, include_trenches=True,
                         chart_range="all"):
@@ -2338,7 +2470,7 @@ def register_routes(app: Flask) -> None:
         wallet = _wallet(app, user["id"])
         real_sol = (_real_balance(app, wallet["pubkey"])
                     if wallet and mode == "devnet" else None)
-        prices = get_prices()
+        prices = _feed_price_list(app)
         coin_rows, balances_stale = _coin_rows(
             db, user["id"], mode, prices,
             feed=app.config.get("LIVE_FEED"), app=app)
@@ -2356,25 +2488,10 @@ def register_routes(app: Flask) -> None:
         # totals cash + holdings in USD; real totals the on-chain SOL
         # balance (with a USD approx. when SOL has a price).
         # The USD total is only as live as its SOL price: the feed's
-        # fresh SOL tick first, the REST price only when its source
-        # is live — a snapshot SOL price would make the total a
-        # 4-day-old number, so the page shows SOL only until a live
-        # price exists. SOL is the unit of account here, not a listed
-        # coin.
-        sol_price = None
-        feed = app.config.get("LIVE_FEED")
-        if feed is not None:
-            try:
-                tick = feed.snapshot(["SOL"]).get("SOL")
-            except Exception:
-                tick = None
-            if tick is not None and not tick.get("stale"):
-                try:
-                    sol_price = float(tick["price"])
-                except (TypeError, ValueError):
-                    sol_price = None
-        if sol_price is None and prices.get("source") == "live":
-            sol_price = prices["prices"].get("SOL", {}).get("price")
+        # SOL tick only — no REST fallback — so the page shows SOL
+        # only until a live price exists. SOL is the unit of account
+        # here, not a listed coin.
+        sol_price = _feed_sol_price_usd(app)
         if chart_range not in pnl_mod.RANGES:
             chart_range = "all"
         if mode == "devnet":
@@ -2442,7 +2559,7 @@ def register_routes(app: Flask) -> None:
         activity = _activity_for_mode(db, user["id"], mode)
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
         trenches_rows, trenches_error = (
-            _trenches_list() if include_trenches else ([], None))
+            _trenches_list(app) if include_trenches else ([], None))
         # Coin popup sell form: the popup holding's SOL value +
         # prefill (same rule as the coin detail page).
         popup_held_sol, popup_sell_prefill = (
@@ -2515,10 +2632,8 @@ def register_routes(app: Flask) -> None:
         _REAL_BALANCE_CACHE["at"].clear()
         _REAL_BALANCE_CACHE["value"].clear()
         _TRENCHES_CACHE.update({"at": 0.0, "rows": None, "error": None})
-        prices = get_prices()
         _record_pnl_snapshot(
-            app, user["id"],
-            {c: e.get("price", 0.0) for c, e in prices["prices"].items()})
+            app, user["id"], _snapshot_price_map(app, user["id"]))
         _log(app, user["id"], "refresh",
              "Refreshed the coins page with live data.",
              _active_mode(db, user["id"]))
@@ -2529,17 +2644,20 @@ def register_routes(app: Flask) -> None:
     @login_required
     def coin_search():
         """Live coin search for the quick Buy/Sell popup: type a name
-        and get matching coins with live prices. Known coins come
-        from the price feed; anything else comes from DexScreener's
-        token search. A feed that does not answer returns an error
-        and no invented coins. Each result also carries how much of
-        that coin the user holds in the active mode, so the popup
-        can offer Sell all when there is something to sell."""
+        and get matching coins with live prices. DexScreener's token
+        search is discovery only (which coins match); every price on
+        a result comes from the single source (feed tick, else one
+        Helius chain read) or is None ("no data"). A feed that does
+        not answer returns an error and no invented coins. Each
+        result also carries how much of that coin the user holds in
+        the active mode, so the popup can offer Sell all when there
+        is something to sell."""
         user = _current_user(app)
         db = _db(app)
         mode = _active_mode(db, user["id"])
         q = (request.args.get("q") or "").strip()
-        found = search_coins(q)
+        found = search_coins(q, feed=app.config.get("LIVE_FEED"),
+                             cfg=_cfg(app))
         if mode == "devnet":
             held_rows = db.execute(
                 "SELECT coin_id, amount FROM real_holdings "
@@ -2606,39 +2724,16 @@ def register_routes(app: Flask) -> None:
         return jsonify(quote)
 
     def _gate_price_usd(app):
-        """Live $GATE price in USD, or None. Three sources, in order
-        — each is a live price, never a guess:
-        1. The live feed snapshot (on devnet the feed carries the
-           bonding-curve price, source 'curve'; DexScreener has no
-           pair for a bonding-curve token).
-        2. The devnet bonding curve directly (the same source the
-           feed polls) — so a buy works even before the feed's curve
-           poll has ticked.
-        3. The trenches feed (DexScreener) — the path for a
-           graduated / mainnet coin with a real pool.
-        None means no live price anywhere: the buy refuses rather
-        than pricing from a guessed number."""
+        """Live $GATE price in USD, or None. Single source only —
+        the same resolution every other coin price uses: the live
+        feed's fresh tick first, else one batched Helius chain read
+        of the bonding curve (graduated -> Raydium pool). No
+        DexScreener, no second read. None means no live price
+        anywhere: the buy refuses rather than pricing from a
+        guessed number."""
         mint = gate_fuel_mod.gate_mint(_cfg(app))
-        feed = app.config.get("LIVE_FEED")
-        if feed is not None:
-            try:
-                entry = (feed.snapshot([mint]) or {}).get(mint) or {}
-                if entry.get("price") is not None \
-                        and not entry.get("stale"):
-                    return float(entry["price"])
-            except (TypeError, ValueError):
-                pass
-        if _cfg(app).network == "devnet":
-            try:
-                from .devnet_watchlist import curve_price_usd
-                sol = _sol_price_usd()
-                if sol is not None:
-                    price, _curve = curve_price_usd(
-                        SolanaRpcClient(_cfg(app).rpc_url), mint, sol)
-                    if price is not None:
-                        return float(price)
-            except Exception:
-                pass
+        if mint is None:
+            return None
         _coin, price, _source = _resolve_coin_price(mint)
         try:
             return float(price) if price is not None else None
@@ -2845,7 +2940,7 @@ def register_routes(app: Flask) -> None:
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
-        prices = get_prices()
+        prices = _feed_price_list(app)
         rows, _balances_stale = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
@@ -2878,7 +2973,7 @@ def register_routes(app: Flask) -> None:
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
-        prices = get_prices()
+        prices = _feed_price_list(app)
         rows, _balances_stale = _coin_rows(db, user["id"], mode, prices, feed=app.config.get("LIVE_FEED"), app=app)
         row = next((r for r in rows
                     if r["coin_id"] == coin_id_resolved), None)
@@ -2957,17 +3052,14 @@ def register_routes(app: Flask) -> None:
 
         The page polls this once a second while it is open (and
         pauses while the tab is hidden). Prices are never invented.
-        The live feed goes FIRST: a fresh validated tick (DexScreener
-        poll for watched mints, bonding-curve price for devnet
-        watchlist mints, Jupiter for SOL) is the most current price
-        the app has. A stale feed tick (older than 30s) is never
-        served as fresh — it falls through to the per-source fetch
-        below, which carries its own honest as_of. A mint with no
-        feed tick comes fresh from the DexScreener trenches feed on
-        each tick. When no price is available the response says so
-        (ok false) and the page keeps showing the last real price
-        and its time. This is a read of the same feeds the coins
-        list already uses — no trade, no signing, nothing moves."""
+        The live feed goes FIRST and ONLY: a fresh validated tick
+        from the Helius stream is the most current price the app
+        has. A stale feed tick (older than 30s) is never served as
+        fresh, and there is no second-source fetch any more — when
+        no fresh tick exists the response is ok:false with message
+        "no data" and the page shows "no data" instead of the last
+        real price. This is a read of the same feed the coins list
+        already uses — no trade, no signing, nothing moves."""
         feed = app.config.get("LIVE_FEED")
         if feed is not None:
             key = (coin_id or "").upper() if (coin_id or "").upper() == "SOL" \
@@ -2979,21 +3071,12 @@ def register_routes(app: Flask) -> None:
                                 "source": tick["source"],
                                 "as_of": tick["as_of"]})
         if is_valid_address(coin_id):
-            try:
-                prices = fetch_prices_for_mints([coin_id])
-            except Exception:
-                prices = {}
-            if coin_id in prices:
-                return jsonify({"ok": True, "coin_id": coin_id,
-                                "price": float(prices[coin_id]),
-                                "source": "trenches feed",
-                                "as_of": _now()})
             return jsonify({"ok": False, "coin_id": coin_id, "price": None,
-                            "source": "trenches feed", "as_of": _now(),
-                            "error": "Price unavailable right now."})
+                            "source": None, "as_of": _now(),
+                            "error": "no data"})
         return jsonify({"ok": False, "coin_id": coin_id, "price": None,
                         "source": None, "as_of": _now(),
-                        "error": "Unknown coin — no live price."})
+                        "error": "no data"})
 
     @app.route("/api/coins/<coin_id>/candles")
     @login_required
@@ -3286,21 +3369,11 @@ def register_routes(app: Flask) -> None:
                         "Nothing was bought",
                         ["Amount must be a number."], False,
                         coin_id_resolved, label)
-            # Paper buys in SOL price from the live Jupiter quote
-            # when the coin has a route — the fill rate comes from
-            # Jupiter; a failed quote falls back to the live price
-            # (never blocks the trade).
-            jup_price = None
-            if amount_sol_raw:
-                try:
-                    jup_price = _jupiter_buy_price_usd(
-                        coin_id_resolved, float(amount_sol_raw))
-                except (ValueError, TypeError):
-                    jup_price = None
+            # Paper buys price from the resolved feed-tick price
+            # (helius stream) — the fill rate comes from the single
+            # source, never a Jupiter quote.
             result = _paper_buy_for(app, user, coin_id_resolved, usd,
-                                    request.form.get("bot_id") or "",
-                                    price_usd=jup_price,
-                                    price_source="jupiter quote")
+                                    request.form.get("bot_id") or "")
             lines = [result["message"]]
             if result["ok"]:
                 lines.append(
@@ -3403,12 +3476,20 @@ def register_routes(app: Flask) -> None:
         # anything still bonding trades through the pump.fun
         # executor. An unreadable curve refuses plainly — the
         # venue is never guessed. The price-gate context (how old
-        # the decision price is, the two SOL prices) travels with
+        # the decision price is, the one SOL price) travels with
         # the buy so the executor can check it against a fresh
-        # on-chain read before signing.
+        # on-chain read before signing. No fresh decision price
+        # (age None) means no buy at all — the trade must not
+        # execute on a price the feed cannot vouch for.
         rpc = rpc_client_for_config(_cfg(app))
         decision_age = _decision_price_age(app, coin_id_resolved)
-        sol_price_usd, sol_price_secondary = _trade_sol_prices(app)
+        if decision_age is None:
+            return _coin_result(
+                "Nothing was bought",
+                ["No live price right now — the buy needs a fresh "
+                 "price to decide on. Try again in a moment."],
+                False, coin_id_resolved, label)
+        sol_price_usd, _sol_price_secondary = _trade_sol_prices(app)
         try:
             complete = is_curve_complete(rpc, coin_id_resolved)
         except Exception:
@@ -3431,8 +3512,7 @@ def register_routes(app: Flask) -> None:
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
                 price or 0.0, db, _cfg(app),
                 decision_price_age_seconds=decision_age,
-                sol_price_usd=sol_price_usd,
-                sol_price_secondary=sol_price_secondary)
+                sol_price_usd=sol_price_usd)
             venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
             return _coin_result(
@@ -3485,8 +3565,7 @@ def register_routes(app: Flask) -> None:
              f"{result.get('signing_bot', '')}.", "real")
         _record_pnl_snapshot(
             app, user["id"],
-            {c: e.get("price", 0.0)
-             for c, e in get_prices()["prices"].items()})
+            _snapshot_price_map(app, user["id"]))
         lines = [f"Bought {coin_amount:.4f} {coin_id_resolved} for "
                  f"{amount_sol:.4f} SOL {venue_label}.",
                  f"Signature: {result.get('signature', '')}",
@@ -3610,14 +3689,9 @@ def register_routes(app: Flask) -> None:
             sold_from_bots = max(
                 0.0, amount - max(
                     0.0, paper_before - float(bot_managed_paper)))
-            # Paper sells price from the live Jupiter quote when the
-            # coin has a route — a failed quote falls back to the
-            # live price (never blocks the trade).
-            jup_price = _jupiter_sell_price_usd(
-                coin_id_resolved, amount)
-            result = _paper_sell_for(app, user, coin_id_resolved, amount,
-                                     price_usd=jup_price,
-                                     price_source="jupiter quote")
+            # Paper sells price from the resolved feed-tick price
+            # (helius stream) — never a Jupiter quote.
+            result = _paper_sell_for(app, user, coin_id_resolved, amount)
             lines = [result["message"]]
             if result["ok"]:
                 lines.append(f"New paper cash: ${result['cash']:,.2f} CAD.")
@@ -3773,8 +3847,7 @@ def register_routes(app: Flask) -> None:
              f"{result.get('signing_bot', '')}.", "real")
         _record_pnl_snapshot(
             app, user["id"],
-            {c: e.get("price", 0.0)
-             for c, e in get_prices()["prices"].items()})
+            _snapshot_price_map(app, user["id"]))
         lines = [f"Sold {amount:.4f} {coin_id_resolved} {venue_label}.",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
@@ -4054,7 +4127,7 @@ def register_routes(app: Flask) -> None:
         user = _current_user(app)
         db = _db(app)
         mode = _active_mode(db, user["id"])
-        trenches_rows, trenches_error = _trenches_list()
+        trenches_rows, trenches_error = _trenches_list(app)
         return render_template(
             "trenches.html", trenches_rows=trenches_rows,
             trenches_error=trenches_error, mode=mode,
@@ -4371,87 +4444,42 @@ def register_routes(app: Flask) -> None:
     # ------------------------------------------------------------------
     def _resolve_coin_price(coin: str):
         """(coin_id, price, source) for a pump.fun mint, or
-        (None, None, None) when the coin is unknown / unpriced.
-        A mint the trenches feed has not priced still resolves —
-        with price None — so its detail page loads and says the
-        price is unavailable instead of 404ing. The live feed's
-        tick (bonding-curve price for devnet watchlist mints) is
-        consulted when the trenches feed has no price."""
+        (None, None, None) when the coin is unknown. A mint the
+        feed has not priced still resolves — with price None and
+        source "no data" — so its detail page loads and says "no
+        data" instead of 404ing. Single price source only: the
+        live feed's fresh tick first; if no fresh tick, ONE batched
+        Helius RPC read of the bonding curve (graduated -> Raydium
+        pool, the same lookup the stream uses). Source is
+        "helius stream" when priced, "no data" when not."""
         if not coin:
             return None, None, None
         if not is_valid_address(coin):
             return None, None, None
         # The live feed first: a fresh validated tick — the
-        # bonding-curve price for a devnet mint with no DEX pool
+        # bonding-curve price for a mint with no DEX pool
         # (Gate/AuditTest have no trenches-feed price at all).
-        # Only a mint the feed has no fresh tick for falls
-        # through to DexScreener; a stale tick is never live.
         feed = app.config.get("LIVE_FEED")
         if feed is not None:
             try:
-                tick = feed.snapshot([coin]).get(coin)
+                price = feed.live_price(coin)
             except Exception:
-                tick = None
-            if tick is not None and not tick.get("stale"):
-                try:
-                    price = float(tick["price"])
-                except (TypeError, ValueError):
-                    price = None
-                if price is not None and price > 0:
-                    return coin, price, tick.get("source") or "feed"
-        try:
-            prices = fetch_prices_for_mints([coin])
-        except Exception:
-            prices = {}
-        if coin in prices:
-            try:
-                price = float(prices[coin])
-            except (TypeError, ValueError):
                 price = None
             if price is not None and price > 0:
-                return coin, price, "trenches feed"
-        return coin, None, "trenches feed"
-
-    def _jupiter_buy_price_usd(coin: str, amount_sol: float) -> float | None:
-        """Implied USD price for a paper BUY of `amount_sol` SOL
-        worth, from a live Jupiter quote — None when Jupiter cannot
-        quote (the caller falls back to the live price and never
-        blocks the trade on a quote). Only graduated pump.fun coins
-        have Jupiter routes; a coin still on its bonding curve has
-        no route and this returns None, so the buy prices from the
-        trenches feed."""
-        if not is_valid_address(coin):
-            return None
-        return jupiter_mod.jupiter_usd_price_mint(
-            coin, _sol_price_usd(), amount_sol=amount_sol)
-
-    def _jupiter_sell_price_usd(coin: str,
-                                amount_tokens: float) -> float | None:
-        """Implied USD price for a paper SELL of `amount_tokens`,
-        from a live Jupiter sell quote — None when Jupiter cannot
-        quote (caller falls back to the live price). Only graduated
-        pump.fun coins have Jupiter routes."""
-        if not is_valid_address(coin):
-            return None
-        sol_price = _sol_price_usd()
-        if sol_price is None or amount_tokens <= 0:
-            return None
-        try:
-            quote = jupiter_mod.quote_sell_mint(coin, amount_tokens)
-        except jupiter_mod.JupiterError:
-            return None
-        if quote["out_amount_ui"] <= 0:
-            return None
-        return quote["out_amount_ui"] * sol_price / amount_tokens
+                return coin, price, "helius stream"
+        chained = _chain_prices_for_mints(app, [coin])
+        price = chained.get(coin)
+        if price is not None and price > 0:
+            return coin, float(price), "helius stream"
+        return coin, None, "no data"
 
     def _paper_buy_for(app, user, coin: str, usd: float,
-                       bot_id_raw: str, price_usd: float | None = None,
-                       price_source: str | None = None) -> dict:
+                       bot_id_raw: str) -> dict:
         """One paper buy. Returns {"ok", "message", ...}. The caller
-        presents the message. Never raises for a refused buy.
-        `price_usd` overrides the resolved price when given (a
-        Jupiter quote-implied price): the fill rate then comes from
-        Jupiter, not the cached feed price."""
+        presents the message. Never raises for a refused buy. The
+        fill price is the resolved feed-tick price from
+        _resolve_coin_price (source "helius stream") — no Jupiter
+        quote price anywhere."""
         db = _db(app)
         coin_id, price, source = _resolve_coin_price(coin)
         if coin_id is None:
@@ -4460,9 +4488,6 @@ def register_routes(app: Flask) -> None:
         if usd <= 0:
             return {"ok": False,
                     "message": "Amount must be more than 0."}
-        if price_usd is not None and price_usd > 0:
-            price = price_usd
-            source = price_source or "jupiter quote"
         # Optional managing bot: the bot looks after this coin — the
         # silent loop governs the position by that bot's rules once
         # its silent trading is on. The bot must be the user's own
@@ -4516,8 +4541,7 @@ def register_routes(app: Flask) -> None:
              "paper")
         _record_pnl_snapshot(
             app, user["id"],
-            {c: e.get("price", 0.0)
-             for c, e in get_prices()["prices"].items()})
+            _snapshot_price_map(app, user["id"]))
         cash = _paper(app, user["id"])
         return {"ok": True,
                 "message": f"Bought {amount:.4f} {coin_id} for "
@@ -4525,12 +4549,11 @@ def register_routes(app: Flask) -> None:
                 "amount": amount, "usd": usd, "bot": bot, "cash": cash,
                 "coin": coin_id}
 
-    def _paper_sell_for(app, user, coin: str, amount: float,
-                        price_usd: float | None = None,
-                        price_source: str | None = None) -> dict:
-        """One paper sell. Returns {"ok", "message", ...}.
-        `price_usd` overrides the resolved price when given (a
-        Jupiter quote-implied price)."""
+    def _paper_sell_for(app, user, coin: str, amount: float) -> dict:
+        """One paper sell. Returns {"ok", "message", ...}. The fill
+        price is the resolved feed-tick price from
+        _resolve_coin_price (source "helius stream") — no Jupiter
+        quote price anywhere."""
         db = _db(app)
         coin_id, price, source = _resolve_coin_price(coin)
         if coin_id is None:
@@ -4539,9 +4562,6 @@ def register_routes(app: Flask) -> None:
         if amount <= 0:
             return {"ok": False,
                     "message": "Amount must be more than 0."}
-        if price_usd is not None and price_usd > 0:
-            price = price_usd
-            source = price_source or "jupiter quote"
         if price is None:
             return {"ok": False,
                     "message": "Price unavailable right now."}
@@ -4556,8 +4576,7 @@ def register_routes(app: Flask) -> None:
              f"price source: {source}).", "paper")
         _record_pnl_snapshot(
             app, user["id"],
-            {c: e.get("price", 0.0)
-             for c, e in get_prices()["prices"].items()})
+            _snapshot_price_map(app, user["id"]))
         cash = _paper(app, user["id"])
         return {"ok": True,
                 "message": f"Sold {amount:.4f} {coin_id} for "
@@ -5093,7 +5112,7 @@ def register_routes(app: Flask) -> None:
         proposals = _db(app).execute(
             "SELECT * FROM bot_proposals WHERE bot_id = ? AND user_id = ? "
             "ORDER BY id DESC", (bot_id, user["id"])).fetchall()
-        prices = get_prices()
+        prices = _feed_price_list(app)
         rules, rules_error = load_rules(bot)
         # builderBot's trade ledger: wins, losses, win rate and net
         # P&L for this bot, its recent fills, and every rule
@@ -5375,22 +5394,38 @@ def register_routes(app: Flask) -> None:
             abort(404)
         coins = json.loads(bot["coins"])
         # Signals bots watch pump.fun mints: price + 24h change
-        # from the trenches feed (DexScreener, Raydium fallback
-        # for graduated coins). The price list is SOL only and has
-        # no entry for a mint. A mint with no price is skipped —
-        # no signal is ever built on a missing price.
+        # from the single source only — the feed's fresh tick first,
+        # else one batched Helius chain read for prices, and the
+        # 24h change from the feed's own recorded tick history
+        # (None when the history does not reach back 24h). A mint
+        # with no price is skipped — no signal is ever built on a
+        # missing price.
         mints = [c for c in coins if is_valid_address(c)]
         mint_prices: dict = {}
         mint_changes: dict = {}
         if mints:
-            try:
-                mint_prices = fetch_prices_for_mints(mints)
-            except Exception:
-                mint_prices = {}
-            try:
-                mint_changes = fetch_mint_24h_changes(mints)
-            except Exception:
-                mint_changes = {}
+            feed = app.config.get("LIVE_FEED")
+            if feed is not None:
+                for mint in mints:
+                    try:
+                        price = feed.live_price(mint)
+                    except Exception:
+                        price = None
+                    if price is not None and price > 0:
+                        mint_prices[mint] = price
+            uncovered = [m for m in mints if m not in mint_prices]
+            if uncovered:
+                mint_prices.update(
+                    _chain_prices_for_mints(app, uncovered))
+            if feed is not None:
+                now = time.time()
+                for mint in mints:
+                    try:
+                        change = feed.change_over(mint, 86400, now)
+                    except Exception:
+                        change = None
+                    if change is not None:
+                        mint_changes[mint] = change
         made = 0
         for coin in coins:
             if coin not in mint_prices:
@@ -5638,12 +5673,13 @@ def register_routes(app: Flask) -> None:
         if intent == "balance":
             wallet = _wallet(app, user["id"])
             real_sol = _real_balance(app, wallet["pubkey"]) if wallet else None
-            prices = get_prices()
-            holdings = _db(app).execute(
-                "SELECT coin_id, amount FROM paper_holdings WHERE user_id = ?",
-                (user["id"],)).fetchall()
-            value = sum(h["amount"] * prices["prices"].get(
-                h["coin_id"], {}).get("price", 0) for h in holdings)
+            # Single source: holdings valued from the feed's ticks /
+            # one chain read (unpriced holdings at cost, never $0),
+            # not the old SOL-only get_prices() map.
+            value = sum(
+                h["value"] for h in pnl_mod.current_holdings(
+                    _db(app), user["id"],
+                    _snapshot_price_map(app, user["id"])))
             real_txt = (f"{real_sol:.4f} SOL" if real_sol is not None
                         else "unavailable right now")
             return jsonify({"reply":

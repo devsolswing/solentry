@@ -166,15 +166,15 @@ class Config:
         # refuses instead of signing.
         self.jupiter_max_fee_sol: float = float(env.get(
             "JUPITER_MAX_FEE_SOL", "0.01"))
-        # Price-validation gate (report §3): feed price vs fresh
-        # on-chain read must agree within this % before a real buy.
+        # Price-validation gate (report §3): the stream tick
+        # (decision price) vs a fresh on-chain read of the same
+        # curve must agree within this % before a real buy.
         self.two_source_tolerance_pct: float = float(env.get(
             "TWO_SOURCE_TOLERANCE_PCT", "5"))
-        # Second SOL-price source (CoinGecko): USD-denominated
-        # decisions refuse when the two SOL prices disagree by
-        # more than this %.
-        self.sol_price_disagree_pct: float = float(env.get(
-            "SOL_PRICE_DISAGREE_PCT", "2"))
+        # The old SOL-price cross-check (Jupiter vs CoinGecko) is
+        # gone with the single-price source (2026-11-25): SOL has
+        # one source, so there is nothing to cross-check against.
+        # The SOL_PRICE_DISAGREE_PCT env var is ignored now.
         # A decision price older than this (seconds) is stale: new
         # buys refuse on it. Exits may still decide on it, but the
         # executor re-quotes before selling.

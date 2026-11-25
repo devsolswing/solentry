@@ -63,19 +63,6 @@ GATE = "Eu4u5JxX3YvgxWRoB5eWBtor8E79Cru2Y96Nh61v8uLE"
 GATE_PRICE = 10.0
 
 
-def make_prices(changes):
-    """changes: {coin: (price, change_24h)} or
-    (price, change_24h, change_1h) — pump.fun only, so the list
-    holds just SOL, the unit of account."""
-    out = {}
-    for c, tup in changes.items():
-        price, ch24 = tup[0], tup[1]
-        ch1h = tup[2] if len(tup) > 2 else None
-        out[c] = {"price": price, "change_24h": ch24,
-                  "change_1h": ch1h}
-    return {"prices": out, "source": "live", "as_of": "test"}
-
-
 def fake_chart(points):
     return {"points": [{"ts": 1790000000000 + i * 60000, "price": p}
                        for i, p in enumerate(points)], "error": None}
@@ -85,32 +72,32 @@ class HomeRedoBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app, self.client = make_client(self.tmp.name)
-        # The price list is SOL only now (unit of account); mints
-        # are priced by the trenches feed, mocked below. Gate is
-        # priced at $10 here so a $10 buy holds exactly 1.0 GATE.
+        # The price list is SOL only now (unit of account), at $10
+        # from the feed's SOL tick; Gate is priced at $10 by the
+        # live feed's stream tick, with a +2.5% 1h change from the
+        # feed's own tick history (an hour-old tick, then a fresh
+        # one), so a $10 buy holds exactly 1.0 GATE.
         self.prices_patch = mock.patch.object(
-            routes, "get_prices",
-            return_value=make_prices({"SOL": (10.0, 5.25, 2.5)}))
+            routes, "_feed_sol_price_usd",
+            return_value=10.0)
         self.prices_patch.start()
         self.price_patch = mock.patch.object(
             prices, "get_price", return_value=(10.0, "live", "test"))
         self.price_patch.start()
         self.mint_prices = {GATE: GATE_PRICE}
-        self.mint_1h = {GATE: 2.5}
         self.mint_identities = {
             GATE: {"name": "Gate", "symbol": "GATE"}}
         self.mint_prices_patch = mock.patch.object(
-            routes, "fetch_prices_for_mints",
-            side_effect=lambda mints, http_get=None: {
+            routes, "_chain_prices_for_mints",
+            side_effect=lambda app, mints: {
                 m: self.mint_prices[m] for m in mints
                 if m in self.mint_prices})
         self.mint_prices_patch.start()
-        self.mint_1h_patch = mock.patch.object(
-            routes, "fetch_mint_1h_changes",
-            side_effect=lambda mints, http_get=None: {
-                m: self.mint_1h[m] for m in mints
-                if m in self.mint_1h})
-        self.mint_1h_patch.start()
+        feed = self.app.config["LIVE_FEED"]
+        now = time.time()
+        feed.ingest(GATE, GATE_PRICE / 1.025, "helius-stream",
+                    now=now - 3600)
+        feed.ingest(GATE, GATE_PRICE, "helius-stream", now=now)
         self.mint_id_patch = mock.patch.object(
             routes, "fetch_mint_identities",
             side_effect=lambda mints, http_get=None: {
@@ -170,7 +157,6 @@ class HomeRedoBase(unittest.TestCase):
         self.hh_meta_patch.stop()
         self.meta_patch.stop()
         self.mint_id_patch.stop()
-        self.mint_1h_patch.stop()
         self.mint_prices_patch.stop()
         self.price_patch.stop()
         self.prices_patch.stop()
@@ -375,7 +361,7 @@ class TestCoinDetailActions(HomeRedoBase):
         data = json.loads(resp.get_data(as_text=True))
         self.assertFalse(data["ok"])
         self.assertIsNone(data["price"])
-        self.assertIn("Unknown coin", data["error"])
+        self.assertEqual(data["error"], "no data")
 
     def test_tick_endpoint_unknown_coin_says_so(self):
         resp = self.client.get("/api/coins/NOPE/tick")
@@ -384,16 +370,17 @@ class TestCoinDetailActions(HomeRedoBase):
         self.assertFalse(data["ok"])
         self.assertIsNone(data["price"])
 
-    def test_tick_endpoint_mint_uses_trenches_feed(self):
-        with mock.patch.object(
-                routes, "fetch_prices_for_mints",
-                return_value={MINT: 0.5}):
-            resp = self.client.get(f"/api/coins/{MINT}/tick")
+    def test_tick_endpoint_mint_uses_live_feed(self):
+        # The tick endpoint reads the live feed only now: seed the
+        # feed's stream tick for the mint and it serves that price.
+        self.app.config["LIVE_FEED"].ingest(
+            MINT, 0.5, "helius-stream")
+        resp = self.client.get(f"/api/coins/{MINT}/tick")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.get_data(as_text=True))
         self.assertTrue(data["ok"])
         self.assertEqual(data["price"], 0.5)
-        self.assertEqual(data["source"], "trenches feed")
+        self.assertEqual(data["source"], "helius-stream")
 
     def test_tick_endpoint_needs_login(self):
         self.client.get("/logout")

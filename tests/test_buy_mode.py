@@ -24,19 +24,18 @@ GATE_PRICE = 0.0000005
 
 
 def start_route_mocks(tc):
-    """Keep every live feed local: the trenches price/identity for
-    the Gate mint, a SOL-only price list, and no logo/RPC/Metaplex
-    or Jupiter calls in these tests."""
+    """Keep every live feed local: the Gate mint is priced from the
+    live feed's stream tick (with the batched Helius chain read as
+    the pull twin), SOL is $10 from the feed's SOL tick, and no
+    logo/RPC/Metaplex or Jupiter calls happen in these tests."""
     tc.mint_prices = {GATE: GATE_PRICE}
     tc.mint_identities = {GATE: {"name": "Gate", "symbol": "GATE"}}
     patches = [
         mock.patch.object(
-            routes, "fetch_prices_for_mints",
-            side_effect=lambda mints, http_get=None: {
+            routes, "_chain_prices_for_mints",
+            side_effect=lambda app, mints: {
                 m: tc.mint_prices[m] for m in mints
                 if m in tc.mint_prices}),
-        mock.patch.object(routes, "fetch_mint_1h_changes",
-                          return_value={}),
         mock.patch.object(
             routes, "fetch_mint_identities",
             side_effect=lambda mints, http_get=None: {
@@ -62,15 +61,17 @@ def start_route_mocks(tc):
                           "source": "dexscreener", "as_of": "test",
                           "error": None}),
         mock.patch.object(
-            routes, "get_prices",
-            return_value={"prices": {"SOL": {
-                "price": 10.0, "change_24h": 5.25,
-                "change_1h": None}},
-                "source": "live", "as_of": "test"}),
+            routes, "_feed_sol_price_usd",
+            return_value=10.0),
     ]
     for p in patches:
         p.start()
         tc.addCleanup(p.stop)
+    # The live feed's stream tick prices Gate (the single price
+    # source); the 1h change is None — the feed has no history
+    # reaching back an hour in these tests, and no test here
+    # asserts a 1h figure.
+    tc.app.config["LIVE_FEED"].ingest(GATE, GATE_PRICE, "helius-stream")
     routes._TRENCHES_CACHE.update({"at": 0.0, "rows": None, "error": None})
     home_holdings_mod.clear_image_cache()
 

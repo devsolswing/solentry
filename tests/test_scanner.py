@@ -125,6 +125,46 @@ class _FakeRpc:
         return 0
 
 
+class _FakeFeed:
+    """Live-feed stand-in: snapshot() returns the tick per mint."""
+
+    def __init__(self, ticks=None):
+        self.ticks = ticks or {}
+
+    def snapshot(self, coin_ids=None):
+        out = {}
+        for cid in (coin_ids or list(self.ticks)):
+            if cid in self.ticks:
+                out[cid] = {"coin_id": cid, "price": self.ticks[cid],
+                            "source": "test", "stale": False}
+        return out
+
+    def tick_age_seconds(self, coin_id, now=None):
+        return 0.0 if coin_id in self.ticks else None
+
+    def live_price(self, coin_id, now=None):
+        price = self.ticks.get(coin_id)
+        return float(price) if price is not None else None
+
+    def live_tick(self, coin_id, now=None):
+        if coin_id not in self.ticks:
+            return None
+        return {"coin_id": coin_id, "price": self.ticks[coin_id],
+                "source": "test", "stale": False}
+
+    def change_over(self, coin_id, window_seconds, now=None):
+        return None
+
+    def sanitize_prices_data(self, data):
+        return data
+
+    def sanitize_trenches(self, data):
+        return data
+
+    def set_tick_listener(self, callback):
+        self._listener = callback
+
+
 class TestScannerValidation(unittest.TestCase):
     def test_preset_shape(self):
         rules = scanner_ruleset()
@@ -365,7 +405,7 @@ class TestScannerMarks(unittest.TestCase):
 
     def test_gain_from_mark_3min_old(self):
         record_marks(self.db, 1, [{"mint": "MINTA", "price_usd": 0.01}],
-                     _now(-200))
+                     _now(-330))
         now_ts = datetime.now(timezone.utc).timestamp()
         self.assertAlmostEqual(gain_3m_pct(self.db, 1, "MINTA", 0.0106,
                                            now_ts), 6.0, places=4)
@@ -381,7 +421,7 @@ class TestScannerMarks(unittest.TestCase):
         record_marks(self.db, 1, [{"mint": "MINTA", "price_usd": 0.01}],
                      _now(-400))
         record_marks(self.db, 1, [{"mint": "MINTA", "price_usd": 0.0103}],
-                     _now(-200))
+                     _now(-330))
         now_ts = datetime.now(timezone.utc).timestamp()
         # Latest mark >= 3 min old is 0.0103 (-200s), not 0.01.
         self.assertAlmostEqual(gain_3m_pct(self.db, 1, "MINTA", 0.0106,
@@ -765,6 +805,23 @@ class ScannerEngineBase(unittest.TestCase):
             "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
             "recorded_at) VALUES (?, ?, ?, ?)",
             (bot_id, mint, price, when))
+        # 1-hour trend baseline for the momentum gate: the loop
+        # fills change_1h_pct from the loop's own marks, so a
+        # 5-minute baseline alone leaves the 1-hour trend unknown
+        # and the gate fails closed. A mark already an hour old
+        # needs no companion.
+        try:
+            _age = (datetime.now(timezone.utc)
+                    - datetime.strptime(
+                        when, "%Y-%m-%dT%H:%M:%SZ").replace(
+                            tzinfo=timezone.utc)).total_seconds()
+        except Exception:
+            _age = 0
+        if 300 <= _age < 3600:
+            self.db.execute(
+                "INSERT INTO scanner_marks (bot_id, mint, price_usd, "
+                "recorded_at) VALUES (?, ?, ?, ?)",
+                (bot_id, mint, price, _now(-3700)))
         self.db.commit()
 
     def _reset_scan(self, bot_id):
@@ -790,18 +847,26 @@ class ScannerEngineBase(unittest.TestCase):
             args.append(kind)
         return self.db.execute(q, args).fetchall()
 
-    def _run(self, entries, real_executor=None):
+    def _run(self, entries, real_executor=None, feed=None):
+        # Single-price source: a scan entry survives the loop's
+        # reprice only with a live feed tick at its price. Seed
+        # ticks for entries the feed has none for — never
+        # overwriting a tick a test set deliberately.
+        if feed is None:
+            feed = _FakeFeed()
+        for _e in entries:
+            feed.ticks.setdefault(_e["mint"], _e["price_usd"])
         scan = _FakeScan(entries)
         return run_once(self.db, self.cfg, price_fetcher=_empty_prices,
                         trenches_fetcher=scan,
                         rpc_factory=lambda url: self.fake_rpc,
-                        real_executor=real_executor)
+                        real_executor=real_executor, feed=feed)
 
 
 class TestScannerEngine(ScannerEngineBase):
     def test_buy_fires_on_5pct_3min_gain(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
         # First scan records the signal (2-scan confirmation);
         # the second scan buys.
         self._run([_entry("MINTA", 0.0106)])
@@ -815,7 +880,7 @@ class TestScannerEngine(ScannerEngineBase):
 
     def test_no_buy_below_threshold(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.0104)])
         self.assertEqual(outcomes[0]["actions"], [])
         self.assertIsNone(self._position(bot_id, "MINTA"))
@@ -830,8 +895,8 @@ class TestScannerEngine(ScannerEngineBase):
 
     def test_strongest_gainer_wins(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
-        self._insert_mark(bot_id, "MINTB", 0.01, _now(-200))
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
+        self._insert_mark(bot_id, "MINTB", 0.01, _now(-330))
         self._run([_entry("MINTA", 0.0106), _entry("MINTB", 0.0110)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry("MINTA", 0.0106),
@@ -842,8 +907,8 @@ class TestScannerEngine(ScannerEngineBase):
 
     def test_max_one_new_position_per_scan(self):
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
-        self._insert_mark(bot_id, "MINTB", 0.01, _now(-200))
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
+        self._insert_mark(bot_id, "MINTB", 0.01, _now(-330))
         self._run([_entry("MINTA", 0.0106), _entry("MINTB", 0.0106)])
         self._reset_scan(bot_id)
         outcomes = self._run([_entry("MINTA", 0.0106),
@@ -856,7 +921,7 @@ class TestScannerEngine(ScannerEngineBase):
         3-minute window, is bought on the later scan — the marks
         keep its history."""
         bot_id = self._insert_bot(rules=scanner_ruleset())
-        self._insert_mark(bot_id, "MINTA", 0.01, _now(-200))
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.0103)])
         self.assertEqual(outcomes[0]["actions"], [])
         self._reset_scan(bot_id)
@@ -890,7 +955,7 @@ class TestScannerEngine(ScannerEngineBase):
                          [{"action": "skip", "coin": "",
                            "reason": "scan interval not reached"}])
         # 31 seconds later: the scanner evaluates, Trenches waits.
-        self._insert_mark(scanner_id, "MINTB", 0.01, _now(-200))
+        self._insert_mark(scanner_id, "MINTB", 0.01, _now(-330))
         self._set_scan_at(scanner_id, _now(-31))
         self._set_scan_at(trenches_id, _now(-31))
         outcomes = self._run([_entry("MINTB", 0.0106, change_5m=3.5)])
@@ -980,6 +1045,9 @@ class TestScannerEngine(ScannerEngineBase):
         self._run([_entry("MINTA", 0.01)])
         self._reset_scan(bot_id)
         self.fake_rpc.totals = {"MINTA": 800_000}
+        # The -40% 5-minute drop now comes from the loop's own
+        # marks: 0.01 recorded 330s ago vs 0.006.
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.006, change_5m=-40.0)])
         sells = [a for a in outcomes[0]["actions"]
                  if a["action"] == "sell"]
@@ -1050,6 +1118,9 @@ class TestScannerEngine(ScannerEngineBase):
         holding the runner."""
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
+        # The trending regime's 1-hour gain now comes from the
+        # loop's own marks: 0.008 recorded 3700s ago.
+        self._insert_mark(bot_id, "MINTA", 0.008, _now(-3700))
         outcomes = self._run([_trending_entry("MINTA", 0.0126)])
         sells = [a for a in outcomes[0]["actions"]
                  if a["action"] == "sell"]
@@ -1085,6 +1156,9 @@ class TestScannerEngine(ScannerEngineBase):
         self._insert_position(bot_id, "MINTA", 100, 0.01)
         self._run([_slow_entry("MINTA", 0.0105)])
         self.assertEqual(self._position(bot_id, "MINTA")["amount"], 75)
+        # Now the market turns trending: the 1-hour gain comes
+        # from a mark 3700s old at 0.008.
+        self._insert_mark(bot_id, "MINTA", 0.008, _now(-3700))
         self._reset_scan(bot_id)
         outcomes = self._run([_trending_entry("MINTA", 0.02)])
         sells = [a for a in outcomes[0]["actions"]
@@ -1111,6 +1185,7 @@ class TestScannerEngine(ScannerEngineBase):
         """The rug sell is a loss limiter: it fires below cost too."""
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
+        self._insert_mark(bot_id, "MINTA", 0.01, _now(-330))
         outcomes = self._run([_entry("MINTA", 0.006, change_5m=-40.0)])
         sells = [a for a in outcomes[0]["actions"]
                  if a["action"] == "sell"]
@@ -1123,6 +1198,7 @@ class TestScannerEngine(ScannerEngineBase):
         stop sells everything, even though the ladder would hold."""
         bot_id = self._insert_bot(rules=scanner_ruleset())
         self._insert_position(bot_id, "MINTA", 100, 0.01)
+        self._insert_mark(bot_id, "MINTA", 0.008, _now(-3700))
         self._run([_trending_entry("MINTA", 0.02)])
         self.assertEqual(self._position(bot_id, "MINTA")["amount"], 90)
         self._reset_scan(bot_id)

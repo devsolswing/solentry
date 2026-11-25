@@ -185,18 +185,16 @@ class ExitAllBase(unittest.TestCase):
 
     def _mock_price_routes(self):
         """Keep the coin price local: the trenches feed prices GATE
-        at GATE_PRICE, SOL is $10 — no DexScreener/Jupiter/RPC."""
+        at GATE_PRICE, SOL is $10 — no DexScreener/Jupiter/RPC.
+        Single price source: the mint price comes from one batched
+        Helius chain read, the SOL price from the feed's SOL tick."""
         patches = [
             mock.patch.object(
-                routes, "fetch_prices_for_mints",
-                side_effect=lambda mints, http_get=None: {
+                routes, "_chain_prices_for_mints",
+                side_effect=lambda app, mints: {
                     m: GATE_PRICE for m in mints if m == GATE}),
             mock.patch.object(
-                routes, "get_prices",
-                return_value={"prices": {"SOL": {
-                    "price": 10.0, "change_24h": 5.25,
-                    "change_1h": None}},
-                    "source": "live", "as_of": "test"}),
+                routes, "_feed_sol_price_usd", return_value=10.0),
         ]
         for p in patches:
             p.start()
