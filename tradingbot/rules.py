@@ -780,11 +780,16 @@ MIDDY_BUY_DOMINANCE_RATIO = 1.35
 # REMY DEFAULT — James gave no gain threshold; the momentum gate
 # also requires a positive 5-minute gain.
 MIDDY_MIN_GAIN_5M_PCT = 1.0
-# Min mcap $20,000 CAD, stored in the engine's USD field — the
-# closest version (Clyde precedent): $20,000 USD is a STRICTER
-# bar than $20,000 CAD (about $14,600 USD), so a coin under
-# $20,000 CAD can never pass. The app has no CAD price source.
-MIDDY_MIN_MCAP_USD = 20000.0
+# Min mcap $20,000 CAD (JAMES'S NUMBER). The engine's market-cap
+# field is USD and the app has no CAD price source, so the CAD bar
+# is enforced as a FIXED-RATE USD figure: $20,000 CAD at the Bank
+# of Canada rate 1.4296 CAD/USD (2026-11-24) = $13,990 USD,
+# rounded to $14,000. The USD figure is FIXED — it never moves
+# with the rate. (James, 2026-11-24 ~17:15: "Set it to true $20k
+# CAD" — the old $20,000 USD bar was ~37% stricter than his rule
+# and skipped Firefly at $19,260 USD, about $27,500 CAD.)
+MIDDY_MIN_MCAP_CAD = 20000.0
+MIDDY_MIN_MCAP_USD = 14000.0
 # Min 5-minute volume $1,000 — REMY DEFAULT, the engine's standard
 # minimum (same as the scanner default). James gave no floor.
 MIDDY_MIN_VOLUME_5M_USD = 1000.0
@@ -895,11 +900,11 @@ MIDDY_NOTES = [
     "buys. The buy filter, the four-part momentum gate, the "
     "dominance gate and the scam gate are all re-checked on the "
     "confirming scan.",
-    "Entry — market cap at least $20,000 CAD. Closest version: "
-    "the engine's market-cap field is USD and the app has no CAD "
-    "price source, so the bar is stored as $20,000 USD — a "
-    "stricter bar than $20,000 CAD (about $14,600 USD). A coin "
-    "under $20,000 CAD can never pass.",
+    "Entry — market cap at least $20,000 CAD. Enforced as $14,000 "
+    "USD — a fixed-rate conversion at 1.4296 CAD/USD (Bank of "
+    "Canada, 2026-11-24); the app has no live CAD price source, "
+    "so the USD figure is fixed and never moves with the rate. "
+    "A coin under $20,000 CAD can never pass.",
     "Entry — minimum 5-minute gain 1% and minimum 5-minute "
     "volume $1,000. REMY DEFAULTS — James gave no gain floor or "
     "volume floor; the momentum gate also requires a positive "
@@ -1666,13 +1671,24 @@ def summarize_rules(rules) -> str:
                                         "pit", "middy"):
         mcap = buy_filter.get("min_market_cap_usd", 0.0)
         max_mcap = buy_filter.get("max_market_cap_usd", 0.0)
+        if rules["kind"] == "middy":
+            # The bar is $20,000 CAD, enforced as a fixed-rate USD
+            # figure — state the CAD basis in the UI, never a bare
+            # USD number that reads as a $20,000 USD bar.
+            mcap_clause = (f", and a market cap of at least "
+                           f"${MIDDY_MIN_MCAP_CAD:,.0f} CAD (enforced as "
+                           f"${mcap:,.0f} USD at a fixed rate)"
+                           if mcap else "")
+        else:
+            mcap_clause = (f", and a market cap of at least ${mcap:,.0f}"
+                           if mcap else "")
         lines.append(
             f"Buy filter — only buy a real signal: at least "
             f"${buy_filter['min_volume_5m_usd']:,.0f} of volume in the "
             f"last 5 minutes"
             f"{', buys outnumbering sells in the last 5 minutes' if buy_filter['require_buy_dominance'] else ''}, "
             f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%"
-            f"{f', and a market cap of at least ${mcap:,.0f}' if mcap else ''}"
+            f"{mcap_clause}"
             f"{f', and at most ${max_mcap:,.0f}' if max_mcap else ''}. "
             f"A coin missing any of that is skipped, never bought on a guess.")
     lines.append(

@@ -348,6 +348,9 @@ class TestMiddyRuleset(MiddyBase):
         self.assertIn("120 seconds", summary)
         self.assertIn("20% of the starting balance", summary)
         self.assertIn("5 minutes", summary)
+        self.assertIn("market cap of at least $20,000 CAD", summary)
+        self.assertIn("enforced as $14,000 USD at a fixed rate", summary)
+        self.assertNotIn("$20,000 USD", summary)
         self.assertNotIn("Sell ladder: sell 100%", summary)
 
     def test_notes_name_the_not_enforced_rules(self):
@@ -356,6 +359,9 @@ class TestMiddyRuleset(MiddyBase):
         self.assertIn("1 second", joined)
         self.assertIn("80%", joined)
         self.assertIn("paper first", joined.lower())
+        self.assertIn("$14,000 USD", joined)
+        self.assertIn("fixed-rate", joined)
+        self.assertNotIn("$20,000 USD", joined)
 
 
 class TestMiddyHardExits(MiddyBase):
@@ -863,11 +869,26 @@ class TestMiddyIntegration(MiddyBase):
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, change_5m=0.9))
         self.assertEqual(self._buys(outcomes), [])
 
-    def test_below_20k_mcap_never_buys(self):
+    def test_below_14k_mcap_never_buys(self):
+        # The bar is $20,000 CAD, enforced as $14,000 USD (fixed
+        # rate 1.4296 CAD/USD, Bank of Canada 2026-11-24): a coin
+        # under $14,000 USD is under $20,000 CAD and never buys.
+        bot_id = self._insert_bot(rules=middy_ruleset())
+        outcomes = self._buy_twice(
+            bot_id, _middy_entry(MIDDY_MINT, 0.0106, mcap=13000))
+        self.assertEqual(self._buys(outcomes), [])
+
+    def test_19k_mcap_buys_true_20k_cad_bar(self):
+        # Firefly (2026-11-24): $19,260 USD was skipped by the old
+        # $20,000 USD bar, but $19,260 USD is about $27,500 CAD —
+        # above James's $20,000 CAD rule. A $19,000 coin passes
+        # the true CAD bar now.
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, mcap=19000))
-        self.assertEqual(self._buys(outcomes), [])
+        buys = self._buys(outcomes)
+        self.assertEqual(len(buys), 1)
+        self.assertIsNotNone(self._position(bot_id, MIDDY_MINT))
 
     def test_dominance_below_1_35_never_buys(self):
         bot_id = self._insert_bot(rules=middy_ruleset())
