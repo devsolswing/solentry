@@ -132,22 +132,36 @@ class TestHomeHeaderAndBalanceExact(HomeMockupBase):
 
 class TestHoldingsRowExact(HomeMockupBase):
     """The holdings row matches the photo: name + ticker left,
-    sparkline middle, price + amount right, 1h % far right."""
+    sparkline middle, SOL value + amount right, 1h % far right."""
 
-    def test_amount_sits_under_the_price(self):
+    def test_amount_sits_under_the_sol_value(self):
         self._choose_mode("paper")
         self._buy_mint()
-        html = self._html("/wallet")
+        # The row's SOL value needs a live SOL price: the base
+        # harness prices are a snapshot, which _dashboard_data does
+        # not use for the SOL price (feed tick first, REST when
+        # live). With SOL live at the mocked $10, 990.0990 GATE
+        # at $0.01 ($9.90099) is 0.99010 SOL.
+        live_prices = {"prices": {"SOL": {"price": 10.0,
+                                          "change_24h": 5.25,
+                                          "change_1h": 2.5}},
+                       "source": "live", "as_of": "test"}
+        with mock.patch.object(routes, "get_prices",
+                              return_value=live_prices):
+            html = self._html("/wallet")
         # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
         # (removed 2026-11-12), leaves 990.0990 GATE worth $9.90 (1% buy haircut);
-        # the price is $0.0100; 1h +2.50%.
+        # the SOL value is 0.99010 SOL; 1h +2.50%. NO unit price on
+        # the row any more (home redesign, owner 2026-11-24): the
+        # big number is the position's SOL value.
         self.assertIn("990.0990 GATE", html)
-        self.assertIn("$0.0100", html)
+        self.assertIn("0.99010 SOL", html)
+        self.assertNotIn("$0.0100", html)
         self.assertIn("$9.90", html)
         self.assertIn("+2.50%", html)
-        # The amount comes after the price and before the % — it is
-        # under the price on the right, not under the name.
-        self.assertLess(html.index("$0.0100"),
+        # The amount comes after the SOL value and before the % — it is
+        # under the SOL value on the right, not under the name.
+        self.assertLess(html.index("0.99010 SOL"),
                         html.index("990.0990 GATE"))
         self.assertLess(html.index("990.0990 GATE"),
                         html.index("+2.50%"))
@@ -211,7 +225,7 @@ class TestHoldingsWindowSizesExact(HomeMockupBase):
     def test_name_and_price_are_16px(self):
         css = _css()
         self.assertIn("font-size: 16px", _rule(css, ".holdings-name"))
-        self.assertIn("font-size: 16px", _rule(css, ".holdings-price"))
+        self.assertIn("font-size: 16px", _rule(css, ".holdings-sol"))
 
     def test_ticker_and_amount_are_12px(self):
         css = _css()
@@ -262,21 +276,27 @@ class TestSparkline1h(unittest.TestCase):
 
     def test_last_hour_from_feed_history(self):
         # Three ticks an hour apart: only the last hour (ending at
-        # the newest tick) comes back.
+        # the newest tick) comes back. GeckoTerminal is stubbed
+        # out here — this test pins the feed fallback, not the
+        # OHLCV path (the OHLCV path has its own tests).
         feed = self.Feed({GATE_MINT: [(1700000000, 1.0),
                                       (1700003600, 2.0),
                                       (1700007200, 3.0)]})
-        self.assertEqual(
-            hh.sparkline_points_1h(GATE_MINT, is_mint=True, feed=feed),
-            [2.0, 3.0])
+        with mock.patch.object(hh, "geckoterminal_closes_1h",
+                               return_value=[]):
+            self.assertEqual(
+                hh.sparkline_points_1h(GATE_MINT, is_mint=True, feed=feed),
+                [2.0, 3.0])
 
     def test_fewer_than_two_points_in_the_hour_is_empty(self):
         feed = self.Feed({GATE_MINT: [(1700000000, 1.0)]})
-        self.assertEqual(
-            hh.sparkline_points_1h(GATE_MINT, is_mint=True, feed=feed),
-            [])
-        self.assertEqual(
-            hh.sparkline_svg_1h(GATE_MINT, is_mint=True, feed=feed), "")
+        with mock.patch.object(hh, "geckoterminal_closes_1h",
+                               return_value=[]):
+            self.assertEqual(
+                hh.sparkline_points_1h(GATE_MINT, is_mint=True, feed=feed),
+                [])
+            self.assertEqual(
+                hh.sparkline_svg_1h(GATE_MINT, is_mint=True, feed=feed), "")
 
     def test_last_hour_comes_from_the_feed_chart(self):
         # No feed history: the feed-based market chart, last hour
@@ -296,7 +316,9 @@ class TestSparkline1h(unittest.TestCase):
         feed = self.Feed({GATE_MINT: [(1700000000, 1.0),
                                       (1700003600, 2.0),
                                       (1700007200, 3.0)]})
-        svg = hh.sparkline_svg_1h(GATE_MINT, is_mint=True, feed=feed)
+        with mock.patch.object(hh, "geckoterminal_closes_1h",
+                               return_value=[]):
+            svg = hh.sparkline_svg_1h(GATE_MINT, is_mint=True, feed=feed)
         self.assertIn("<svg", svg)
         self.assertIn("<polyline", svg)
         self.assertIn('stroke="#ffd700"', svg)
@@ -314,7 +336,9 @@ class TestSparklinesEndpoint(HomeMockupBase):
 
     def test_returns_svg_for_a_coin_with_recent_history(self):
         self._ingest(GATE_MINT, [10.0, 10.1, 10.2])
-        resp = self.client.get(f"/api/sparklines?coins={GATE_MINT}")
+        with mock.patch.object(hh, "geckoterminal_closes_1h",
+                               return_value=[]):
+            resp = self.client.get(f"/api/sparklines?coins={GATE_MINT}")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertTrue(data["ok"])
@@ -325,7 +349,9 @@ class TestSparklinesEndpoint(HomeMockupBase):
     def test_returns_null_without_recent_history(self):
         with mock.patch.object(
                 hh, "fetch_market_chart",
-                return_value={"points": [], "error": "test"}):
+                return_value={"points": [], "error": "test"}), \
+                mock.patch.object(hh, "geckoterminal_closes_1h",
+                                  return_value=[]):
             resp = self.client.get(f"/api/sparklines?coins={GATE_MINT}")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()

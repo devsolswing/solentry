@@ -8,8 +8,10 @@ from the stored `coin_meta` row for the mint (fetched on purchase, or
 lazily on render of a held row) — the coin's official logo from its
 metadata image URI or its DexScreener pair — and never from a
 bulk load: only coins the user holds are ever fetched. A held coin
-with no logo shows no image. Sparklines come from the live feed's
-recorded ticks only; there is no CoinGecko fallback any more.
+with no logo shows no image. Sparklines come from GeckoTerminal's
+real OHLCV candles first (the coin's recent market, true exchange
+data), falling back to the live feed's recorded ticks; there is no
+CoinGecko fallback any more.
 Everything here fails closed: any fetch failure returns None / [] /
 "", never an exception and never invented data. Token images are
 only returned after a HEAD check proves the URL serves an image,
@@ -26,7 +28,7 @@ import math
 import time
 import urllib.request
 
-from .charts import fetch_market_chart
+from .charts import (fetch_market_chart, geckoterminal_closes_1h)
 from .coin_meta import ensure_coin_meta
 from .solana import is_valid_address
 from .trenches import TOKENS_URL, _best_pair_incl_graduated, _default_get
@@ -180,16 +182,28 @@ def _last_hour(pairs) -> list:
 
 def sparkline_points_1h(coin_id: str, is_mint: bool = False,
                         feed=None, http_get=None) -> list:
-    """Real prices from the last hour for a coin's 1hr sparkline,
-    oldest first, from the live feed's recorded ticks (via the
-    feed-based market chart — the same ticks the candles are built
-    from). There is no CoinGecko fallback any more: the app lists
-    no major coins. Fewer than 2 points in the hour returns [] —
-    the page omits the sparkline (chart building) instead of
-    faking one. Any failure returns []."""
+    """Real recent prices for a coin's sparkline, oldest first.
+
+    A mint tries GeckoTerminal's real OHLCV candles first (the
+    coin's recent market — the last 12 traded 5-minute closes;
+    for a quiet coin those can span more than an hour, but every
+    point is a real traded price). When GeckoTerminal has fewer
+    than 2 closes, or the coin is not a mint, the live feed's
+    recorded ticks from the last hour are used instead. There is
+    no CoinGecko fallback any more: the app lists no major coins.
+    Fewer than 2 points returns [] — the page omits the sparkline
+    (chart building) instead of faking one. Any failure
+    returns []."""
     coin_id = (coin_id or "").strip()
     if not coin_id:
         return []
+    if is_mint:
+        try:
+            closes = geckoterminal_closes_1h(coin_id, http_get=http_get)
+        except Exception:
+            closes = []
+        if len(closes) >= 2:
+            return closes
     try:
         result = fetch_market_chart(coin_id, 1, feed=feed,
                                     http_get=http_get)
@@ -207,8 +221,9 @@ def sparkline_points_1h(coin_id: str, is_mint: bool = False,
 
 def sparkline_svg_1h(coin_id: str, is_mint: bool = False,
                      feed=None, http_get=None) -> str:
-    """The 1hr sparkline SVG for a coin, or "" when fewer than 2
-    real points exist in the last hour."""
+    """The sparkline SVG for a coin, or "" when fewer than 2 real
+    recent points exist (GeckoTerminal OHLCV, then the feed's
+    last-hour ticks)."""
     return sparkline_svg(sparkline_points_1h(
         coin_id, is_mint=is_mint, feed=feed, http_get=http_get))
 
@@ -233,25 +248,30 @@ def sparkline_points_for_coin(coin_id: str, is_mint: bool = False,
         return []
 
 
-def fetch_chain_token_balances(rpc, pubkey: str) -> tuple[list, bool]:
+def fetch_chain_token_balances(rpc, pubkey: str) -> tuple[list, bool, bool]:
     """Token balances the wallet actually holds on-chain.
 
     Reads `getTokenAccountsByOwner` (parsed) for the legacy SPL
     Token program and Token-2022, and returns
-    ([{mint, amount (base units), decimals, ui_amount}], ok) with
-    zero balances skipped. `ok` is False only when BOTH program
-    reads failed (the chain was unreachable) — a partial read still
-    reports ok=True with the balances it could read, and the
-    caller keeps its DB rows for the rest. Total failure returns
-    ([], False). `rpc` is the app's SolanaRpcClient (anything
-    with a `_call(method, params)`). A program that errors is
-    skipped. Amounts come from the chain only — never from the
-    app's DB.
+    ([{mint, amount (base units), decimals, ui_amount}], ok,
+    complete) with zero balances skipped. `ok` is False only when
+    BOTH program reads failed (the chain was unreachable) — a
+    partial read still reports ok=True with the balances it could
+    read. `complete` is True only when BOTH program reads answered:
+    only a complete read proves a coin is really gone, so the
+    caller may drop DB rows the chain does not list only when
+    complete is True; on a partial read it must keep them (a
+    flaky Token-2022 read must never hide Gate). Total failure
+    returns ([], False, False). `rpc` is the app's SolanaRpcClient
+    (anything with a `_call(method, params)`). A program that
+    errors is skipped. Amounts come from the chain only — never
+    from the app's DB.
     """
     if rpc is None or not pubkey:
-        return [], False
+        return [], False, False
     out: dict = {}
     ok = False
+    answered = 0
     for program_id in (TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID):
         try:
             result = rpc._call(
@@ -261,6 +281,7 @@ def fetch_chain_token_balances(rpc, pubkey: str) -> tuple[list, bool]:
         except Exception:
             continue
         ok = True
+        answered += 1
         for acct in (result or {}).get("value") or []:
             try:
                 info = (acct.get("account", {}).get("data", {})
@@ -284,10 +305,11 @@ def fetch_chain_token_balances(rpc, pubkey: str) -> tuple[list, bool]:
                     entry["amount"] += amount
             except (TypeError, ValueError, AttributeError):
                 continue
-    return [out[k] for k in sorted(out)], ok
+    return [out[k] for k in sorted(out)], ok, answered == 2
 
 
-def reconcile_holdings(db_rows, chain_balances) -> list:
+def reconcile_holdings(db_rows, chain_balances,
+                       chain_complete: bool = False) -> list:
     """Merge the DB's recorded holdings with the chain's truth.
 
     `db_rows` is [{coin_id, amount, avg_price}] (the app's record,
@@ -296,7 +318,11 @@ def reconcile_holdings(db_rows, chain_balances) -> list:
     AMOUNT held: a coin on-chain but missing from the DB (its buys
     were recorded as failed, e.g. Gate) is added with
     `avg_price=None` and `on_chain_only=True`; a coin in both keeps
-    its DB cost basis but takes the chain amount. DB rows the chain
+    its DB cost basis but takes the chain amount. When
+    `chain_complete` is True (both token programs answered), DB rows
+    the chain does not list are dropped — the coin is really gone,
+    so it leaves the holdings list the moment its balance hits 0.
+    When it is False (partial or failed read), DB rows the chain
     does not list are kept as-is — a partial chain read must never
     hide a holding. Returns [{coin_id, amount, avg_price,
     on_chain_only}] sorted by coin.
@@ -326,6 +352,15 @@ def reconcile_holdings(db_rows, chain_balances) -> list:
                             "avg_price": None, "on_chain_only": True}
         else:
             entry["amount"] = ui_amount
+    if chain_complete:
+        # Both programs answered: a DB row the chain does not list
+        # is a coin the wallet no longer holds — drop it so the
+        # holdings list shows only coins actually owned.
+        on_chain = {b.get("mint") for b in chain_balances or []
+                    if b.get("mint")}
+        for coin_id in list(merged):
+            if coin_id not in on_chain:
+                del merged[coin_id]
     return [merged[k] for k in sorted(merged)]
 
 
@@ -337,8 +372,9 @@ def enrich_row(row: dict, feed=None, http_get=None,
     Sets `row["image_url"]` (only when a verified real image URL
     resolves — from the stored `coin_meta` row for the mint, fetched
     on purchase or lazily here when `db` is given) and
-    `row["sparkline_svg"]` (only when at least 2 real prices exist
-    in the last hour). A row with no image or no recent history is
+    `row["sparkline_svg"]` (only when at least 2 real recent
+    prices exist — GeckoTerminal OHLCV first, then the feed's
+    last-hour ticks). A row with no image or no recent history is
     left without those keys, and the template falls back to the
     ticker-initial icon / no sparkline. Never raises; the row is
     returned unchanged on any failure.

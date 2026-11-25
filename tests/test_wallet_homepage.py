@@ -292,9 +292,17 @@ class TestWalletIsHomepage(HomeBase):
     def test_brand_link_goes_to_wallet(self):
         html = self._html("/wallet")
         self.assertIn('href="/wallet"', html)
-        # The original SolEntry logo wordmark is untouched.
-        self.assertIn('class="brand"', html)
-        self.assertIn(">SolEntry</a>", html)
+        # Home has NO topbar strip (owner, 2026-11-24 ~17:21 MST):
+        # the small top-row brand link is gone from this page only
+        # — the big fox + SolEntry header below IS the top of the
+        # page. The topbar brand link still lives on other pages.
+        self.assertNotIn('class="brand"', html)
+        self.assertNotIn('class="topbar"', html)
+        self.assertIn('home-wordmark', html)
+        self.assertIn("HOME of the $GATE", html)
+        bots = self._html("/bots")
+        self.assertIn('class="brand"', bots)
+        self.assertIn(">SolEntry</a>", bots)
 
 
 class TestCoinDetail(HomeBase):

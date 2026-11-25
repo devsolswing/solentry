@@ -66,7 +66,7 @@ h3 { font-size: 15px; margin: 14px 0 6px; }
 .fuel-chip-logo { width: 18px; height: 18px; border-radius: 50%; }
 /* $GATE fuel row (2026-11-23): trades-left count + Buy $GATE,
    under the action buttons on Home and under the wallet hero. */
-.gate-top-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0; padding: 8px 10px; background: #000; border: 2px solid #ffb300; border-radius: 10px; }
+.gate-top-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 10px 0; padding: 8px 10px; background: #000; border: 2px solid #ffb300; border-radius: 10px; }
 .gate-top-count { font-size: 15px; font-weight: 700; color: #ffd700; }
 /* $GATE package popup (2026-11-23): fixed overlay, black/gold
    card. The quote line shows the live SOL price while open. */
@@ -102,6 +102,10 @@ h3 { font-size: 15px; margin: 14px 0 6px; }
    not a wide button — it opens the same Buy $GATE popup. */
 .gate-fuel-btn { flex: 0 0 auto; width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; background: #000; border: 2px solid #ffb300; border-radius: 10px; color: #ffd700; cursor: pointer; padding: 0; }
 .gate-fuel-btn svg { width: 24px; height: 24px; display: block; }
+/* Mode pill in the fuel row (home only): "Real trading — mainnet"
+   / "Demo trading (paper)" — the mode indicator stays visible at
+   the top of the home page with the fuel, next to trades-left. */
+.home-mode-pill { flex: 0 1 auto; color: #ffd700; font-weight: 800; font-size: 11px; border: 1px solid #ffb300; border-radius: 8px; padding: 3px 7px; white-space: nowrap; }
 /* Out-of-fuel banner (2026-11-23): shown on the trade result
    page when a real trade was refused for no fuel. */
 .gate-no-fuel-banner { margin: 12px 0; padding: 12px; background: #160b08; border: 2px solid #f87171; border-radius: 10px; }
@@ -252,6 +256,18 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .one-screen { display: flex; flex-direction: column; min-height: 0; }
 .wallet-hero { margin: 4px 0 8px; }
 .wallet-hero img { width: 100%; max-height: 132px; object-fit: cover; object-position: center 30%; display: block; border-radius: 14px; border: 2px solid #ffd700; box-shadow: 0 0 22px rgba(255, 190, 0, .45); }
+/* Wallet page, compact (owner, 2026-11-24 ~17:25 MST): the same
+   black/gold theme as the new home page, laid out dense so the
+   page fits the screen — tighter cards, headings, gaps, table.
+   The topbar stays on this page (the mini-logo deletion was
+   home-only) and the Dogewifhat door art stays too. */
+.wallet-page .card { padding: 10px 12px; margin: 8px 0; }
+.wallet-page .card h2 { font-size: 16px; margin: 0 0 4px; }
+.wallet-page .cards { gap: 8px; margin: 8px 0; }
+.wallet-page .wallet-hero { margin: 4px 0 6px; }
+.wallet-page .wallet-title { color: #ffd700; font-size: 20px; margin: 6px 0 4px; }
+.wallet-page table { font-size: 12px; margin: 4px 0; }
+.wallet-page th, .wallet-page td { padding: 4px; }
 .wallet-flag { font-size: 26px; vertical-align: middle; }
 .section-title { color: #ffd700; border-bottom: 2px solid #e62e1b; padding-bottom: 4px; margin: 14px 0 8px; }
 .wallet-total { margin-top: 4px; }
@@ -586,14 +602,14 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 .home-currency-option { margin: 0; color: #ffd700; font-weight: 700; font-size: 14px; }
 .home-currency-menu .muted { margin: 4px 0 0; }
 /* Holdings rows: real token image (32px circle, gold ring) or the
-   ticker-initial icon; wide thin sparkline; price over the amount. */
+   ticker-initial icon; wide thin sparkline; SOL value over the amount. */
 .holdings-panel .coin-list { gap: 6px; }
 .coin-img { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 50%; object-fit: cover; border: 2px solid #ffb300; background: #1a0805; display: block; }
 .holdings-spark { flex: 0 0 64px; display: flex; align-items: center; }
 .holdings-spark svg { width: 64px; height: 16px; display: block; }
 .holdings-spark:empty { display: none; }
 .holdings-price-block { flex: 0 0 auto; text-align: right; min-width: 0; }
-.holdings-price { display: block; font-weight: 800; font-size: 16px; }
+.holdings-sol { display: block; font-weight: 800; font-size: 16px; }
 .holdings-value-live { display: none; }
 
 /* ------------------------------------------------------------------ */
@@ -709,8 +725,14 @@ body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-directio
 .holdings-panel { max-height: none; border: none; background: transparent; padding: 0; }
 .holdings-panel .coin-list { gap: 6px; }
 .holdings-row { font-size: 16px; padding: 6px 8px; border: none; background: transparent; border-radius: 0; }
-.holdings-row .coin-name { flex: 1 1 auto; min-width: 0; }
+.holdings-row .coin-name { flex: 1 1 auto; min-width: 0; overflow: visible; white-space: normal; }
 .holdings-name { display: block; font-size: 16px; }
+/* Holdings names render IN FULL — never truncated or cut off: the
+   global .coin-name ellipsis does not apply here; a long name
+   wraps, and a very long one (name-long) drops a step in size so
+   it still fits the row. */
+.holdings-row .holdings-name strong { overflow-wrap: anywhere; }
+.holdings-row .name-long strong { font-size: 13px; }
 .holdings-row .coin-ticker { display: block; font-size: 12px; }
 .holdings-row .coin-ico { flex: 0 0 32px; width: 32px; height: 32px; font-size: 14px; }
 .holdings-row .coin-img { flex: 0 0 32px; width: 32px; height: 32px; }
@@ -718,7 +740,7 @@ body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-directio
 .holdings-spark svg { width: 64px; height: 16px; display: block; }
 .holdings-spark:empty { display: none; }
 .holdings-price-block { flex: 0 0 auto; text-align: right; min-width: 0; }
-.holdings-price { display: block; font-weight: 800; font-size: 16px; }
+.holdings-sol { display: block; font-weight: 800; font-size: 16px; }
 .holdings-amount { display: block; font-size: 12px; margin-top: 1px; }
 .holdings-value-live { display: none; }
 .holdings-1h { flex: 0 0 auto; text-align: right; font-weight: 800; font-size: 14px; }

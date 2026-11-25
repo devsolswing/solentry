@@ -164,7 +164,12 @@ class TestPageNumbersRender(unittest.TestCase):
     def test_logged_in_pages(self):
         ids = self._make_preset_bots()
         pages = [
-            ("/wallet", 3), ("/dashboard", 4),
+            # ("/wallet", 3) is NOT here: home has no topbar strip
+            # (owner, 2026-11-24 ~17:21 MST — the big fox header is
+            # the top of the page), so no page-id chip renders on
+            # home. Page 3 is still registered; see
+            # test_home_has_no_topbar_or_page_id below.
+            ("/dashboard", 4),
             (f"/coins/{GATE_MINT}/detail", 5), ("/bots", 6),
             (f"/bots/{ids['trenches']}", 7),
             (f"/bots/{ids['trenches']}/edit", 8),
@@ -174,6 +179,17 @@ class TestPageNumbersRender(unittest.TestCase):
         ]
         for path, number in pages:
             self._assert_page_id(self._html(self.client, path), number)
+
+    def test_home_has_no_topbar_or_page_id(self):
+        # Home-only topbar removal (owner, 2026-11-24 ~17:21 MST):
+        # no topbar strip, no mini brand link, no page-id chip —
+        # the big fox + SolEntry header is the top of the page.
+        # Every other page keeps its topbar and its chip.
+        html = self._html(self.client, "/wallet")
+        self.assertNotIn('class="topbar"', html)
+        self.assertNotIn('class="brand"', html)
+        self.assertNotIn("page-id", html)
+        self.assertIn("HOME of the $GATE", html)
 
     def test_coin_popup_keeps_the_dashboard_number(self):
         self._assert_page_id(self._html(self.client, f"/coins/{GATE_MINT}"),

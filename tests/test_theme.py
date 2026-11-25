@@ -148,7 +148,11 @@ class TestOneTheme(ThemeBase):
         for path in ("/dashboard", "/bots", "/wallet", "/logs",
                      "/settings"):
             html = self._html(path)
-            self.assertIn('class="topbar"', html, path)
+            # Home has NO topbar strip (owner, 2026-11-24 ~17:21
+            # MST): the big fox header IS the top of the home page.
+            # Every other main page keeps the topbar.
+            if path != "/wallet":
+                self.assertIn('class="topbar"', html, path)
             self.assertIn("hud-item", html, path)
 
 

@@ -8,9 +8,12 @@ while prices come from DexScreener, a different source.
   (rpc_client_for_url / rpc_client_for_config / the silent loop's
   default rpc_factory).
 - fetch_chain_token_balances reports whether the chain was reached:
-  (balances, ok); ok is False only when BOTH program reads failed.
-- _reconciled_real_holdings returns (rows, chain_ok); a failed read
-  falls back to DB rows AND reports chain_ok False.
+  (balances, ok, complete); ok is False only when BOTH program
+  reads failed, and complete is True only when BOTH answered —
+  only a complete read proves a coin is really gone.
+- _reconciled_real_holdings returns (rows, chain_ok,
+  chain_complete); a failed read falls back to DB rows AND
+  reports chain_ok False.
 - _coin_rows returns (rows, balances_stale); stale only in real mode
   on a failed chain read.
 - The real-mode header total is SOL + holdings at the rows' own
@@ -117,26 +120,29 @@ class TestRpcClientForUrl(unittest.TestCase):
 class TestFetchChainTokenBalancesChecked(unittest.TestCase):
     def test_both_programs_fail_is_not_ok(self):
         rpc = ChainRpc(fail=True)
-        balances, ok = home_holdings.fetch_chain_token_balances(
+        balances, ok, complete = home_holdings.fetch_chain_token_balances(
             rpc, "WALLET")
         self.assertEqual(balances, [])
         self.assertFalse(ok)
+        self.assertFalse(complete)
 
-    def test_partial_read_is_ok(self):
+    def test_partial_read_is_ok_but_not_complete(self):
         rpc = ChainRpc(spl=_token_accounts(10.0),
                        token_2022=RuntimeError("2022 down"))
-        balances, ok = home_holdings.fetch_chain_token_balances(
+        balances, ok, complete = home_holdings.fetch_chain_token_balances(
             rpc, "WALLET")
         self.assertTrue(ok)
+        self.assertFalse(complete)
         self.assertEqual(len(balances), 1)
         self.assertEqual(balances[0]["ui_amount"], 10.0)
 
-    def test_success_is_ok(self):
+    def test_success_is_ok_and_complete(self):
         rpc = ChainRpc(spl=_token_accounts(10.0),
                        token_2022=_token_accounts(2.5))
-        balances, ok = home_holdings.fetch_chain_token_balances(
+        balances, ok, complete = home_holdings.fetch_chain_token_balances(
             rpc, "WALLET")
         self.assertTrue(ok)
+        self.assertTrue(complete)
         self.assertEqual(len(balances), 1)
         self.assertEqual(balances[0]["ui_amount"], 12.5)
 
@@ -236,18 +242,22 @@ class TestReconciledHoldings(_RealModeBase):
         with mock.patch.object(
                 routes, "rpc_client_for_url",
                 return_value=self._chain_rpc(amount_ui=20.0)):
-            rows, chain_ok = routes._reconciled_real_holdings(
-                self.app, self.db, self.user_id)
+            rows, chain_ok, chain_complete = \
+                routes._reconciled_real_holdings(
+                    self.app, self.db, self.user_id)
         self.assertTrue(chain_ok)
+        self.assertTrue(chain_complete)
         self.assertEqual(rows[0]["amount"], 20.0)
 
     def test_failed_read_falls_back_to_db_and_reports_it(self):
         with mock.patch.object(
                 routes, "rpc_client_for_url",
                 return_value=self._chain_rpc(fail=True)):
-            rows, chain_ok = routes._reconciled_real_holdings(
-                self.app, self.db, self.user_id)
+            rows, chain_ok, chain_complete = \
+                routes._reconciled_real_holdings(
+                    self.app, self.db, self.user_id)
         self.assertFalse(chain_ok)
+        self.assertFalse(chain_complete)
         self.assertEqual(rows[0]["amount"], 10.0)
 
 
@@ -303,7 +313,11 @@ class TestDashboardTotal(_RealModeBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("0.9000 SOL", html)
         self.assertIn("90.00", html)
-        self.assertNotIn("last saved ones", html)
+        # The stale note stays in the DOM (hidden) so the 60s poll
+        # can toggle it — a fresh chain read hides it rather than
+        # removing it, so the page never claims the amounts are
+        # "last saved ones" when they are live.
+        self.assertIn("data-home-stale hidden", html)
 
     def test_stale_read_shows_the_banner_and_db_amounts(self):
         # Chain down: the rows fall back to the DB's 10 MINT

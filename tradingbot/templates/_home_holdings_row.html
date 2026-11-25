@@ -1,0 +1,24 @@
+{# One home holdings row (shared by wallet.html and the
+   /api/home-holdings refresh, so the server and the poll render
+   the same markup). Icon, name over the ticker (full name, never
+   truncated — long names wrap and shrink a step via name-long),
+   the coin's true market chart (GeckoTerminal OHLCV, then feed
+   ticks — never faked), the position value in SOL to 5 decimals
+   (00.00000) with the amount held underneath it, and the 1h %
+   far right. NO unit price anywhere on the row: the big number
+   is the position's SOL value. The hidden USD value stays so
+   live.js still recomputes the paper portfolio total from it.
+   data-coin-id lets the 60s holdings refresh match this row to
+   the server's rows (update in place, or remove it when the coin
+   is gone). #}
+<a class="coin-row holdings-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}" data-coin-id="{{ row.coin_id }}">
+  {% if row.image_url %}
+  <img class="coin-img" src="{{ row.image_url }}" alt="{{ row.name }} logo" loading="lazy">
+  {% else %}
+  <span class="coin-ico" aria-hidden="true">{{ row.ticker[:1] }}</span>
+  {% endif %}
+  <span class="coin-name"><span class="holdings-name{% if row.name|length > 18 %} name-long{% endif %}"><strong>{{ row.name }}</strong><span class="coin-ticker muted">({{ row.ticker }})</span></span></span>
+  <span class="holdings-spark" data-sparkline-coin="{{ row.coin_id }}" aria-hidden="true">{% if row.sparkline_svg %}{{ row.sparkline_svg|safe }}{% endif %}</span>
+  <span class="holdings-price-block"><span class="holdings-sol" data-live-value-sol="{{ row.coin_id }}" data-live-amount="{{ row.held }}">{% if row.value_sol is defined and row.value_sol is not none %}{{ "%.5f"|format(row.value_sol) }} SOL{% else %}—{% endif %}</span><span class="holdings-amount muted">{{ "{:,.4f}".format(row.held) }} {{ row.ticker }}</span><span class="holdings-value-live" hidden><span data-live-value="{{ row.coin_id }}" data-live-amount="{{ row.held }}">{% if row.value is defined and row.value is not none %}${{ "%.2f"|format(row.value) }}{% else %}value unavailable{% endif %}</span></span></span>
+  <span class="holdings-1h{% if row.change_1h is defined and row.change_1h is not none %} {{ 'up' if row.change_1h >= 0 else 'down' }}{% else %} muted{% endif %}"><span data-live-change-1h="{{ row.coin_id }}" data-live-decimals="2">{% if row.change_1h is defined and row.change_1h is not none %}{% if row.change_1h >= 0 %}+{% endif %}{{ "%.2f"|format(row.change_1h) }}%{% else %}—{% endif %}</span></span>
+</a>

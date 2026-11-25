@@ -444,31 +444,38 @@ def _real_holdings_view(db, user_id: int) -> list:
     return [merged[k] for k in sorted(merged)]
 
 
-def _reconciled_real_holdings(app, db, user_id: int) -> tuple[list, bool]:
+def _reconciled_real_holdings(app, db, user_id: int) -> tuple[list, bool, bool]:
     """Real holdings with on-chain balances merged in (devnet).
 
     The chain is the truth for the AMOUNT held: a coin the wallet
     holds on-chain but the DB never recorded (its buys were
     recorded as failed, e.g. Gate) appears with avg_price=None and
-    on_chain_only=True. Returns (holdings, chain_ok): chain_ok is
-    False only when the wallet exists and the on-chain read failed
-    — then the rows are the DB's last saved amounts and the page
-    MUST say so (balances_stale, shown on Home), never present
-    them as live. Any failure (no wallet, RPC down, partial
-    read) falls back to the DB view alone — a chain problem must
-    never hide a recorded holding. Nothing here writes to the DB;
-    the reconciliation is per-render only."""
+    on_chain_only=True. Returns (holdings, chain_ok,
+    chain_complete): chain_ok is False only when the wallet exists
+    and the on-chain read failed — then the rows are the DB's last
+    saved amounts and the page MUST say so (balances_stale, shown
+    on Home), never present them as live. chain_complete is True
+    only when BOTH token programs answered: only then does the
+    reconciliation drop DB rows the chain does not list, so a coin
+    leaves the holdings list the moment its balance hits 0 — while
+    a partial read keeps every DB row (a flaky Token-2022 read
+    must never hide Gate). Any failure (no wallet, RPC down,
+    partial read) falls back to the DB view alone — a chain
+    problem must never hide a recorded holding. Nothing here
+    writes to the DB; the reconciliation is per-render only."""
     db_rows = _real_holdings_view(db, user_id)
     try:
         wallet = _wallet(app, user_id)
         if not wallet:
-            return db_rows, True
+            return db_rows, True, False
         client = rpc_client_for_url(_cfg(app), _cfg(app).rpc_url)
-        chain, chain_ok = fetch_chain_token_balances(
+        chain, chain_ok, chain_complete = fetch_chain_token_balances(
             client, wallet["pubkey"])
-        return reconcile_holdings(db_rows, chain), chain_ok
+        return reconcile_holdings(
+            db_rows, chain, chain_complete=chain_complete), chain_ok, \
+            chain_complete
     except Exception:
-        return db_rows, False
+        return db_rows, False, False
 
 
 def _record_real_holding(db, user_id: int, mint: str, coin_amount: float,
@@ -579,7 +586,11 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     unchanged. In devnet
     mode with `app`, holdings are reconciled with the wallet's
     on-chain token balances first (see _reconciled_real_holdings),
-    so coins the chain holds but the DB never recorded appear.
+    so coins the chain holds but the DB never recorded appear —
+    and, when BOTH token programs answered, coins the chain no
+    longer lists are dropped, so the list shows only coins
+    actually owned and a coin leaves it the moment its balance
+    hits 0. A partial or failed chain read keeps every DB row.
     Every row shows the coin's real official name + ticker only:
     the trenches feed names it, else the stored `coin_meta` row
     (fetched on purchase, or lazily here), else the on-chain
@@ -597,8 +608,9 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     balances_stale = False
     if mode == "devnet":
         if app is not None:
-            held_rows, chain_ok = _reconciled_real_holdings(
-                app, db, user_id)
+            held_rows, chain_ok, _chain_complete = \
+                _reconciled_real_holdings(
+                    app, db, user_id)
             held = {h["coin_id"]: h for h in held_rows}
             # The chain read failed: the amounts below are the DB's
             # last saved ones, not live — the page must say so (the
@@ -2389,6 +2401,20 @@ def register_routes(app: Flask) -> None:
         popup_held_sol, popup_sell_prefill = (
             _sell_prefill_for_row(popup_coin, sol_price)
             if popup_coin is not None else (None, None))
+        # Each row's position value in SOL (the home page shows
+        # the SOL value to 5 decimals, never the unit price): the
+        # row's USD value — live price, or cost when there is no
+        # live price, the same rule as holdings_value above —
+        # divided by the live SOL price. No SOL price, or no value
+        # at all, leaves the row with value_sol None ("—" on the
+        # page, never $0).
+        for r in coin_rows:
+            eff = r["value"]
+            if eff is None and r.get("avg_price") is not None:
+                eff = r["held"] * r["avg_price"]
+            r["value_sol"] = (eff / sol_price
+                              if eff is not None and sol_price
+                              else None)
         return {"wallet": wallet if mode == "devnet" else None,
                 "receive_address": wallet["pubkey"] if wallet else "",
                 "real_sol": real_sol,
@@ -2972,13 +2998,15 @@ def register_routes(app: Flask) -> None:
     @app.route("/api/sparklines")
     @login_required
     def sparklines_snapshot():
-        """Fresh 1hr sparklines for the home page's holdings rows.
+        """Fresh sparklines for the home page's holdings rows.
         The home page polls this every 60 seconds so each coin's
-        1hr chart keeps moving with the live feed. Returns
-        {ok: True, sparklines: {coin_id: svg-or-null}}. A coin with
-        fewer than 2 real points in the last hour returns null —
-        the page leaves its sparkline alone (chart building),
-        never faked."""
+        chart keeps moving with the live market instead of sitting
+        static from page load. Each chart is real market data
+        (GeckoTerminal OHLCV first, then the feed's recorded
+        ticks). Returns {ok: True, sparklines: {coin_id:
+        svg-or-null}}. A coin with fewer than 2 real recent
+        points returns null — the page leaves its sparkline alone
+        (chart building), never faked."""
         coins = [c.strip()
                  for c in (request.args.get("coins") or "").split(",")
                  if c.strip()]
@@ -2989,6 +3017,45 @@ def register_routes(app: Flask) -> None:
             svg = sparkline_svg_1h(coin_id, is_mint=is_mint, feed=feed)
             out[coin_id] = svg or None
         return jsonify({"ok": True, "sparklines": out, "as_of": _now()})
+
+    @app.route("/api/home-holdings")
+    @login_required
+    def home_holdings_snapshot():
+        """Fresh home holdings rows for the home page's 60-second
+        auto-refresh: the same rows _dashboard_data renders, with
+        each row's HTML plus its live bits (SOL value text, 1h %,
+        sparkline SVG). The page updates rows in place when the
+        coin set is unchanged, and inserts / removes rows when it
+        changes — so a coin leaves the list the moment its balance
+        hits 0, without a manual reload. A coin with no SOL value
+        reports value_sol null ("—" on the page, never $0). The
+        order matches the home page ($GATE first). Returns
+        {ok: True, balances_stale, rows: [{coin_id, html,
+        value_sol, change_1h, sparkline_svg}]}."""
+        user = _current_user(app)
+        data = _dashboard_data(app, user, include_trenches=False,
+                               chart_range="1d")
+        coin_rows = data["coin_rows"]
+        gate_mint = gate_fuel_mod.gate_mint(_cfg(app))
+        if gate_mint:
+            coin_rows = sorted(
+                coin_rows,
+                key=lambda r: 0 if r.get("coin_id") == gate_mint else 1)
+        rows = []
+        for row in coin_rows:
+            value_sol = row.get("value_sol")
+            rows.append({
+                "coin_id": row["coin_id"],
+                "html": render_template("_home_holdings_row.html",
+                                        row=row),
+                "value_sol": (f"{value_sol:.5f} SOL"
+                              if value_sol is not None else None),
+                "change_1h": row.get("change_1h"),
+                "sparkline_svg": row.get("sparkline_svg") or None,
+            })
+        return jsonify({"ok": True,
+                        "balances_stale": data["balances_stale"],
+                        "rows": rows, "as_of": _now()})
 
     sock = app.config["SOCK"]
 

@@ -78,7 +78,8 @@ class TestHomeRebuildPhotoOrder(HomeMockupBase):
     def test_sections_in_photo_order(self):
         self._choose_mode("paper")
         html = self._html("/wallet")
-        order = ("home-logo", "home-actions-row", "home-total",
+        order = ("home-logo", "home-actions-row", "gate-top-row",
+                 "home-total",
                  "HOLDINGS", "holdings-panel", "home-logs-link",
                  "trenches-card")
         indices = [html.index(part) for part in order]
@@ -90,6 +91,10 @@ class TestHomeRebuildPhotoOrder(HomeMockupBase):
         self._choose_mode("paper")
         html = self._html("/wallet")
         self.assertNotIn('class="home-top"', html)
+        # Home has NO topbar strip at all (owner, 2026-11-24
+        # ~17:21 MST): the big fox header is the top of the page.
+        self.assertNotIn('class="topbar"', html)
+        self.assertNotIn('class="brand"', html)
         self.assertLess(html.index("home-logo"),
                         html.index("home-actions-row"))
 
@@ -146,17 +151,30 @@ class TestHomeRebuildNavigation(HomeMockupBase):
              "value": 9.63, "is_mint": False,
              "image_url": None, "sparkline_svg": ""},
         ]
+        # The row's SOL value needs a live SOL price: the base
+        # harness prices are a snapshot, which _dashboard_data does
+        # not use for the SOL price (feed tick first, REST when
+        # live). With SOL live at the mocked $10, the Pepe row's
+        # $0.90 is 0.09000 SOL.
+        live_prices = {"prices": {"SOL": {"price": 10.0,
+                                          "change_24h": 5.25,
+                                          "change_1h": 2.5}},
+                       "source": "live", "as_of": "test"}
         with mock.patch.object(routes, "_coin_rows",
-                               return_value=(rows, False)):
+                              return_value=(rows, False)), \
+                mock.patch.object(routes, "get_prices",
+                                  return_value=live_prices):
             self._choose_mode("paper")
             html = self._html("/wallet")
         self.assertIn("/coins/PEPE/detail", html)
         self.assertIn("/coins/SOL/detail", html)
         # The Pepe row shows its real (fabricated) data, never
-        # the photo's mockup price.
+        # the photo's mockup price — as its SOL value now, not a
+        # unit price (home redesign, owner 2026-11-24).
         self.assertIn("Pepe", html)
         self.assertIn("(PEPE)", html)
-        self.assertIn("$0.00000731", html)
+        self.assertIn("0.09000 SOL", html)
+        self.assertNotIn("$0.00000731", html)
         self.assertIn("-1.23%", html)
         self.assertNotIn("$0.00001234", html)
 

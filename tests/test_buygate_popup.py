@@ -69,10 +69,14 @@ class _FakeRpc:
     $GATE token balance, and a canned SOL balance."""
 
     def __init__(self, curves=None, gate_tokens=0.0,
-                 balance_lamports=10 * LAMPORTS_PER_SOL):
+                 balance_lamports=10 * LAMPORTS_PER_SOL,
+                 extra_tokens=None):
         self._curves = curves or {}
         self._gate_tokens = gate_tokens
         self._balance = balance_lamports
+        # Extra chain-backed token balances {mint: ui_amount},
+        # listed under the SPL program alongside Gate.
+        self._extra_tokens = dict(extra_tokens or {})
 
     def get_account_info(self, pubkey):
         return self._curves.get(pubkey)
@@ -88,14 +92,22 @@ class _FakeRpc:
         program = (params[1] or {}).get("programId")
         if program != home_holdings_mod.TOKEN_PROGRAM_ID:
             return {"value": []}
-        if self._gate_tokens <= 0:
-            return {"value": []}
-        base = int(self._gate_tokens * TOKEN_BASE)
-        return {"value": [{
-            "account": {"data": {"parsed": {"info": {
-                "mint": GATE,
-                "tokenAmount": {"amount": str(base), "decimals": 6,
-                                "uiAmount": self._gate_tokens}}}}}}]}
+        accounts = []
+        if self._gate_tokens > 0:
+            base = int(self._gate_tokens * TOKEN_BASE)
+            accounts.append({
+                "account": {"data": {"parsed": {"info": {
+                    "mint": GATE,
+                    "tokenAmount": {"amount": str(base), "decimals": 6,
+                                    "uiAmount": self._gate_tokens}}}}}})
+        for mint, ui_amount in self._extra_tokens.items():
+            base = int(ui_amount * TOKEN_BASE)
+            accounts.append({
+                "account": {"data": {"parsed": {"info": {
+                    "mint": mint,
+                    "tokenAmount": {"amount": str(base), "decimals": 6,
+                                    "uiAmount": ui_amount}}}}}})
+        return {"value": accounts}
 
 
 def _rpc_curves(curve_data=None, fee_bps=100):
@@ -755,7 +767,13 @@ class TestWalletFuelRow(unittest.TestCase):
         grant_fuel(db, self.user_id, 100)
         # A second holding whose mint sorts BEFORE Gate's
         # alphabetically: without the $GATE-first rule it would
-        # list first. Gate must still come first.
+        # list first. Gate must still come first. The second
+        # holding is chain-backed too: the home redesign drops
+        # DB-only rows on a complete chain read (holdings truth is
+        # the chain), so a DB row with no chain balance would not
+        # list at all — the ordering test needs both holdings
+        # on-chain. (The rpc patches read self.rpc at call time,
+        # so reassigning it here takes effect for the GET.)
         other = "11111111111111111111111111111111"
         self.mint_prices[other] = 0.000001
         self.mint_identities[other] = {"name": "System", "symbol": "SYS"}
@@ -764,6 +782,9 @@ class TestWalletFuelRow(unittest.TestCase):
             "avg_price) VALUES (?, ?, ?, ?)",
             (self.user_id, other, 5.0, 0.000001))
         db.commit()
+        self.rpc = _FakeRpc(curves=_rpc_curves(_gate_curve()),
+                            gate_tokens=1000000.0,
+                            extra_tokens={other: 5.0})
         html = self.client.get("/wallet").get_data(as_text=True)
         self.assertLess(html.index("/coins/" + GATE),
                         html.index("/coins/" + other))
@@ -771,9 +792,20 @@ class TestWalletFuelRow(unittest.TestCase):
         self.assertIn("Buy $GATE", html)
         self.assertIn("trades left", html)
         self.assertIn("data-gate-fuel-count", html)
-        # The topbar chip shows the ledger count (100).
-        self.assertIn("fuel-chip", html)
-        self.assertIn("Trades Left", html)
+        # The fuel row sits under the action buttons, above the
+        # balance card (owner, 2026-11-24 ~17:22 MST): top of the
+        # page, never buried.
+        self.assertLess(html.index("home-actions-row"),
+                        html.index("gate-top-row"))
+        self.assertLess(html.index("gate-top-row"),
+                        html.index("home-total"))
+        # Home has NO topbar strip any more (owner, 2026-11-24
+        # ~17:21 MST), so the topbar chip lives on other pages:
+        # the same ledger count (100) shows in the Bots topbar.
+        self.assertNotIn('class="topbar"', html)
+        bots = self.client.get("/bots").get_data(as_text=True)
+        self.assertIn("fuel-chip", bots)
+        self.assertIn("Trades Left", bots)
 
     def test_mode_switch_is_gone(self):
         """Mode is locked at sign-in: no switch form, no /mode

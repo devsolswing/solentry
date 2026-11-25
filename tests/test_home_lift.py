@@ -249,11 +249,13 @@ class TestHomeLiftLayout(HomeLiftBase):
         self.assertNotIn('href="/pnl"', html)
         # The total and the 24h change still show.
         self.assertIn("TOTAL PORTFOLIO VALUE", html)
-        # No snapshots yet, so no candles — the page says so
-        # instead of drawing a chart, and there is no toggle to
-        # switch (the toggle appears once candles exist; see
-        # test_candles.py).
-        self.assertIn("Not enough history yet", html)
+        # No snapshots yet, so no candles — the page says history
+        # recording started today instead of drawing a chart, and
+        # there is no toggle to switch (the toggle appears once
+        # candles exist; see test_candles.py). The "Not enough
+        # history yet for candles in this range" copy is for
+        # snapshots that exist but are too few to candle.
+        self.assertIn("History recording started today", html)
         self.assertNotIn('data-chart-toggle', html)
 
 

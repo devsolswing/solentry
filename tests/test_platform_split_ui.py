@@ -725,7 +725,13 @@ class TestHud(SplitBase):
             # No mode switch anywhere now (mode is locked at
             # sign-in): the topbar shows the fuel chip instead.
             self.assertNotIn('action="/mode"', html, path)
-            self.assertIn("fuel-chip", html, path)
+            if path == "/wallet":
+                # Home has no topbar (owner, 2026-11-24 ~17:21
+                # MST): the fuel indicator lives in the gate-top-row
+                # at the top of the page, not in a topbar chip.
+                self.assertIn("gate-top-count", html, path)
+            else:
+                self.assertIn("fuel-chip", html, path)
 
     def test_hud_not_on_login_page(self):
         self.client.get("/logout")

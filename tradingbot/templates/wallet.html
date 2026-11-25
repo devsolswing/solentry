@@ -1,5 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Home — SolEntry{% endblock %}
+{# NO topbar strip on home (owner, 2026-11-24 ~17:21 MST): the
+   small top-row SolEntry mini logo is gone from this page only —
+   the big cigar-fox + SolEntry header below IS the top of the
+   page, as in the photo. This reverses the 2026-11-23 "small
+   SolEntry writing + logo at the top stays" rule FOR THE HOME
+   PAGE ONLY; every other page keeps the topbar from base.html.
+   Nothing else goes with it: the fuel indicator lives in the
+   gate-top-row below, and live.js null-guards #live-status, so
+   the feed still ticks without the topbar pill. #}
+{% block header %}{% endblock %}
 {% block content %}
 {# ================================================================== #}
 {# Home — rebuilt FROM SCRATCH to match the owner's photo    #}
@@ -12,9 +22,11 @@
 {#     PORTFOLIO VALUE, big total with the % change beside it,        #}
 {#     ≈ $ CAD, candlestick chart                                    #}
 {#   HOLDINGS: gold heading, one row per coin actually held — icon,   #}
-{#     name over the ticker, 1hr gold line chart next to the name,    #}
-{#     price over the amount held next to that, 1h % far right.      #}
-{#     Every row is a button to that coin's info page.                #}
+{#     name over the ticker in full, a true market chart next to    #}
+{#     the name, the position value in SOL to 5 decimals over the   #}
+{#     amount held next to that, 1h % far right. No unit price      #}
+{#     anywhere on the rows. Every row is a button to that coin's   #}
+{#     info page.                                                    #}
 {#   bottom nav (Home / Bots / Wallet / Settings) lives in base.html  #}
 {#     and each button goes to its page.                              #}
 {# REAL DATA ONLY: the photo's numbers (2.45 SOL, $185.20 CAD,       #}
@@ -38,18 +50,6 @@
     </div>
   </div>
 
-  {# $GATE fuel (2026-11-23): the fuel row under the action
-     buttons. Real mode: the live trades-left count from the
-     package ledger, with the Buy $GATE button beside it. Paper
-     mode: "free ~ ∞" — paper trades are free. #}
-  <div class="gate-top-row">
-    {% if mode == 'devnet' %}
-    <span class="gate-top-count"><span data-gate-fuel-count>{{ gate_fuel_trades_left if gate_fuel_trades_left is not none else '—' }}</span> trades left</span>
-    {% else %}
-    <span class="gate-top-count">free ~ ∞</span>
-    {% endif %}
-    <button class="gate-fuel-btn" type="button" data-gate-buy-open aria-label="Buy $GATE"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 9h11a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9z"/><path d="M7 9V6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v3"/><path d="M18 9l2.5-2.5"/><path d="M9 13h4"/><path d="M9 17h4"/></svg></button>
-  </div>
 
   {# Four action buttons: BUY gold with a cart icon, SELL red with a
      download icon, Send black/gold-border with a paper-plane icon,
@@ -62,6 +62,23 @@
     <button class="btn sell-btn" type="button" data-quick-trade-open data-trade="sell"><span class="home-action-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="home-action-label">SELL</span></button>
     <a class="btn ghost send-receive-btn" href="{{ url_for('wallet_send') }}"><span class="home-action-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></span><span class="home-action-label">Send</span></a>
     <button class="btn ghost send-receive-btn" type="button" data-overlay-open="home-receive-overlay"><span class="home-action-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="home-action-label">Receive</span></button>
+  </div>
+
+  {# $GATE fuel (2026-11-23): the fuel row under the action
+     buttons. Real mode: the live trades-left count from the
+     package ledger, with the Buy $GATE button beside it. Paper
+     mode: "free ~ ∞" — paper trades are free. The mode pill
+     ("Real trading — mainnet" / "Demo trading (paper)") stays
+     visible at the top of the page with the fuel, so the user
+     always knows which side they are on. #}
+  <div class="gate-top-row">
+    <span class="home-mode-pill">{{ mode_label }}</span>
+    {% if mode == 'devnet' %}
+    <span class="gate-top-count"><span data-gate-fuel-count>{{ gate_fuel_trades_left if gate_fuel_trades_left is not none else '—' }}</span> trades left</span>
+    {% else %}
+    <span class="gate-top-count">free ~ ∞</span>
+    {% endif %}
+    <button class="gate-fuel-btn" type="button" data-gate-buy-open aria-label="Buy $GATE"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 9h11a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V9z"/><path d="M7 9V6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v3"/><path d="M18 9l2.5-2.5"/><path d="M9 13h4"/><path d="M9 17h4"/></svg></button>
   </div>
 
   {# Balance window: gold-bordered card with BALANCE + duration
@@ -107,6 +124,8 @@
         <button class="btn small chart-view-toggle" type="button" data-chart-toggle aria-label="Switch chart view">📈 Line</button>
         <div class="chart-view chart-view-candles" data-chart-view="candles">{{ portfolio_candles_svg|safe }}</div>
         <div class="chart-view chart-view-line hidden" data-chart-view="line">{{ portfolio_line_svg|safe }}</div>
+        {% elif not portfolio_has_data %}
+        <p class="muted small">History recording started today — the chart fills in as the app runs.</p>
         {% else %}
         <p class="muted small">Not enough history yet for candles in this range — snapshots build as the app runs.</p>
         {% endif %}
@@ -117,40 +136,28 @@
   {# Holdings: gold HOLDINGS heading, then one row per coin the user
      actually holds, listed IMMEDIATELY under the balance box — no
      summary lines, no borders. Rows look like the bot cards on the
-     Bots page: circular icon, name over the ticker in small type, a
-     small 1hr gold line-chart sparkline (only when at least 2 real
-     prices exist in the last hour — never faked; the span stays in
-     the DOM, empty, while the chart builds, so the 60s refresh can
-     fill it), the price per coin with the amount held underneath
-     it, and the 1-hour % change far right. EVERY row is a button
-     to that coin's info page. The price is rendered server-side
-     with decimals that fit its size (live.js ticks prices at a
-     fixed 4 decimals, which would render a sub-$0.0001 price as
-     $0.0000, so the price does not carry data-live-price; the 1h%
-     still ticks live). The per-coin $ value is kept in the DOM,
-     hidden, so live.js still recomputes the paper portfolio total
-     from it — the photo shows the amount under the price, not the
-     $ value. #}
+     Bots page: circular icon, name over the ticker in full (never
+     truncated), a true market chart next to the name (GeckoTerminal
+     OHLCV first, then the feed's recorded ticks — only when at
+     least 2 real recent prices exist, never faked; the span stays
+     in the DOM, empty, while the chart builds, so the 60s refresh
+     can fill it), the position value in SOL to 5 decimals with the
+     amount held underneath it, and the 1-hour % change far right.
+     NO unit price anywhere on the rows. EVERY row is a button to
+     that coin's info page. The SOL value is rendered server-side
+     (live.js ticks it live from the coin price and the SOL price,
+     via data-live-value-sol); the 1h% still ticks live. The
+     per-coin $ value is kept in the DOM, hidden, so live.js still
+     recomputes the paper portfolio total from it. Rows come from
+     the LIVE on-chain balances in real mode (one source of truth:
+     the chain) — a coin leaves the list the moment its balance
+     hits 0, and the 60s auto-refresh (/api/home-holdings) drops
+     or adds rows without a manual reload. #}
   <h2 class="section-title">HOLDINGS</h2>
   <div class="coin-list-panel holdings-panel">
-    {% if balances_stale %}<p class="muted small">Token balances couldn't be read from the chain right now — the amounts below are the last saved ones, not live.</p>{% endif %}
-    <div class="coin-list">
-      {% for row in coin_rows %}
-      <a class="coin-row holdings-row" href="{{ url_for('coin_detail', coin_id=row.coin_id) }}">
-        {% if row.image_url %}
-        <img class="coin-img" src="{{ row.image_url }}" alt="{{ row.name }} logo" loading="lazy">
-        {% else %}
-        <span class="coin-ico" aria-hidden="true">{{ row.ticker[:1] }}</span>
-        {% endif %}
-        <span class="coin-name"><span class="holdings-name"><strong>{{ row.name }}</strong><span class="coin-ticker muted">({{ row.ticker }})</span></span></span>
-        <span class="holdings-spark" data-sparkline-coin="{{ row.coin_id }}" aria-hidden="true">{% if row.sparkline_svg %}{{ row.sparkline_svg|safe }}{% endif %}</span>
-        <span class="holdings-price-block"><span class="holdings-price">{% if row.price is not none %}{% if row.price >= 1 %}${{ "{:,.2f}".format(row.price) }}{% elif row.price >= 0.01 %}${{ "%.4f"|format(row.price) }}{% else %}${{ "%.8f"|format(row.price) }}{% endif %}{% else %}—{% endif %}</span><span class="holdings-amount muted">{{ "{:,.4f}".format(row.held) }} {{ row.ticker }}</span><span class="holdings-value-live" hidden><span data-live-value="{{ row.coin_id }}" data-live-amount="{{ row.held }}">{% if row.value is not none %}${{ "%.2f"|format(row.value) }}{% else %}value unavailable{% endif %}</span></span></span>
-        <span class="holdings-1h{% if row.change_1h is not none %} {{ 'up' if row.change_1h >= 0 else 'down' }}{% else %} muted{% endif %}"><span data-live-change-1h="{{ row.coin_id }}" data-live-decimals="2">{% if row.change_1h is not none %}{% if row.change_1h >= 0 %}+{% endif %}{{ "%.2f"|format(row.change_1h) }}%{% else %}—{% endif %}</span></span>
-      </a>
-      {% endfor %}
-      {% if not coin_rows %}
-      <p class="muted">You hold no coins in {{ mode_label }} yet — buy one below.</p>
-      {% endif %}
+    <p class="muted small" data-home-stale{% if not balances_stale %} hidden{% endif %}>Token balances couldn't be read from the chain right now — the amounts below are the last saved ones, not live.</p>
+    <div class="coin-list" data-home-holdings-list>
+{% include "_home_holdings_rows.html" %}
     </div>
   </div>
 

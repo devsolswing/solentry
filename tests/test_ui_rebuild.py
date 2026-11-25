@@ -310,7 +310,12 @@ class TestHomePage(UiBase):
         # No mode switch anywhere now (mode is locked at sign-in):
         # the topbar shows the fuel chip instead of a switch form.
         self.assertNotIn('action="/mode"', html)
-        self.assertIn("fuel-chip", html)
+        # The fuel indicator on home is the gate-top-row at the top
+        # of the page (the topbar chip lives on other pages — home
+        # has no topbar, owner 2026-11-24 ~17:21 MST). Paper mode
+        # shows "free ~ ∞" there.
+        self.assertIn("gate-top-count", html)
+        self.assertIn("free ~ ∞", html)
 
     def test_bottom_nav_uses_svg_icons(self):
         # The bottom nav uses clean inline SVG icons (house, robot,
@@ -568,6 +573,33 @@ class TestWalletDetails(UiBase):
         self.assertIn("🇨🇦", html)
         self.assertNotIn("Send history", html)
         self.assertNotIn("Platform wallets", html)
+
+    def test_details_same_theme_as_home_compact(self):
+        # Wallet page redesign (owner, 2026-11-24 ~17:25 MST):
+        # same black/gold theme as the new home page, laid out
+        # COMPACT — dense, fits the screen. Clean gold headings
+        # (no emoji), compact wallet-page scope, fuel row + mode
+        # banner at the top. The topbar stays on this page (the
+        # mini-logo deletion was home-only) and the Dogewifhat
+        # door art stays too.
+        for mode in ("paper", "devnet"):
+            self._choose_mode(mode)
+            html = self._html("/wallet/details")
+            self.assertIn("wallet-page", html)
+            self.assertIn("wallet-title", html)
+            self.assertIn("Your wallet", html)
+            self.assertIn('class="topbar"', html)
+            self.assertIn('class="brand"', html)
+            self.assertIn("Dogewifhat walking through a door", html)
+            self.assertIn("gate-top-row", html)
+            self.assertIn("mode-banner", html)
+            for emoji in ("💰", "📄", "🫧", "⬆", "↩", "♻"):
+                self.assertNotIn(emoji, html)
+        css = open("tradingbot/static/style.css").read()
+        for token in (".wallet-page .card {",
+                      ".wallet-page .card h2 {",
+                      ".wallet-page .wallet-title {"):
+            self.assertIn(token, css, f"missing {token} in CSS")
 
 
 class TestQuickTradeShared(UiBase):

@@ -1,11 +1,13 @@
 /* Live prices over the app's own WebSocket (/ws/live), with a REST
    fallback. Pages mark the numbers they want kept live with data
    attributes — live.js subscribes to exactly those coins, then
-   updates prices, holding values, P&L and 1h/24h % as validated
-   ticks arrive. Every tick carries its source and time: the status
-   pill in the topbar shows both, and each updated node gets them
-   as a tooltip. A tick the server rejected never arrives here.
-
+   updates prices, holding values (USD and SOL), P&L and 1h/24h %
+   as validated ticks arrive. Every tick carries its source and
+   time: the status pill in the topbar shows both, and each updated
+   node gets them as a tooltip. A tick the server rejected never
+   arrives here. The home page also re-fetches its holdings list
+   every 60 seconds (/api/home-holdings), so a coin leaves the
+   list the moment its balance hits 0 without a manual reload.
    If the socket drops, the page says so plainly (status pill) and
    falls back to polling /api/live every 10 seconds, while the
    socket reconnects with backoff. A socket that connects but never
@@ -31,24 +33,33 @@
   var pnlNodes = collect('[data-live-pnl]');
   var ch1hNodes = collect('[data-live-change-1h]');
   var ch24hNodes = collect('[data-live-change-24h]');
+  var valueSolNodes = collect('[data-live-value-sol]');
   var totalValueEls = collect('[data-live-total-value]');
   var totalPnlEls = collect('[data-live-total-pnl]');
   var portfolioEls = collect('[data-live-total-portfolio]');
+  /* Last validated price per coin, for the SOL-value ticking
+     below (a holding's SOL value needs its coin price AND the
+     SOL price from the same feed). */
+  var lastPrices = {};
 
-  /* Holdings 1hr sparklines (home page): each coin row's small
-     chart refreshes every 60 seconds from /api/sparklines, so the
-     1hr chart keeps moving with the live feed instead of sitting
-     static from page load. A coin with fewer than 2 real points
-     in the last hour returns null -- its sparkline is left alone
+  /* Holdings sparklines (home page): each coin row's small
+     market chart refreshes every 60 seconds from /api/sparklines,
+     so the chart keeps moving with the live market instead of
+     sitting static from page load. A coin with fewer than 2 real
+     recent points returns null -- its sparkline is left alone
      (chart building), never faked. The poll stops when the page
      is hidden or closed, so it never runs in the background. */
   var sparkEls = collect('[data-sparkline-coin]');
   var SPARK_POLL_MS = 60000;
   var sparkTimer = null;
   function fetchSparklines() {
-    if (!sparkEls.length) return;
+    /* Re-collect every poll: the holdings refresh can swap rows
+       in or out, and the poll must follow the rows actually on
+       the page, not the ones from page load. */
+    var els = collect('[data-sparkline-coin]');
+    if (!els.length) return;
     var ids = [];
-    sparkEls.forEach(function (el) {
+    els.forEach(function (el) {
       ids.push(el.getAttribute('data-sparkline-coin'));
     });
     fetch('/api/sparklines?coins=' + encodeURIComponent(ids.join(',')),
@@ -56,7 +67,7 @@
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
         if (!data || !data.ok || !data.sparklines) return;
-        sparkEls.forEach(function (el) {
+        els.forEach(function (el) {
           var svg = data.sparklines[el.getAttribute('data-sparkline-coin')];
           if (typeof svg === 'string' && svg) el.innerHTML = svg;
         });
@@ -79,6 +90,119 @@
     });
     window.addEventListener('pagehide', stopSparkPoll);
   }
+
+  /* Holdings list auto-refresh (home page): every 60 seconds the
+     page re-fetches /api/home-holdings and updates the rows in
+     place (SOL value, 1h %, sparkline) when the coin set is
+     unchanged. A coin that left the server's rows (its balance
+     hit 0) is removed from the DOM, and a new coin's row is
+     inserted — so the list always shows only coins actually
+     owned, without a manual reload. Any insert / removal
+     re-collects live.js's node lists and re-subscribes the
+     socket, so the new rows tick live too. The poll runs while
+     the page is visible and stops when hidden, like the
+     sparkline poll. */
+  var holdingsList = document.querySelector('[data-home-holdings-list]');
+  var HOLDINGS_POLL_MS = 60000;
+  var holdingsTimer = null;
+  function refreshLiveCollections() {
+    priceNodes = collect('[data-live-price]');
+    valueNodes = collect('[data-live-value]');
+    pnlNodes = collect('[data-live-pnl]');
+    ch1hNodes = collect('[data-live-change-1h]');
+    ch24hNodes = collect('[data-live-change-24h]');
+    valueSolNodes = collect('[data-live-value-sol]');
+    totalValueEls = collect('[data-live-total-value]');
+    totalPnlEls = collect('[data-live-total-pnl]');
+    portfolioEls = collect('[data-live-total-portfolio]');
+    sparkEls = collect('[data-sparkline-coin]');
+    coins = {};
+    priceNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-price')); });
+    valueNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-value')); });
+    pnlNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-pnl')); });
+    ch1hNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-change-1h')); });
+    ch24hNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-change-24h')); });
+    valueSolNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-value-sol')); });
+    if (valueSolNodes.length) addCoin('SOL');
+    if (chart && chart.dataset.coinId) addCoin(chart.dataset.coinId);
+    coinList = Object.keys(coins);
+    if (ws && ws.readyState === 1) {
+      try { ws.send(JSON.stringify({ subscribe: coinList })); } catch (e) { /* next tick resubscribes */ }
+    }
+    fetchSnapshot();
+  }
+  function fetchHomeHoldings() {
+    if (!holdingsList) return;
+    fetch('/api/home-holdings', { credentials: 'same-origin' })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (!data || !data.ok || !Array.isArray(data.rows)) return;
+        var byId = {};
+        data.rows.forEach(function (r) { byId[r.coin_id] = r; });
+        var changed = false;
+        var domRows = holdingsList.querySelectorAll('[data-coin-id]');
+        for (var i = 0; i < domRows.length; i++) {
+          if (!byId[domRows[i].getAttribute('data-coin-id')]) {
+            domRows[i].remove();
+            changed = true;
+          }
+        }
+        data.rows.forEach(function (r) {
+          var el = holdingsList.querySelector(
+            '[data-coin-id="' + r.coin_id + '"]');
+          if (el) {
+            var solEl = el.querySelector('[data-live-value-sol]');
+            if (solEl && typeof r.value_sol === 'string') {
+              solEl.textContent = r.value_sol;
+            }
+            var pctWrap = el.querySelector('.holdings-1h');
+            var pctEl = el.querySelector('[data-live-change-1h]');
+            if (pctEl && typeof r.change_1h === 'number') {
+              pctEl.textContent = fmtPct(r.change_1h, 2);
+              if (pctWrap) {
+                pctWrap.classList.remove('up', 'down', 'muted');
+                pctWrap.classList.add(r.change_1h >= 0 ? 'up' : 'down');
+              }
+            }
+            var sparkEl = el.querySelector('[data-sparkline-coin]');
+            if (sparkEl && typeof r.sparkline_svg === 'string'
+                && r.sparkline_svg) {
+              sparkEl.innerHTML = r.sparkline_svg;
+            }
+            return;
+          }
+          if (typeof r.html === 'string' && r.html) {
+            holdingsList.insertAdjacentHTML('beforeend', r.html);
+            changed = true;
+          }
+        });
+        var emptyEl = holdingsList.querySelector('[data-home-empty]');
+        if (emptyEl) emptyEl.hidden = data.rows.length > 0;
+        var staleEl = document.querySelector('[data-home-stale]');
+        if (staleEl) staleEl.hidden = !data.balances_stale;
+        if (changed) {
+          refreshLiveCollections();
+          startSparkPoll();
+        }
+      })
+      .catch(function () { /* next poll retries; last rows stand */ });
+  }
+  function startHoldingsPoll() {
+    if (holdingsTimer) return;
+    fetchHomeHoldings();
+    holdingsTimer = setInterval(fetchHomeHoldings, HOLDINGS_POLL_MS);
+  }
+  function stopHoldingsPoll() {
+    if (holdingsTimer) { clearInterval(holdingsTimer); holdingsTimer = null; }
+  }
+  if (holdingsList) {
+    startHoldingsPoll();
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) stopHoldingsPoll();
+      else startHoldingsPoll();
+    });
+    window.addEventListener('pagehide', stopHoldingsPoll);
+  }
   var chart = document.getElementById('live-chart');
   var statusEl = document.getElementById('live-status');
 
@@ -90,6 +214,10 @@
   pnlNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-pnl')); });
   ch1hNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-change-1h')); });
   ch24hNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-change-24h')); });
+  valueSolNodes.forEach(function (n) { addCoin(attrOf(n, 'data-live-value-sol')); });
+  /* A holding's SOL value needs the SOL price too, so the feed's
+     SOL tick is subscribed whenever a value-sol node exists. */
+  if (valueSolNodes.length) addCoin('SOL');
   if (chart && chart.dataset.coinId) addCoin(chart.dataset.coinId);
   var coinList = Object.keys(coins);
   if (coinList.length === 0) return;  /* nothing live on this page */
@@ -121,6 +249,26 @@
       ? 1 : parseInt(decimals, 10);
     if (isNaN(d)) d = 1;
     return (v >= 0 ? '+' : '') + v.toFixed(d) + '%';
+  }
+  function fmtSol(v) { return v.toFixed(5) + ' SOL'; }
+  /* A holding's SOL value ticks live too: amount × coin price ÷
+     the SOL price. The SOL price comes from the feed's SOL tick
+     (subscribed whenever a value-sol node exists); until the
+     first SOL tick arrives the 60s holdings refresh keeps the
+     values right. A SOL tick recomputes every row; a coin tick
+     recomputes only that coin's rows. */
+  function recomputeSolValues(changedId, tick) {
+    var sol = lastPrices['SOL'];
+    if (typeof sol !== 'number' || !(sol > 0)) return;
+    valueSolNodes.forEach(function (n) {
+      var coinId = attrOf(n, 'data-live-value-sol');
+      if (changedId !== 'SOL' && coinId !== changedId) return;
+      var price = lastPrices[coinId];
+      if (typeof price !== 'number') return;
+      var amount = parseFloat(n.getAttribute('data-live-amount'));
+      if (isNaN(amount)) return;
+      setLive(n, fmtSol(amount * price / sol), tick);
+    });
   }
   function setFresh(node, stale) {
     if (stale) node.classList.add('live-stale');
@@ -212,6 +360,7 @@
     if (isNaN(asOf.getTime())) asOf = new Date();
     lastTickAt = asOf;
     lastSource = t.source || 'feed';
+    lastPrices[id] = t.price;
 
     priceNodes.forEach(function (n) {
       if (attrOf(n, 'data-live-price') !== id) return;
@@ -248,6 +397,7 @@
         && window.SolEntryTick) {
       window.SolEntryTick.apply(t.price, asOf, t.source);
     }
+    recomputeSolValues(id, t);
     recomputeTotals();
     setStatus('live', asOf);
   }

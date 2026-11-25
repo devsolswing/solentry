@@ -40,7 +40,7 @@
   </div>
 </div>
 {% endif %}
-<script>
+<script nonce="{{ csp_nonce }}">
 (function () {
   var popup = document.getElementById('gate-buy-popup');
   if (!popup) return;

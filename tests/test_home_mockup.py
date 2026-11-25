@@ -280,8 +280,10 @@ class TestFetchChainTokenBalances(unittest.TestCase):
                                         "decimals": 9,
                                         "uiAmount": 2.5}}}}}}]},
         })
-        balances, ok = hh.fetch_chain_token_balances(rpc, "WALLET")
+        balances, ok, complete = hh.fetch_chain_token_balances(
+            rpc, "WALLET")
         self.assertTrue(ok)
+        self.assertTrue(complete)
         by_mint = {b["mint"]: b for b in balances}
         self.assertEqual(
             by_mint["MINTA"]["ui_amount"], 550340693.346715)
@@ -293,7 +295,7 @@ class TestFetchChainTokenBalances(unittest.TestCase):
         rpc = FakeRpc({
             ("getTokenAccountsByOwner", None): RuntimeError("rpc down")})
         self.assertEqual(hh.fetch_chain_token_balances(rpc, "W"),
-                         ([], False))
+                         ([], False, False))
 
 
 class TestReconcileHoldings(unittest.TestCase):
@@ -513,14 +515,29 @@ class TestHomeMockupLayout(HomeMockupBase):
         resp = self._buy_mint()
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Bought", resp.get_data(as_text=True))
-        html = self._html("/wallet")
+        # The row's SOL value needs a live SOL price: the base
+        # harness prices are a snapshot, which _dashboard_data does
+        # not use for the SOL price (feed tick first, REST when
+        # live). With SOL live at the mocked $10, 990.0990 GATE
+        # at $0.01 ($9.90099) is 0.99010 SOL.
+        live_prices = {"prices": {"SOL": {"price": 10.0,
+                                          "change_24h": 5.25,
+                                          "change_1h": 2.5}},
+                       "source": "live", "as_of": "test"}
+        with mock.patch.object(routes, "get_prices",
+                              return_value=live_prices):
+            html = self._html("/wallet")
         self.assertIn("Gate", html)
         self.assertIn("(GATE)", html)
         # $10 at the mocked $0.01 feed price buys 1000 GATE: no fee
         # (removed 2026-11-12), leaves 1000.0000 GATE worth $10.00;
-        # the price is $0.0100; 1h +2.50%.
+        # the SOL value is 0.99010 SOL after the 1% buy haircut;
+        # 1h +2.50%. NO unit price on the row any more (home
+        # redesign, owner 2026-11-24): the big number is the
+        # position's SOL value.
         self.assertIn("990.0990 GATE", html)
-        self.assertIn("$0.0100", html)
+        self.assertIn("0.99010 SOL", html)
+        self.assertNotIn("$0.0100", html)
         self.assertIn("$9.90", html)
         self.assertIn("+2.50%", html)
         # The screenshot's figures are examples, never the data:

@@ -80,10 +80,14 @@ class FakeFeed:
 class FakeRpc:
     """A Solana RPC stand-in returning canned token accounts."""
 
-    def __init__(self, url, gate=True, raise_on_call=False):
+    def __init__(self, url, gate=True, raise_on_call=False,
+                 fail_programs=None):
         self.url = url
         self._gate = gate
         self._raise = raise_on_call
+        # Token programs that fail the read (a true partial read:
+        # one program answers, the other errors).
+        self._fail_programs = set(fail_programs or [])
 
     def _call(self, method, params):
         if self._raise:
@@ -91,6 +95,8 @@ class FakeRpc:
         if method != "getTokenAccountsByOwner":
             return {}
         program_id = params[1].get("programId")
+        if program_id in self._fail_programs:
+            raise Exception("rpc down")
         # Gate is a legacy SPL token: only the SPL program lists it.
         # Returning it for both programs would double the amount.
         if (self._gate and program_id ==
@@ -162,6 +168,13 @@ class WiringBase(unittest.TestCase):
             home_holdings, "_default_head",
             return_value=(404, "text/html"))
         self.hh_head_patch.start()
+        # The GeckoTerminal chart lookup must never reach the live
+        # network in these tests either: sparklines here come from
+        # the feed, or from nothing.
+        self.gt_patch = mock.patch.object(
+            home_holdings, "geckoterminal_closes_1h",
+            return_value=[])
+        self.gt_patch.start()
         home_holdings.clear_image_cache()
         signup(self.client, "alice")
         self.db = self.app.config["DB"]
@@ -170,6 +183,7 @@ class WiringBase(unittest.TestCase):
         ).fetchone()["id"]
 
     def tearDown(self):
+        self.gt_patch.stop()
         self.hh_head_patch.stop()
         self.hh_get_patch.stop()
         self.hh_meta_patch.stop()
@@ -330,7 +344,34 @@ class TestGateReconciliation(WiringBase):
         self.assertAlmostEqual(by_id[MINT]["held"], 50.0)
 
     def test_partial_chain_read_keeps_db_only_rows(self):
-        """A chain read that lists no accounts keeps DB rows as-is."""
+        """A chain read where one token program fails keeps DB rows
+        as-is — only a complete read (both programs answered) may
+        drop a row the chain does not list, so a flaky Token-2022
+        read never hides a holding."""
+        self._set_devnet()
+        self._hold_real(MINT, 50.0, 0.02)
+        feed = FakeFeed()
+        with mock.patch.object(
+                routes, "rpc_client_for_url",
+                lambda cfg, url: FakeRpc(
+                    url, gate=False,
+                    fail_programs={
+                        home_holdings.TOKEN_2022_PROGRAM_ID})):
+            rows, _stale = routes._coin_rows(
+                self.db, self.user_id, "devnet",
+                make_prices({"SOL": (10.0, 5.25, 2.5)}),
+                feed=feed, app=self.app)
+        by_id = {r["coin_id"]: r for r in rows}
+        self.assertIn(MINT, by_id)
+        self.assertNotIn(GATE_MINT, by_id)
+
+    def test_complete_empty_chain_read_drops_db_only_rows(self):
+        """A complete read that lists no accounts means the wallet
+        holds nothing — the DB-only row is an exited coin, so it
+        leaves the holdings list the moment its balance hits 0
+        (home redesign, owner 2026-11-24: holdings truth is the
+        chain). This is the drop-on-exit rule; the partial-read
+        test above is the guard that keeps it honest."""
         self._set_devnet()
         self._hold_real(MINT, 50.0, 0.02)
         feed = FakeFeed()
@@ -342,7 +383,7 @@ class TestGateReconciliation(WiringBase):
                 make_prices({"SOL": (10.0, 5.25, 2.5)}),
                 feed=feed, app=self.app)
         by_id = {r["coin_id"]: r for r in rows}
-        self.assertIn(MINT, by_id)
+        self.assertNotIn(MINT, by_id)
         self.assertNotIn(GATE_MINT, by_id)
 
     def test_gate_shows_on_home_page(self):

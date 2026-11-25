@@ -4,7 +4,10 @@ Every full page gets one stable number, in navigation order. The
 number is shown in the top-left corner of the page as a "Page N"
 label (see templates/_page_id.html, rendered from the base template
 topbar — the login page renders the same partial in its own minimal
-topbar, since it suppresses the shared header). The number comes
+topbar, since it suppresses the shared header). The home page
+(wallet) renders NO label: it has no topbar strip (owner,
+2026-11-24 ~17:21 MST), so its number shows only in the picker on
+other pages. The number comes
 from here on every page: no template hardcodes one.
 
 Popups, overlays, confirm screens and API/action endpoints are not

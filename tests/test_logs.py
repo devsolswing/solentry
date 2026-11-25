@@ -174,7 +174,10 @@ class TestPagePicker(LogsBase):
             r'href="([^"]+)"[^>]*>Page (\d+) — ([^<]+)</a>', html)
 
     def test_picker_lists_every_page_with_number_and_name(self):
-        html = self._html("/wallet")
+        # The picker lives in the topbar (_page_id.html) — home has
+        # no topbar any more (owner, 2026-11-24 ~17:21 MST), so
+        # read it from /logs, which keeps the topbar.
+        html = self._html("/logs")
         items = self._picker_items(html)
         self.assertEqual(len(items), len(PAGE_NUMBERS))
         by_number = {int(n): (name, href)
@@ -190,7 +193,10 @@ class TestPagePicker(LogsBase):
                             by_number.values()))
 
     def test_picker_entries_load_their_pages(self):
-        html = self._html("/wallet")
+        # The picker lives in the topbar (_page_id.html) — home has
+        # no topbar any more (owner, 2026-11-24 ~17:21 MST), so
+        # read it from /logs, which keeps the topbar.
+        html = self._html("/logs")
         items = {int(n): href
                  for href, n, _ in self._picker_items(html)}
         for entry in page_list():
@@ -207,7 +213,13 @@ class TestPagePicker(LogsBase):
             self.assertEqual(resp.status_code, 200, href)
             page_html = resp.get_data(as_text=True)
             # Detail pages load their list page instead, so the
-            # loaded page carries the TARGET's number.
+            # loaded page carries the TARGET's number. EXCEPT the
+            # home page: it has no topbar any more (owner,
+            # 2026-11-24 ~17:21 MST), so no "Page 3" label renders
+            # there — the link itself still loads (200 above), and
+            # the number still shows in the picker on other pages.
+            if entry["target"] == "wallet":
+                continue
             target_number = PAGE_NUMBERS[entry["target"]]
             self.assertIn(f"Page {target_number}", page_html, href)
 

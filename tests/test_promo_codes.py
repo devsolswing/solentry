@@ -164,7 +164,10 @@ class TestPromoRedeem(PromoBase):
         self.db.commit()
         html = self.client.get("/wallet").get_data(as_text=True)
         self.assertIn("data-gate-fuel-count", html)
-        self.assertIn("Trades Left", html)
+        # The home fuel row reads "N trades left" (the "Trades
+        # Left:" wording is the topbar chip on other pages — home
+        # has no topbar, owner 2026-11-24 ~17:21 MST).
+        self.assertIn("trades left", html)
         self.assertIn('data-gate-fuel-count>1000<', html)
 
 

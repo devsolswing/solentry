@@ -359,3 +359,108 @@ def fetch_trade_flow(coin_id: str, http_get=None) -> dict | None:
         return _flow_from_pair(best) if best else None
     except Exception:
         return None
+
+
+# GeckoTerminal (free, no key) — the home page's per-coin market
+# charts. Verified live 2026-11-24 for the real $GATE mint: the
+# token-pools endpoint returns its GATE / SOL pool and the OHLCV
+# endpoint returns real 5-minute candles [ts, open, high, low,
+# close, volume], newest first. The pool lookup is cached an hour
+# (a mint's pools don't move); closes are cached 120s (the home
+# page polls every 60s, so a render rarely calls the network).
+# Any failure returns None / [] — the caller falls back to the
+# feed's recorded ticks, then to no chart at all. A chart is never
+# invented, and a pool lookup that fails is cached as None so a
+# down API can't stall every render.
+GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2"
+_GT_POOL_TTL_SECONDS = 3600
+_GT_OHLCV_TTL_SECONDS = 120
+_gt_pool_cache: dict = {}
+_gt_ohlcv_cache: dict = {}
+
+
+def _gt_pick_pool(pools: list) -> str | None:
+    """The pool address to chart a mint from: its pump.fun /
+    PumpSwap pool when one is listed, else the deepest pool by
+    reserve. None when no pool has an address."""
+    best = None
+    best_reserve = -1.0
+    for p in pools or []:
+        attrs = (p or {}).get("attributes") or {}
+        address = attrs.get("address")
+        if not address:
+            continue
+        dex_id = (((p.get("relationships") or {}).get("dex") or {})
+                  .get("data", {}) or {}).get("id", "") or ""
+        if "pump" in str(dex_id).lower():
+            return address
+        try:
+            reserve = float(attrs.get("reserve_in_usd") or 0)
+        except (TypeError, ValueError):
+            reserve = 0.0
+        if reserve > best_reserve:
+            best_reserve = reserve
+            best = address
+    return best
+
+
+def geckoterminal_pool_for_mint(mint: str, http_get=None) -> str | None:
+    """The chart pool for a mint address, or None. A symbol is not
+    a mint and returns None."""
+    mint = (mint or "").strip()
+    if not is_valid_address(mint):
+        return None
+    now = time.time()
+    cached = _gt_pool_cache.get(mint)
+    if cached and now - cached["at"] < _GT_POOL_TTL_SECONDS:
+        return cached["pool"]
+    http_get = http_get or _default_get
+    pool = None
+    try:
+        data = http_get(
+            GECKOTERMINAL_BASE + "/networks/solana/tokens/"
+            + mint + "/pools?page=1")
+        pool = _gt_pick_pool((data or {}).get("data") or [])
+    except Exception:
+        pool = None
+    _gt_pool_cache[mint] = {"at": now, "pool": pool}
+    return pool
+
+
+def geckoterminal_closes_1h(mint: str, http_get=None) -> list:
+    """Close prices of the last 12 traded 5-minute candles for a
+    mint's best pool, oldest first — the coin's recent market, true
+    OHLCV data. For a quiet coin the last 12 traded candles can
+    span more than an hour (a coin that barely trades has few
+    candles); the points are still real traded prices, never a
+    fixed-window fake. Fewer than 2 closes, or any failure,
+    returns []."""
+    mint = (mint or "").strip()
+    if not is_valid_address(mint):
+        return []
+    now = time.time()
+    cached = _gt_ohlcv_cache.get(mint)
+    if cached and now - cached["at"] < _GT_OHLCV_TTL_SECONDS:
+        return list(cached["closes"])
+    http_get = http_get or _default_get
+    closes = []
+    try:
+        pool = geckoterminal_pool_for_mint(mint, http_get=http_get)
+        if pool:
+            data = http_get(
+                GECKOTERMINAL_BASE + "/networks/solana/pools/"
+                + pool + "/ohlcv/minute?aggregate=5&limit=12")
+            rows = (((data or {}).get("data") or {})
+                    .get("attributes", {}).get("ohlcv_list") or [])
+            for row in rows:
+                try:
+                    close = float(row[4])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if close > 0:
+                    closes.append(close)
+            closes.reverse()  # the API lists newest first
+    except Exception:
+        closes = []
+    _gt_ohlcv_cache[mint] = {"at": now, "closes": list(closes)}
+    return closes
