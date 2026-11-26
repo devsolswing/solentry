@@ -150,6 +150,49 @@ class TestDeleteScannerBot(DeleteBotBase):
         self.assertEqual(self._count("scanner_marks", bot_id), 1)
 
 
+class TestDeleteBotWithUncoveredRows(DeleteBotBase):
+    def _seed_uncovered_rows(self, bot_id):
+        """Rows in the five bot-owned tables _delete_bot never
+        cleaned (2026-11-26): the Middy path leaves 2-scan
+        confirmations + signal-log rows on every scan, a Pit
+        Sweeper bot leaves watchlist rows, any bot that sold real
+        leaves an open sell claim."""
+        self.db.execute(
+            "INSERT INTO scanner_signal_confirmations (bot_id, mint, "
+            "first_seen_at) VALUES (?, 'MINTA', datetime('now'))",
+            (bot_id,))
+        self.db.execute(
+            "INSERT INTO bot_buy_cooldowns (bot_id, mint, blocked_until) "
+            "VALUES (?, 'MINTA', datetime('now'))",
+            (bot_id,))
+        self.db.execute(
+            "INSERT INTO bot_signal_log (bot_id, mint, entered_at) "
+            "VALUES (?, 'MINTA', datetime('now'))",
+            (bot_id,))
+        self.db.execute(
+            "INSERT INTO sell_claims (user_id, bot_id, coin_id, amount) "
+            "VALUES (?, ?, 'MINTA', 1.0)",
+            (self.user_id, bot_id))
+        self.db.execute(
+            "INSERT INTO pit_watchlist (bot_id, mint) "
+            "VALUES (?, 'MINTA')",
+            (bot_id,))
+        self.db.commit()
+
+    def test_delete_bot_with_signal_rows_removes_everything(self):
+        # Before the fix this POST 500'd with a foreign-key error
+        # and the phone showed a white error page.
+        bot_id = self._create_scanner()
+        self._seed_uncovered_rows(bot_id)
+        resp = self._delete(bot_id)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIsNone(self.db.execute(
+            "SELECT id FROM bots WHERE id = ?", (bot_id,)).fetchone())
+        for table in ("scanner_signal_confirmations", "bot_buy_cooldowns",
+                      "bot_signal_log", "sell_claims", "pit_watchlist"):
+            self.assertEqual(self._count(table, bot_id), 0)
+
+
 class TestAssistantDeleteScannerBot(DeleteBotBase):
     def _ask(self, message):
         token = csrf(self.client, "/bots")

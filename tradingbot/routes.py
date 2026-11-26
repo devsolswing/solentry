@@ -5658,11 +5658,36 @@ def register_routes(app: Flask) -> None:
         record goes. builderBot's stored data for the bot (its
         adjustment log and trade-ledger rows) is purged at the same
         moment — deleting a bot spoofs it from builderBot's memory
-        too."""
+        too. Every table carrying FOREIGN KEY (bot_id) REFERENCES
+        bots (id) is covered: purge_bot_data takes
+        builderbot_adjustments + trade_ledger, trade_fees is
+        detached (SET NULL, history kept), and the rest —
+        scanner_marks, scanner_top10, scanner_signal_confirmations,
+        bot_buy_cooldowns, bot_signal_log, sell_claims,
+        pit_watchlist, bot_proposals, bot_positions — is deleted
+        here, before the bot row.
+        """
         builderbot_mod.purge_bot_data(db, bot_id, user_id)
         db.execute("DELETE FROM scanner_marks WHERE bot_id = ?",
                    (bot_id,))
         db.execute("DELETE FROM scanner_top10 WHERE bot_id = ?",
+                   (bot_id,))
+        # 2026-11-26: the same bug came back for five more tables —
+        # scanner_signal_confirmations, bot_buy_cooldowns,
+        # bot_signal_log, sell_claims and pit_watchlist all carry
+        # FOREIGN KEY (bot_id) REFERENCES bots (id) and were never
+        # cleaned, so deleting any bot that had scanned 500'd the
+        # POST and the phone showed a white error page. Bot 7
+        # (Middy) hit it via 2-scan confirmations + signal-log rows.
+        db.execute("DELETE FROM scanner_signal_confirmations WHERE bot_id = ?",
+                   (bot_id,))
+        db.execute("DELETE FROM bot_buy_cooldowns WHERE bot_id = ?",
+                   (bot_id,))
+        db.execute("DELETE FROM bot_signal_log WHERE bot_id = ?",
+                   (bot_id,))
+        db.execute("DELETE FROM sell_claims WHERE bot_id = ? AND user_id = ?",
+                   (bot_id, user_id))
+        db.execute("DELETE FROM pit_watchlist WHERE bot_id = ?",
                    (bot_id,))
         db.execute("DELETE FROM bot_proposals WHERE bot_id = ? AND user_id = ?",
                    (bot_id, user_id))
