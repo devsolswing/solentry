@@ -358,11 +358,6 @@ body.app-shell.fit-screen .wrap { overflow: hidden; display: flex; flex-directio
 .carousel-head h2 { margin: 0; flex: 1; text-align: center; }
 .bot-carousel { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; padding: 2px 2px 8px; flex: 0 0 auto; }
 .bot-carousel[hidden] { display: none; }
-/* Presets swap: while the preset list is showing in the carousel
-   spot, the carousel arrows hide (they scroll the hidden Active
-   Bots strip) but keep their space so the header stays centred. */
-.bots-section.showing-presets [data-carousel-prev],
-.bots-section.showing-presets [data-carousel-next] { visibility: hidden; }
 .bot-card { flex: 0 0 92%; scroll-snap-align: start; display: flex; align-items: center; gap: 12px; margin: 0; text-decoration: none; color: #e8ecf1; }
 .bot-card.active { border-color: #ffd700; box-shadow: 0 0 18px rgba(255, 200, 0, .45); }
 .bot-ico { flex: 0 0 52px; width: 52px; height: 52px; border-radius: 50%; background: #1a0805; border: 2px solid #ffb300; font-size: 26px; display: inline-flex; align-items: center; justify-content: center; }
@@ -639,27 +634,51 @@ body.app-shell.fit-screen .wrap { padding: 4px 12px 84px; }
 /* - 2026-11-11: the solid yellow washed the whole page out, so both  */
 /*   sections are now compact BLACK cards with gold borders (red      */
 /*   letters kept) — the page reads black/gold/red like the rest.     */
-/* - Motto "Still on the $GATE?" under the crown banner, same large   */
+/* - Motto "Still on the $GATE?" under the logo row, same large   */
 /*   red italic style as Pages 1-2.                                   */
 /* - Signing-bot dashboard card at the bottom: Support ID, current    */
 /*   tasks with the time each was tasked, transactions signed.        */
 /* - Edit Bot is the same size as Add Bot (one shared action-btn).   */
 /* - App name + logo bigger on this page.                             */
-/* - Black crown-tipped banner under the logo. (2026-11-11: the thin  */
+/* - 2026-11-26: the black crown-tipped "My Bots" banner itself was */
+/*   REMOVED (owner) — nothing in its place. (2026-11-11: the thin  */
 /*   gold bar that used to cross the logo was DELETED — it cut        */
 /*   through the fox, so the logo now sits clean with no bar.)       */
 /* The page stays one screen (fit-screen): the signer card sits
    at the bottom with its tasks panel hidden until tapped.       */
 /* ------------------------------------------------------------------ */
 .bots-screen .home-logo .fox-logo { width: clamp(96px, 16dvh, 140px); height: clamp(96px, 16dvh, 140px); }
-.bots-screen .home-wordmark { font-size: clamp(48px, 9dvh, 68px); }
+/* Page 6 wordmark (2026-11-26): solid gold, NOT the .se-title
+   gradient. The gradient paints via background-clip:text, which
+   the phone WebView renders as nothing — the name next to the
+   fox showed blank. Same solid-gold treatment the home page
+   already uses (.home-title .home-wordmark). Scoped to
+   .bots-screen, so the Trenches/Wallet wordmarks and the top-bar
+   brand link keep their gradient. */
+.bots-screen .home-wordmark { font-size: clamp(48px, 9dvh, 68px); background: none; -webkit-text-fill-color: #ffd700; color: #ffd700; }
 .bots-logo-wrap { position: relative; flex: 0 0 auto; }
-.bots-crown-banner { background: #000; color: #ffd700; text-align: center; font-weight: 900; font-size: 20px; letter-spacing: 2px; padding: 8px 12px 16px; margin: 2px 0 6px; border-top: 2px solid #ffb300; clip-path: polygon(0 0, 100% 0, 100% 60%, 87.5% 100%, 75% 60%, 62.5% 100%, 50% 60%, 37.5% 100%, 25% 60%, 12.5% 100%, 0 60%); }
 .bot-actions .action-btn { flex: 1 1 0; padding: 12px 4px; font-size: 16px; font-weight: 700; text-align: center; border-radius: 12px; margin-top: 0; }
 .bot-actions .action-btn:disabled { opacity: .45; cursor: not-allowed; }
 /* Motto on the Bots page: same large red italic style as Pages 1-2,
-   centred under the crown banner. */
-.bots-screen .bots-motto { flex: 0 0 auto; text-align: center; margin: 2px 0 4px; }
+   centred under the logo row. */
+.bots-screen .bots-motto { flex: 0 0 auto; text-align: center; margin: 0 0 2px; }
+/* Page 6 fit (2026-11-26, owner): the page is fit-screen with
+   overflow hidden, so the stack must fit one phone screen or the
+   bottom is clipped — the Signer Bot card was cut off. The banner
+   removal above frees ~56px; the rules below tighten the rest.
+   The fox is NOT shrunk (owner: logo stays live size) and the
+   page still does not scroll. GATEkeeper card and Buy $GATE
+   button are untouched except for the tightened margins/padding
+   every card on this page shares. */
+.bots-screen .home-top { margin: 0 0 4px; }
+.bots-screen .bot-actions { margin: 2px 0 4px; }
+.bots-screen .bot-actions .action-btn { padding: 10px 4px; }
+.bots-screen .carousel-head { margin: 2px 0 4px; }
+.bots-screen .bot-carousel { padding: 2px 2px 4px; }
+.bots-screen .bot-card { padding: 10px 14px; }
+.bots-screen .signer-card { margin: 4px 0; }
+.bots-screen .gatekeeper-card { margin: 8px 0; }
+.bots-screen .bots-gate-buy { margin: 4px 0 0; }
 /* Signer bot card (owner, 2026-11-11): a bot card like the ones
    above it, full-width in the bottom half — .bot-card's 92%
    carousel slot would stretch it down the page, so the flex

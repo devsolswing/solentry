@@ -19,9 +19,13 @@ Owner's spec (2026-11-11 ~19:25 PST, "data glitch" on Page 6):
   reveals the current tasks.
 - Edit Bot is the same size as Add Bot (one shared sizing rule).
 - App name + logo are bigger on the Bots page than the base sizes.
-- A black crown-tipped banner sits underneath the logo. (The thin
-  gold bar that used to cross the logo was deleted 2026-11-11 —
-  it cut through the fox, so the logo now sits clean.)
+- The black crown-tipped "My Bots" banner is GONE (owner,
+  2026-11-26) — nothing in its place. (The thin gold bar that
+  used to cross the logo was deleted 2026-11-11 — it cut through
+  the fox, so the logo now sits clean.)
+- The "SolEntry" name next to the fox is solid gold, not the
+  .se-title gradient (owner, 2026-11-26): the gradient renders
+  blank in the phone WebView. The motto stays where it is.
 - The fox logo has no CSS gold border: the image's baked-in gold
   circle is the only outline (a CSS border drew a second circle).
 No SOL moves in these tests; real execution is a recording mock.
@@ -162,19 +166,39 @@ class TestBotsPage6(UiBase):
         self.assertIsNotNone(m, "no bots-page wordmark size rule")
         self.assertGreaterEqual(int(m.group(1)), 48)
 
-    def test_crown_banner_no_gold_bar(self):
+    def test_crown_banner_removed(self):
+        # The "My Bots" crown banner was REMOVED (owner,
+        # 2026-11-26) — nothing in its place. The thin gold bar
+        # that cut through the logo stays deleted too (owner,
+        # 2026-11-11).
         self._choose_mode("paper")
         html = self._html("/bots")
-        self.assertIn("bots-crown-banner", html)
-        # The thin gold bar that cut through the logo was DELETED
-        # (owner, 2026-11-11) — no bar element, no bar CSS.
+        self.assertNotIn("bots-crown-banner", html)
+        self.assertNotIn("<span>My Bots</span>", html)
         self.assertNotIn("bots-gold-bar", html)
         css = self._css()
+        self.assertNotIn(".bots-crown-banner", css)
         self.assertNotIn(".bots-gold-bar", css)
-        self.assertIn(".bots-crown-banner", css)
-        # Black banner, crown-tipped (clip-path points on its edge).
-        self.assertRegex(css, r"\.bots-crown-banner\s*\{[^}]*#000")
-        self.assertIn("clip-path", css)
+
+    def test_wordmark_solid_gold_not_gradient(self):
+        # The "SolEntry" name next to the fox must actually show:
+        # the .se-title gradient (background-clip:text) renders
+        # blank in the phone WebView, so the Page 6 wordmark is
+        # solid gold instead (owner, 2026-11-26). Scoped to
+        # .bots-screen — the Trenches/Wallet wordmarks and the
+        # top-bar brand link keep their gradient.
+        css = self._css()
+        m = re.search(r"\.bots-screen[^{]*\.home-wordmark\s*\{([^}]*)\}",
+                      css)
+        self.assertIsNotNone(m, "no bots-page wordmark rule")
+        self.assertIn("background: none", m.group(1))
+        self.assertIn("-webkit-text-fill-color: #ffd700", m.group(1))
+        self.assertIn("color: #ffd700", m.group(1))
+        # The motto stays where it is, under the logo row.
+        self._choose_mode("paper")
+        html = self._html("/bots")
+        self.assertIn("Still on", html)
+        self.assertIn("bots-motto", html)
 
     def test_fox_logo_has_exactly_one_gold_border(self):
         # The top logo is the yellow fox's face recolored red, with

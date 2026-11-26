@@ -23,7 +23,6 @@
     </span>
     <p class="se-title home-wordmark">Sol<span class="se-entry">Entry</span></p>
   </div>
-  <div class="bots-crown-banner"><span>My Bots</span></div>
 
   <p class="fox-tagline bots-motto">Still on<br>the $GATE?</p>
 
@@ -41,9 +40,7 @@
 
   <div class="bots-section" id="bots-section">
     <div class="carousel-head">
-      <button class="icon-btn" type="button" data-carousel-prev aria-label="Previous bot">‹</button>
       <h2><span data-active-title>Active Bots • {{ bots|length }}</span><span data-presets-title hidden>Presets</span></h2>
-      <button class="icon-btn" type="button" data-carousel-next aria-label="Next bot">›</button>
     </div>
 
     <div class="bot-carousel" data-carousel id="active-bots-list">
@@ -204,7 +201,7 @@
     </span>
     <span class="bot-arrow" aria-hidden="true">›</span>
   </div>
-  <p><button class="btn big gate-buy-btn" type="button" data-gate-buy-open>Buy $GATE</button></p>
+  <p class="bots-gate-buy"><button class="btn big gate-buy-btn" type="button" data-gate-buy-open>Buy $GATE</button></p>
 </div>
 
 <script nonce="{{ csp_nonce }}">

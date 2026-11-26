@@ -108,9 +108,12 @@ class TestBotsPresets(UiBase):
         self.assertIsNotNone(m, "presets title not found")
         self.assertIn("hidden", m.group(1))
         self.assertIn("Presets", m.group(2))
-        # Carousel arrows hide while Presets is showing.
+        # No arrow-hiding rule any more: the < and > buttons were
+        # removed (owner, 2026-11-26), so there is nothing to hide
+        # while Presets is showing.
         css = open("tradingbot/static/style.css").read()
-        self.assertIn(".bots-section.showing-presets", css)
+        self.assertNotIn("data-carousel-prev", css)
+        self.assertNotIn("data-carousel-next", css)
 
     def test_preset_idle_timer_auto_revert_no_manual_toggle(self):
         """After 6 seconds with no input Presets swaps back to

@@ -435,8 +435,12 @@ class TestBotsPage(UiBase):
         self.assertIn(f'href="/bots/{bot["id"]}/edit"', html)
         self.assertIn("Edit Bot", html)
         self.assertIn("bot-carousel", html)
-        self.assertIn("data-carousel-prev", html)
-        self.assertIn("data-carousel-next", html)
+        # The < and > arrow buttons were REMOVED (owner,
+        # 2026-11-26) — the strip scrolls sideways by touch.
+        self.assertNotIn("data-carousel-prev", html)
+        self.assertNotIn("data-carousel-next", html)
+        css = open("tradingbot/static/style.css").read()
+        self.assertRegex(css, r"\.bot-carousel\s*\{[^}]*overflow-x:\s*auto")
         self.assertIn("Active Bots • 1", html)
         # The card shows real fields only.
         self.assertIn("Luna", html)
@@ -618,7 +622,12 @@ class TestQuickTradeShared(UiBase):
         self.assertIn("quick-trade-overlay", qt)
         ui = self.client.get("/static/ui.js").get_data(as_text=True)
         self.assertIn("data-eye-toggle", ui)
-        self.assertIn("data-carousel-next", ui)
+        # The carousel arrow handlers are gone (owner, 2026-11-26)
+        # — the strip scrolls by touch; ui.js only keeps the card
+        # sync that retargets Edit/Delete to the card in view.
+        self.assertIn("data-carousel", ui)
+        self.assertNotIn("data-carousel-prev", ui)
+        self.assertNotIn("data-carousel-next", ui)
         self.assertIn("data-go-back", ui)
 
 

@@ -1,6 +1,6 @@
-/* SolEntry UI helpers: balance hide/show, bot carousel arrows,
-   and the X (back) button. Plain static JS — no secrets, no
-   network calls, works in any in-app browser. */
+/* SolEntry UI helpers: balance hide/show, bot carousel (touch
+   scroll + card sync), and the X (back) button. Plain static JS
+   — no secrets, no network calls, works in any in-app browser. */
 (function () {
   'use strict';
 
@@ -23,23 +23,11 @@
     });
   });
 
-  /* Bot carousel: < and > scroll the strip by one card. The strip
-     also scrolls by touch — the arrows are a second way to move. */
+  /* Bot carousel (2026-11-26): the strip scrolls sideways by
+     touch — the < and > arrow buttons were removed (owner), so
+     there are no arrow handlers any more. This block only keeps
+     the + / − / Edit buttons pointed at the card in view. */
   document.querySelectorAll('[data-carousel]').forEach(function (strip) {
-    var step = function () {
-      var card = strip.querySelector('.bot-card');
-      return card ? card.offsetWidth + 12 : 300;
-    };
-    document.querySelectorAll('[data-carousel-prev]').forEach(function (b) {
-      b.addEventListener('click', function () {
-        strip.scrollBy({ left: -step(), behavior: 'smooth' });
-      });
-    });
-    document.querySelectorAll('[data-carousel-next]').forEach(function (b) {
-      b.addEventListener('click', function () {
-        strip.scrollBy({ left: step(), behavior: 'smooth' });
-      });
-    });
     /* Keep the + / − / Edit buttons pointed at the card in view. */
     var sync = function () {
       var cards = strip.querySelectorAll('.bot-card');
