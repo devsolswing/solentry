@@ -39,14 +39,17 @@ _CACHE_TTL_SECONDS = 60
 _cache: dict = {"at": 0.0, "price": None, "change_24h": None}
 
 
-def _fetch_sol_price() -> tuple[float | None, float | None]:
+def _fetch_sol_price(timeout: float = 10) -> tuple[float | None, float | None]:
     """(SOL price in USD, 24h change %) from Jupiter price v3, or
-    (None, None) when the feed does not answer."""
+    (None, None) when the feed does not answer. `timeout` bounds
+    one fetch — the chain-read fallback passes 5s so a down
+    Jupiter cannot stall a poll; other callers keep the 10s
+    default."""
     try:
         req = urllib.request.Request(
             JUPITER_PRICE_URL.format(SOL_MINT),
             headers={"User-Agent": "trading-bot-app"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None, None
@@ -77,15 +80,16 @@ def clear_sol_price_cache() -> None:
     _cache["change_24h"] = None
 
 
-def get_sol_price_usd() -> float | None:
+def get_sol_price_usd(timeout: float = 10) -> float | None:
     """Current SOL price in USD from Jupiter, or None when the feed
     does not answer. Cached 60 seconds. Never guessed, never a
-    snapshot."""
+    snapshot. `timeout` bounds one fetch — the chain-read fallback
+    passes 5s so a down Jupiter cannot stall a poll."""
     now = time.time()
     if _cache["price"] is not None \
             and now - _cache["at"] < _CACHE_TTL_SECONDS:
         return _cache["price"]
-    price, change = _fetch_sol_price()
+    price, change = _fetch_sol_price(timeout=timeout)
     _cache["at"] = now
     _cache["price"] = price
     _cache["change_24h"] = change

@@ -81,6 +81,7 @@ import time
 
 import websocket
 
+from .prices import get_sol_price_usd
 from .pumpfun import (bonding_curve_pda, curve_spot_price_sol,
                       parse_bonding_curve)
 from .solana import base58_encode
@@ -153,6 +154,64 @@ STALE_REFRESH_SECONDS = 30.0
 SOL_MAX_AGE_SECONDS = 90.0
 WS_CONNECT_TIMEOUT = 10
 WS_RECV_TIMEOUT = 5
+# Fallback SOL fetch: when the feed's SOL tick is stale or missing,
+# the chain-read fallback fetches SOL directly from Jupiter with
+# this short timeout, so a down Jupiter cannot stall a poll (the
+# prices.py fetch is cached 60s, so this fires at most once a
+# minute per process).
+SOL_FALLBACK_FETCH_TIMEOUT = 5.0
+# Repeat "last-known-good SOL rate" warnings are throttled to one
+# per interval per stream instance, so a long Jupiter outage does
+# not flood the logs.
+SOL_FALLBACK_LOG_INTERVAL = 60.0
+
+
+def sol_rate_for_conversion(feed, now: float | None = None):
+    """(price_usd, source, age_seconds) for converting a
+    SOL-denominated chain price to USD, or None when no rate
+    exists at all. The fallback's SOL rate is decoupled from the
+    feed's SOL tick: a fresh feed tick (<= SOL_MAX_AGE_SECONDS)
+    wins ("feed"); else one direct Jupiter fetch ("jupiter",
+    cached 60s inside prices.py, 5s timeout); else the feed's
+    last-known-good SOL tick at any age ("last-good", labeled with
+    its age — a stale rate, never presented as fresh). Never
+    raises; None only when there is no feed tick, the Jupiter
+    fetch failed, and no last-known-good tick exists. Callers log
+    the non-"feed" sources — a conversion at a stale rate must
+    always be visible in the logs, never silent."""
+    now = time.time() if now is None else now
+    if feed is not None:
+        try:
+            age = feed.tick_age_seconds("SOL", now=now)
+        except Exception:
+            age = None
+        if age is not None and age <= SOL_MAX_AGE_SECONDS:
+            try:
+                tick = feed.snapshot(["SOL"]).get("SOL")
+                price = float(tick["price"]) if tick else None
+            except Exception:
+                price = None
+            if price is not None and math.isfinite(price) \
+                    and price > 0:
+                return (price, "feed", age)
+    try:
+        price = get_sol_price_usd(timeout=SOL_FALLBACK_FETCH_TIMEOUT)
+    except Exception:
+        price = None
+    if price is not None and math.isfinite(price) and price > 0:
+        # Fetched (or cached within 60s) just now — a live rate.
+        return (price, "jupiter", 0.0)
+    if feed is not None:
+        try:
+            age = feed.tick_age_seconds("SOL", now=now)
+            tick = feed.snapshot(["SOL"]).get("SOL")
+            price = float(tick["price"]) if tick else None
+        except Exception:
+            age, price = None, None
+        if age is not None and price is not None \
+                and math.isfinite(price) and price > 0:
+            return (price, "last-good", age)
+    return None
 
 
 def _token_account_amount(data: bytes) -> int | None:
@@ -368,6 +427,10 @@ class HeliusStream:
         self._stop = threading.Event()
         self._started = False
         self._thread = None
+        # Timer thread for the server-driven stale refresh (fix 4):
+        # _refresh_stale_mints runs on its own clock, independent
+        # of the websocket recv loop.
+        self._refresh_thread = None
         self._ws = None
         # mint -> curve account address: the desired subscription
         # set (held + watched mints with a live, incomplete curve).
@@ -386,6 +449,10 @@ class HeliusStream:
         self._mint_vault_sub_id: dict = {}
         # mint -> last stale-refresh epoch (bounds re-reads).
         self._last_stale_refresh: dict = {}
+        # Last "last-known-good SOL rate" warning epoch, per source
+        # (see _log_last_good_sol): bounds repeat warnings to one
+        # per SOL_FALLBACK_LOG_INTERVAL.
+        self._last_sol_fallback_log: dict = {}
         # Per-connection state, reset on every (re)connect.
         self._pending_req: dict = {}  # jsonrpc id -> ("curve", mint)
         # or ("vault", mint, vault address)
@@ -410,8 +477,37 @@ class HeliusStream:
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="helius-stream")
         self._thread.start()
+        # Server-driven stale refresh (fix 4): its own timer
+        # thread, so a dead websocket can no longer put the
+        # refresh to sleep with it.
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_loop, daemon=True,
+            name="helius-refresh")
+        self._refresh_thread.start()
         log.info("[helius-stream] started (Helius %s WSS, "
                  "held + watched mints)", self._network)
+
+    def _refresh_loop(self) -> None:
+        """Server-driven stale refresh, on its own timer: every
+        STALE_REFRESH_SECONDS re-read subscribed mints whose feed
+        tick is stale or missing, straight from the chain —
+        independent of the websocket recv loop, so a 45s watchdog
+        kill + up-to-60s reconnect backoff can no longer leave
+        the refresh asleep for half the stall. The refresh needs
+        only the RPC client and the feed, never a live socket:
+        when the socket is down, _refresh_mints drops/pools
+        graduated mints locally and the next (re)connect
+        subscribes them. Never kills the thread; a failed pass
+        is logged and the next tick retries."""
+        while not self._stop.is_set():
+            self._stop.wait(STALE_REFRESH_SECONDS)
+            if self._stop.is_set():
+                break
+            try:
+                self._refresh_stale_mints()
+            except Exception as exc:  # never kill the refresh thread
+                log.warning("[helius-stream] timer refresh failed: "
+                            "%s", exc)
 
     def stop(self) -> None:
         self._stop.set()
@@ -640,25 +736,43 @@ class HeliusStream:
         except Exception as exc:
             log.warning("[helius-stream] backfill failed: %s", exc)
 
+    def _log_last_good_sol(self, mint: str, sol_price: float,
+                           age: float, now: float) -> None:
+        """Throttled warning (one per SOL_FALLBACK_LOG_INTERVAL)
+        when a price converts at the last-known-good SOL rate:
+        the feed's SOL tick is stale and the Jupiter fetch failed,
+        so the conversion carries SOL's whole move since that
+        tick. The label is the point — a stale rate must be
+        visible in the logs, never silent."""
+        last = self._last_sol_fallback_log.get("last-good", 0.0)
+        if now - last < SOL_FALLBACK_LOG_INTERVAL:
+            return
+        self._last_sol_fallback_log["last-good"] = now
+        log.warning("[helius-stream] converting %s at "
+                    "last-known-good SOL rate $%.2f, %.0fs old "
+                    "(feed SOL tick stale, Jupiter fetch failed)",
+                    mint, sol_price, age)
+
     def _ingest_sol_price(self, mint: str, price_sol: float,
                           now: float) -> bool:
-        """Convert a SOL-denominated price with the feed's live SOL
-        tick and ingest it. Returns True when a tick was ingested.
-        The SOL tick may be up to SOL_MAX_AGE_SECONDS old; older
-        than that, or no SOL tick at all, the update is skipped —
-        never converted at a stale SOL rate, never guessed."""
-        sol_age = self._feed.tick_age_seconds("SOL", now=now)
-        if sol_age is None or sol_age > SOL_MAX_AGE_SECONDS:
+        """Convert a SOL-denominated price and ingest it. Returns
+        True when a tick was ingested. The SOL rate is decoupled
+        from the feed's SOL tick (see sol_rate_for_conversion): a
+        fresh feed tick wins; else a direct Jupiter fetch; else
+        the last-known-good tick, labeled stale in the logs. Only
+        when no rate exists at all is the update skipped — and
+        that skip is logged, never silent. Never guessed: a
+        missing rate is no price, not a converted one."""
+        rate = sol_rate_for_conversion(self._feed, now=now)
+        if rate is None:
+            log.warning("[helius-stream] skipping %s: no SOL rate "
+                        "for conversion (feed SOL tick missing/"
+                        "stale, Jupiter fetch failed, no "
+                        "last-known-good)", mint)
             return False
-        sol = self._feed.snapshot(["SOL"]).get("SOL")
-        if sol is None:
-            return False
-        try:
-            sol_price = float(sol["price"])
-        except (TypeError, ValueError):
-            return False
-        if not math.isfinite(sol_price) or sol_price <= 0:
-            return False
+        sol_price, source, age = rate
+        if source == "last-good":
+            self._log_last_good_sol(mint, sol_price, age, now)
         price_usd = price_sol * sol_price
         if not math.isfinite(price_usd) or price_usd <= 0:
             return False
@@ -816,7 +930,6 @@ class HeliusStream:
         now = self._time()
         next_ping_at = now + HEARTBEAT_SECONDS
         next_refresh_at = now + SUBSCRIPTION_REFRESH_SECONDS
-        next_stale_at = now + STALE_REFRESH_SECONDS
         while not self._stop.is_set():
             try:
                 raw = ws.recv()
@@ -837,12 +950,6 @@ class HeliusStream:
                 if now >= next_refresh_at:
                     self._refresh_subscriptions(ws)
                     next_refresh_at = now + SUBSCRIPTION_REFRESH_SECONDS
-                if now >= next_stale_at:
-                    # A quiet coin's tick goes stale with no trades
-                    # to refresh it — re-read it from the chain so
-                    # "no data" is brief.
-                    self._refresh_stale_mints(now)
-                    next_stale_at = now + STALE_REFRESH_SECONDS
                 continue
             except websocket.WebSocketConnectionClosedException as exc:
                 raise ConnectionError("socket closed: %s" % exc)
@@ -854,9 +961,6 @@ class HeliusStream:
             if now >= next_refresh_at:
                 self._refresh_subscriptions(ws)
                 next_refresh_at = now + SUBSCRIPTION_REFRESH_SECONDS
-            if now >= next_stale_at:
-                self._refresh_stale_mints(now)
-                next_stale_at = now + STALE_REFRESH_SECONDS
 
     # --- messages ---------------------------------------------------------
     def _handle_message(self, raw, now: float | None = None) -> None:

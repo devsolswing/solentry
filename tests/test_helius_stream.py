@@ -270,6 +270,11 @@ class TestNotificationHandling(unittest.TestCase):
             0.002)
 
     def test_no_sol_tick_means_no_stream_price(self):
+        # No SOL tick anywhere and the Jupiter fetch down: no rate
+        # at all, so the update is still skipped — and the skip is
+        # logged now instead of silent. (The fetch is patched down
+        # here: unpatched, the decoupled rate would make a real
+        # Jupiter call in this test.)
         feed = LiveFeed()
         stream = HeliusStream(
             feed, self.stream._config,
@@ -279,8 +284,13 @@ class TestNotificationHandling(unittest.TestCase):
         params = json.loads(_notification(
             42, 100, _curve_b64(1_073_000_000_000_000,
                                 30_000_000_000)))["params"]
-        self.assertFalse(stream._handle_account_notification(params))
+        with mock.patch.object(streaming_mod, "get_sol_price_usd",
+                               side_effect=Exception("down")), \
+                self.assertLogs("tradingbot.streaming",
+                                level="WARNING") as logs:
+            self.assertFalse(stream._handle_account_notification(params))
         self.assertEqual(feed.snapshot([GATE_MAINNET]), {})
+        self.assertTrue(any("no SOL rate" in m for m in logs.output))
 
     def _stream_with_sol_age(self, age_seconds):
         """Fresh feed + stream whose only SOL tick is `age_seconds`
@@ -305,12 +315,31 @@ class TestNotificationHandling(unittest.TestCase):
             42, slot, _curve_b64(vt, vs, complete)))["params"]
         return stream._handle_account_notification(params, now=now)
 
-    def test_stale_sol_tick_means_no_stream_price(self):
-        # SOL tick 91s old (past the 90s bound): the update is
-        # skipped rather than converted on a stale reference.
+    def test_stale_sol_tick_uses_jupiter_fetch(self):
+        # SOL tick 91s old (past the 90s bound): the rate is
+        # decoupled from the feed tick now — a direct Jupiter fetch
+        # converts the update instead of skipping it. (Supersedes
+        # the old "stale SOL tick means no stream price" rule; the
+        # fallback fix, 2026-11-25.)
         feed, stream, now = self._stream_with_sol_age(91)
-        self.assertFalse(self._notify_on(stream, 100, now))
-        self.assertEqual(feed.snapshot([GATE_MAINNET]), {})
+        with mock.patch.object(streaming_mod, "get_sol_price_usd",
+                               return_value=SOL_PRICE):
+            self.assertTrue(self._notify_on(stream, 100, now))
+        self.assertIn(GATE_MAINNET, feed.snapshot([GATE_MAINNET]))
+
+    def test_stale_sol_tick_uses_last_good_when_jupiter_fails(self):
+        # SOL tick 91s old AND the Jupiter fetch down: the
+        # last-known-good SOL tick converts the update (labeled
+        # stale in the logs) instead of skipping it.
+        feed, stream, now = self._stream_with_sol_age(91)
+        with mock.patch.object(streaming_mod, "get_sol_price_usd",
+                               side_effect=Exception("down")), \
+                self.assertLogs("tradingbot.streaming",
+                                level="WARNING") as logs:
+            self.assertTrue(self._notify_on(stream, 100, now))
+        self.assertIn(GATE_MAINNET, feed.snapshot([GATE_MAINNET]))
+        self.assertTrue(any("last-known-good" in m
+                            for m in logs.output))
 
     def test_sol_tick_within_bound_is_used(self):
         # SOL tick 89s old (inside the 90s bound): the update

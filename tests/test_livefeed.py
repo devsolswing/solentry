@@ -25,6 +25,7 @@ from unittest import mock
 
 import tradingbot.livefeed as livefeed_mod
 import tradingbot.routes as routes
+import tradingbot.streaming as streaming_mod
 from helpers import make_client, signup
 from tradingbot.livefeed import JUPITER_SOL_MINT, LiveFeed
 from tradingbot.routes import _coin_rows
@@ -344,7 +345,7 @@ class TestLoopSanitization(LiveFeedBase):
             "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"]
         self.assertEqual(after_trades, before_trades)
 
-    def test_render_drops_absurd_mint_price(self):
+    def test_render_drops_absurd_feed_price_but_shows_chain_price(self):
         self.db.execute(
             "INSERT INTO paper_holdings (user_id, coin_id, amount, "
             "avg_price) VALUES (?, ?, 1000.0, 0.002)",
@@ -353,9 +354,15 @@ class TestLoopSanitization(LiveFeedBase):
         prices = make_prices({"SOL": (10.0, 0.0)})
         # No price anywhere for the mint: no second source exists
         # to spike it, so the row has no price and no value (the
-        # page total still counts it at cost, via pnl).
-        rows, _stale = _coin_rows(self.db, self.user_id, "paper", prices,
-                                  feed=self.feed, app=self.app)
+        # page total still counts it at cost, via pnl). The Jupiter
+        # fetch is patched down here: no SOL tick anywhere and no
+        # fetch means no rate at all, so the chain read returns {}
+        # — never a real network call in this test.
+        with mock.patch.object(streaming_mod, "get_sol_price_usd",
+                               side_effect=Exception("down")):
+            rows, _stale = _coin_rows(self.db, self.user_id, "paper",
+                                      prices, feed=self.feed,
+                                      app=self.app)
         row = next(r for r in rows if r["coin_id"] == MINT)
         self.assertIsNone(row["price"])
         self.assertIsNone(row["value"])
@@ -372,23 +379,31 @@ class TestLoopSanitization(LiveFeedBase):
         row = next(r for r in rows if r["coin_id"] == MINT)
         self.assertEqual(row["price"], 0.002)
         self.assertAlmostEqual(row["value"], 2.0)
-        # Stale feed tick + spiked chain read: the chain price is
-        # dropped against the feed's last good tick, so the row has
-        # no price instead of $400,000. (A separate feed: ingesting
-        # an old tick after a fresh one is rejected out-of-order,
-        # so the stale tick has to be the only one stored.)
+        # Stale feed tick + spiked chain read: the jump guard no
+        # longer vetoes the FALLBACK on the poll path (fallback
+        # fix, 2026-11-25) — the chain price is shown, flagged
+        # price_moved, and logged — matching the trenches path,
+        # which never had the veto. The guard still applies to
+        # feed-sourced prices (see the fresh-tick case above). (A
+        # separate feed: ingesting an old tick after a fresh one
+        # is rejected out-of-order, so the stale tick has to be
+        # the only one stored.)
         stale_feed = LiveFeed()
         stale_feed.ingest(MINT, 0.002, "helius-stream",
                           now=time.time() - 120)
         with mock.patch.object(routes, "_chain_prices_for_mints",
-                               return_value={MINT: 400.0}):
+                               return_value={MINT: 400.0}), \
+                self.assertLogs("tradingbot.routes",
+                                level="WARNING") as logs:
             rows, _stale = _coin_rows(self.db, self.user_id, "paper",
                                       prices, feed=stale_feed,
                                       app=self.app)
         row = next(r for r in rows if r["coin_id"] == MINT)
-        self.assertIsNone(row["price"])
-        self.assertIsNone(row["value"])
-        self.assertIsNone(row["pnl"])
+        self.assertEqual(row["price"], 400.0)
+        self.assertAlmostEqual(row["value"], 400000.0)
+        self.assertTrue(row["price_moved"])
+        self.assertTrue(any("would have dropped" in m
+                            for m in logs.output))
 
 
 class TestApiLive(LiveFeedBase):

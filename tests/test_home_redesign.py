@@ -42,6 +42,7 @@ from unittest import mock
 import tradingbot.charts as charts
 import tradingbot.home_holdings as hh
 import tradingbot.routes as routes
+import tradingbot.streaming as streaming_mod
 from tradingbot import pnl as pnl_mod
 from helpers import csrf, make_client, signup
 from test_balance_read import MINT as FAKE_MINT
@@ -380,11 +381,16 @@ class TestChainOnlyHoldings(_RealModeBase):
             "INSERT INTO real_holdings (user_id, coin_id, amount, "
             "avg_price) VALUES (?, ?, 5.0, 0.5)", (self.user_id, GATE_MINT))
         self.db.commit()
+        # The Jupiter fetch is patched down here: feed=None means
+        # no SOL tick exists, so the decoupled fallback rate would
+        # otherwise make a real Jupiter call in this test.
         with mock.patch.object(
                 routes, "rpc_client_for_url",
                 return_value=self._rpc([])), \
                 mock.patch.object(hh, "geckoterminal_closes_1h",
-                                  return_value=[]):
+                                  return_value=[]), \
+                mock.patch.object(streaming_mod, "get_sol_price_usd",
+                                  side_effect=Exception("down")):
             rows, stale = routes._coin_rows(
                 self.db, self.user_id, "devnet",
                 {"prices": {"SOL": {"price": 100.0}},
@@ -402,7 +408,9 @@ class TestChainOnlyHoldings(_RealModeBase):
                 routes, "rpc_client_for_url",
                 return_value=self._rpc(RuntimeError("2022 down"))), \
                 mock.patch.object(hh, "geckoterminal_closes_1h",
-                                  return_value=[]):
+                                  return_value=[]), \
+                mock.patch.object(streaming_mod, "get_sol_price_usd",
+                                  side_effect=Exception("down")):
             rows, stale = routes._coin_rows(
                 self.db, self.user_id, "devnet",
                 {"prices": {"SOL": {"price": 100.0}},

@@ -18,6 +18,7 @@ Security notes:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -102,8 +103,11 @@ from .solana import (SolanaRpcClient, base58_encode,
                      rpc_client_for_config, rpc_client_for_url,
                      sol_to_lamports)
 from .streaming import (SOL_MAX_AGE_SECONDS,
-                        chain_price_usd_for_mints)
+                        chain_price_usd_for_mints,
+                        sol_rate_for_conversion)
 from .trenches import (fetch_mint_identities, fetch_trenches_scan)
+
+log = logging.getLogger("tradingbot.routes")
 
 MAX_LOGIN_FAILS = 5
 LOCKOUT_MINUTES = 15
@@ -641,26 +645,66 @@ def _feed_price_list(app) -> dict:
             "as_of": _now()}
 
 
+def _log_last_good_sol_rate(app, sol_price: float,
+                            age: float) -> None:
+    """Throttled warning (one per minute per app) when a chain read
+    converts at the last-known-good SOL rate: the feed's SOL tick
+    is stale and the Jupiter fetch failed, so the conversion
+    carries SOL's whole move since that tick. The label is the
+    point — a stale rate must be visible in the logs, never
+    silent. State lives on the app config, so tests (fresh app
+    per test) never inherit another test's throttle."""
+    try:
+        state = app.config.setdefault("_fallback_sol_log_at", {})
+        last = state.get("last-good", 0.0)
+        now = time.time()
+        if now - last < 60.0:
+            return
+        state["last-good"] = now
+    except Exception:
+        pass
+    log.warning("[price-fallback] chain read converting at "
+                "last-known-good SOL rate $%.2f, %.0fs old "
+                "(feed SOL tick stale, Jupiter fetch failed)",
+                sol_price, age)
+
+
 def _chain_prices_for_mints(app, mints) -> dict:
     """{mint: price_usd} from the single source's pull twin: one
     batched Helius RPC read of the bonding curves (graduated ->
     Raydium pool, the same lookup the stream uses). Mints it cannot
-    price are ABSENT — never guessed, never a second source. Needs
-    the feed's SOL tick for the USD conversion; no SOL tick means
-    {} (no conversion without a live SOL rate). Never raises."""
+    price are ABSENT — never guessed, never a second source. The
+    SOL rate for the USD conversion is decoupled from the feed's
+    SOL tick (see sol_rate_for_conversion in streaming.py): a
+    fresh feed tick wins, else a direct Jupiter fetch, else the
+    last-known-good tick labeled stale in the logs. No rate at
+    all means {} — logged, never a silent skip. Never raises."""
     wanted = [m for m in dict.fromkeys(mints or []) if m]
     if not wanted or app is None:
         return {}
-    sol_price = _feed_sol_price_usd(app)
-    if sol_price is None:
+    feed = app.config.get("LIVE_FEED") if app is not None else None
+    rate = sol_rate_for_conversion(feed)
+    if rate is None:
+        log.warning("[price-fallback] _chain_prices_for_mints: no "
+                    "SOL rate for %d mint(s) — feed SOL tick "
+                    "missing/stale, Jupiter fetch failed, no "
+                    "last-known-good; returning {}",
+                    len(wanted))
         return {}
+    sol_price, source, age = rate
+    if source == "last-good":
+        _log_last_good_sol_rate(app, sol_price, age)
     try:
         client = rpc_client_for_config(_cfg(app))
-    except Exception:
+    except Exception as exc:
+        log.warning("[price-fallback] _chain_prices_for_mints: "
+                    "RPC client unavailable: %s", exc)
         return {}
     try:
         return chain_price_usd_for_mints(client, wanted, sol_price) or {}
-    except Exception:
+    except Exception as exc:
+        log.warning("[price-fallback] _chain_prices_for_mints: "
+                    "chain read failed: %s", exc)
         return {}
 
 
@@ -776,6 +820,9 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
                 and is_valid_address(c)]
     changes_1h: dict = {}
     identities: dict = {}
+    # Mints priced by the chain fallback this call (see below):
+    # the jump guard never vetoes these (fix 3).
+    chain_priced: set = set()
     if mint_ids:
         # The live feed first: a fresh validated tick (the Helius
         # stream, or the bonding-curve price for a mint with no DEX
@@ -794,7 +841,10 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
                 price_map[mint] = price
         uncovered = [m for m in mint_ids if m not in price_map]
         if uncovered and app is not None:
-            price_map.update(_chain_prices_for_mints(app, uncovered))
+            chain = _chain_prices_for_mints(app, uncovered)
+            price_map.update(chain)
+            chain_priced = {m for m, p in chain.items()
+                            if p is not None and p > 0}
         if feed is not None:
             now = time.time()
             for mint in mint_ids:
@@ -817,9 +867,30 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
     # A bad tick must never inflate a balance on render either: drop
     # any price the live feed rejects against its last good tick. No
     # reference yet (feed empty or off) means everything passes.
+    # The jump guard must never veto the FALLBACK, though: a chain
+    # price is a fresh on-chain read, so it is shown even when it
+    # moved >50% from the last good tick — a genuine step change
+    # after a stall, which the guard would otherwise drop forever
+    # (a chain read cannot re-base the reference: re-basing needs
+    # 3 agreeing stream ticks). This matches
+    # _reprice_trenches_rows, which never applies the guard to
+    # chain prices. Chain prices the guard would have dropped are
+    # logged once per call (count + mints) and marked on their
+    # rows (price_moved). The guard still applies to
+    # feed-sourced prices.
+    would_drop_chain: list = []
     if feed is not None:
+        would_drop_chain = [c for c, p in price_map.items()
+                            if p is not None and c in chain_priced
+                            and not feed.would_accept(c, p)]
+        if would_drop_chain:
+            log.warning("[price-fallback] _coin_rows showing %d "
+                        "chain price(s) the jump guard would have "
+                        "dropped: %s", len(would_drop_chain),
+                        ", ".join(sorted(would_drop_chain)))
         price_map = {c: p for c, p in price_map.items()
-                     if p is None or feed.would_accept(c, p)}
+                     if p is None or c in chain_priced
+                     or feed.would_accept(c, p)}
     # A price of 0 or less is not a price: treat it as missing, so a
     # dead quote can never value a holding at $0 or invent a loss.
     clean_map = {}
@@ -880,7 +951,8 @@ def _coin_rows(db, user_id: int, mode: str, prices: dict,
                      "held": float(h["amount"]),
                      "avg_price": (float(avg) if avg is not None else None),
                      "pnl": pnl, "is_mint": True,
-                     "value": value})
+                     "value": value,
+                     "price_moved": coin_id in would_drop_chain})
     # Attach each row's real token image + sparkline. Enrichment
     # never raises and never invents data — a row with no image or
     # no history keeps the ticker-initial icon / no sparkline.
@@ -3270,8 +3342,37 @@ def register_routes(app: Flask) -> None:
                  for c in (request.args.get("coins") or "").split(",")
                  if c.strip()]
         feed = app.config["LIVE_FEED"]
+        ticks = feed.snapshot(coins or None)
+        if coins:
+            # Coins the snapshot cannot price (no tick, or a stale
+            # one) fall back to one batched chain read — the
+            # coin-detail page's backup path (no-break rule 4), so
+            # a stall shows a fresh chain price instead of
+            # "no data". Only valid mint addresses are read (a
+            # symbol like BTC has no curve to read); a coin the
+            # chain cannot price stays missing. Chain ticks carry
+            # source "chain" and a fresh timestamp, so the client
+            # applies them exactly like a live tick (see live.js
+            # applyTick) and the page title stamps the source.
+            # The 1-second tick endpoint (/api/coins/<id>/tick)
+            # stays feed-only by design — its tests pin "no data"
+            # with no tick — this 4s snapshot is the page's
+            # fallback path.
+            missing = [c for c in coins
+                       if (c not in ticks
+                           or ticks[c].get("stale"))
+                       and is_valid_address(c)]
+            if missing:
+                chain = _chain_prices_for_mints(app, missing)
+                as_of = _now()
+                for mint, price in chain.items():
+                    if price is None or price <= 0:
+                        continue
+                    ticks[mint] = {"coin_id": mint, "price": price,
+                                   "source": "chain", "as_of": as_of,
+                                   "stale": False}
         return jsonify({"ok": True,
-                        "ticks": feed.snapshot(coins or None),
+                        "ticks": ticks,
                         "as_of": _now()})
 
     @app.route("/api/sparklines")
