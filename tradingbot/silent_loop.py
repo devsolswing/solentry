@@ -1042,22 +1042,14 @@ def _middy_hard_exit_reason(avg_price: float, peak_price: float,
 
 def _middy_mid_hold(entry: dict) -> bool:
     """The mid-level hold test: hold for the mid level ONLY while
-    the coin is still gaining AND buys beat sells 75/25 (3:1) in
-    the 5-minute bucket. JAMES'S NUMBER (2026-11-24 ~12:34) — a
-    stricter buy flow than the 1.35x entry dominance gate, because
-    holding for MORE profit demands a stronger flow than entering
-    did. "Still gaining" is the 5-minute change from the loop's
-    own recorded price marks (filled in on the entry by the
-    evaluation). Missing or unusable data fails closed — a hold
-    that cannot be verified is a sell. Pure — no DB."""
+    buys beat sells — any positive edge — in the 5-minute bucket.
+    James, 2026-11-25 ~21:08 MST ("Both") and ~21:09 MST ("That
+    one too"): the old 75/25 (3:1) ratio is gone AND the
+    still-gaining condition is REMOVED entirely — the hold test is
+    buys > sells only. A tie (buys == sells) does NOT beat sells.
+    Missing or unusable counts fail closed — a hold that cannot
+    be verified is a sell. Pure — no DB."""
     if not entry:
-        return False
-    change_5m = entry.get("change_5m_pct")
-    try:
-        change_5m = float(change_5m) if change_5m is not None else None
-    except (TypeError, ValueError):
-        return False
-    if change_5m is None or change_5m <= 0:
         return False
     buys = entry.get("txns_m5_buys")
     sells = entry.get("txns_m5_sells")
@@ -1070,25 +1062,26 @@ def _middy_mid_hold(entry: dict) -> bool:
         return False
     if sells <= 0:
         return True
-    return buys >= MIDDY_MID_HOLD_BUY_RATIO * sells
+    return buys > MIDDY_MID_HOLD_BUY_RATIO * sells
 
 
 def _middy_take_profit_reason(entry: dict, avg_price: float,
                               peak_price: float,
                               price: float) -> str | None:
     """Middy's two-tier take profit, in plain words — James's
-    numbers (2026-11-24 ~12:48): SMALL is 5%-25% (take the small
-    profit on coins Middy is done with, exit, forget the coin);
-    the HIGHER window is 25% to no more than 37% (hold for more
-    profit ONLY while the mid-level hold test passes — still
-    gaining AND buys beating sells 75/25); AT 37% the profit is
+    numbers: SMALL is +17% (retuned 2026-11-25 ~21:10 MST from
+    +5% — "Sell all at 17% profit": take the profit on coins
+    Middy is done with, exit, forget the coin); the HIGHER window
+    is 25% to no more than 37% (hold for more profit ONLY while
+    the mid-level hold test passes — buys beating sells, any
+    positive edge, no still-gaining check); AT 37% the profit is
     secured IMMEDIATELY and Middy moves on. The 37% cap is the
     HARD CEILING: never hold past it, no exceptions — going
     higher exposes Middy to rugs and to others securing their
     profit, and Middy wants a clean exit before traders lock
-    profit (James, 2026-11-24 ~12:35). Below +5% there is no take
-    profit. peak_price is unused — the ceiling does not need the
-    peak, it only needs the profit from entry. Pure — no DB."""
+    profit (James, 2026-11-24 ~12:35). Below +17% there is no
+    take profit. peak_price is unused — the ceiling does not need
+    the peak, it only needs the profit from entry. Pure — no DB."""
     if avg_price <= 0 or price <= 0:
         return None
     profit = (price - avg_price) / avg_price * 100.0
@@ -1103,12 +1096,10 @@ def _middy_take_profit_reason(entry: dict, avg_price: float,
     if profit >= MIDDY_TP_MID_PCT:
         return (f"take profit: +{profit:.1f}% in the higher window "
                 f"(25%-37%) and the hold test failed — buys no "
-                f"longer beating sells 75/25 with the coin still "
-                f"gaining")
+                f"longer beating sells")
     return (f"take profit: +{profit:.1f}% at the small take-profit "
             f"level (+{MIDDY_TP_SMALL_PCT:.0f}%) and the mid-level "
-            f"hold test failed — buys no longer beating sells 75/25 "
-            f"with the coin still gaining")
+            f"hold test failed — buys no longer beating sells")
 
 
 def _middy_slow_reason(opened_ts: float | None, entry: dict,
@@ -1160,13 +1151,15 @@ def _middy_already_bought(db, bot_id: int, mint: str) -> bool:
 def _middy_entry_gates(db, cfg, entry: dict, rpc_factory,
                        rpc_cache: dict) -> tuple[bool, str]:
     """Middy's own entry gate, after the gain + buy-filter +
-    momentum checks: buys must beat sells by at least 35% in the
-    5-minute bucket (1.35 to 1). The spec's window is the feed's
-    5-minute bucket — transaction counts, not unique wallets, and
-    no sub-5-minute flow exists in the app's data. Fail-closed:
-    a coin whose counts are missing is never bought. Devnet
-    watchlist mints skip the gate, exactly like Gnat's and Pit's,
-    so the devnet paper path still exercises the engine."""
+    momentum checks: buys must just beat sells — any positive
+    edge — in the 5-minute bucket (James, 2026-11-25 ~21:07 MST,
+    "Buys just beat sells"). A tie (buys == sells) does NOT beat
+    sells. The spec's window is the feed's 5-minute bucket —
+    transaction counts, not unique wallets, and no sub-5-minute
+    flow exists in the app's data. Fail-closed: a coin whose
+    counts are missing is never bought. Devnet watchlist mints
+    skip the gate, exactly like Gnat's and Pit's, so the devnet
+    paper path still exercises the engine."""
     mint = entry.get("mint")
     if not mint:
         return False, "no mint to check"
@@ -1183,11 +1176,10 @@ def _middy_entry_gates(db, cfg, entry: dict, rpc_factory,
         return False, "middy buy dominance: no 5-minute txn data"
     if buys <= 0:
         return False, "middy buy dominance: no 5-minute buys"
-    if sells > 0 and buys < MIDDY_BUY_DOMINANCE_RATIO * sells:
+    if sells > 0 and buys <= MIDDY_BUY_DOMINANCE_RATIO * sells:
         return False, (
             f"middy buy dominance: buys {buys} vs sells {sells} in "
-            f"the last 5 minutes — buys must beat sells by at least "
-            f"35%")
+            f"the last 5 minutes — buys must beat sells")
     return True, ""
 
 
@@ -3277,7 +3269,7 @@ def _evaluate_rules_bot(db: sqlite3.Connection, cfg: Config, bot, rules,
             if not ok:
                 filtered.append((change, entry, f"momentum gate: {why}"))
                 continue
-            # Middy entry gate: buys beat sells by 35%+ in the
+            # Middy entry gate: buys just beat sells in the
             # 5-minute bucket.
             ok, why = _middy_entry_gates(
                 db, cfg, entry, rpc_factory, rpc_cache)

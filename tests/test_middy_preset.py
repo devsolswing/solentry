@@ -1,16 +1,15 @@
-"""Middy preset (2026-11-24): James's spec — mid-exposure
-paper-first sniper. Buys beat sells by 35%+, min mcap $20k CAD,
-buy 20% of balance per trade, max 2 coins open, take profit sells
-ALL in two tiers with a HARD CEILING at +37% (small TP 5%-25% on
-coins Middy is done with; higher window 25%-37% only while still
-gaining and buys beat sells 75/25 — at 37% secure the profit
-immediately and move on), trailing stop -8% from the peak, HARD
-stop 5.5% from entry, slow coins out after 120 seconds,
-daily-loss breaker 20% of the starting balance, 5-minute re-buy
-cooldown after a losing close, NO BLIND TRADES — every entry
-confirms on a second scan first. The card shows verified paper
-results; the bot details page shows the site-wide win/loss
-aggregate across all Middy copies.
+"""Middy preset (2026-11-24, retuned 2026-11-25): James's spec —
+mid-exposure paper-first sniper. Buys just beat sells (any
+positive edge), min mcap $17k CAD, buy 20% of balance per trade,
+max 2 coins open, take profit sells ALL — small TP at +17% on
+coins Middy is done with; higher window 25%-37% only while buys
+beat sells — at 37% secure the profit immediately and move on),
+trailing stop -8% from the peak, HARD stop 5.5% from entry, slow
+coins out after 120 seconds, daily-loss breaker 20% of the
+starting balance, 5-minute re-buy cooldown after a losing close,
+NO BLIND TRADES — every entry confirms on a second scan first.
+The card shows verified paper results; the bot details page shows
+the site-wide win/loss aggregate across all Middy copies.
 
 Every gate, exit, preset default, Page 6 button and cooldown is
 tested here, on the same fake-RPC / fake-feed / fake-scan harness
@@ -417,9 +416,9 @@ class TestMiddyRuleset(MiddyBase):
         self.assertIn("120 seconds", summary)
         self.assertIn("20% of the starting balance", summary)
         self.assertIn("5 minutes", summary)
-        self.assertIn("market cap of at least $20,000 CAD", summary)
-        self.assertIn("enforced as $14,000 USD at a fixed rate", summary)
-        self.assertNotIn("$20,000 USD", summary)
+        self.assertIn("market cap of at least $17,000 CAD", summary)
+        self.assertIn("enforced as $12,000 USD at a fixed rate", summary)
+        self.assertNotIn("$17,000 USD", summary)
         self.assertNotIn("Sell ladder: sell 100%", summary)
 
     def test_notes_name_the_not_enforced_rules(self):
@@ -428,9 +427,9 @@ class TestMiddyRuleset(MiddyBase):
         self.assertIn("1 second", joined)
         self.assertIn("80%", joined)
         self.assertIn("paper first", joined.lower())
-        self.assertIn("$14,000 USD", joined)
+        self.assertIn("$12,000 USD", joined)
         self.assertIn("fixed-rate", joined)
-        self.assertNotIn("$20,000 USD", joined)
+        self.assertNotIn("$17,000 USD", joined)
 
 
 class TestMiddyHardExits(MiddyBase):
@@ -472,15 +471,25 @@ class TestMiddyEntryGates(MiddyBase):
             self.fake_rpc, {})
         self.assertTrue(ok, why)
 
-    def test_buys_below_1_35x_sells_fail(self):
+    def test_buys_equal_to_sells_fail(self):
+        # A tie does NOT beat sells — buys must strictly exceed
+        # sells (James, 2026-11-25: "Buys just beat sells").
         ok, why = _middy_entry_gates(
             self.db, self.cfg,
-            _middy_entry(MIDDY_MINT, 0.01, buys=130, sells=100),
+            _middy_entry(MIDDY_MINT, 0.01, buys=100, sells=100),
             self.fake_rpc, {})
         self.assertFalse(ok)
-        self.assertIn("35%", why)
+        self.assertIn("must beat sells", why)
 
-    def test_buys_exactly_1_35x_sells_pass(self):
+    def test_buys_one_more_than_sells_pass(self):
+        # Any positive edge passes: 101 buys vs 100 sells.
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg,
+            _middy_entry(MIDDY_MINT, 0.01, buys=101, sells=100),
+            self.fake_rpc, {})
+        self.assertTrue(ok, why)
+
+    def test_buys_above_sells_pass(self):
         ok, why = _middy_entry_gates(
             self.db, self.cfg,
             _middy_entry(MIDDY_MINT, 0.01, buys=135, sells=100),
@@ -509,42 +518,55 @@ class TestMiddyTakeProfit(MiddyBase):
         return {"txns_m5_buys": buys, "txns_m5_sells": sells,
                 "change_5m_pct": change_5m}
 
-    def test_mid_hold_when_still_gaining_and_buys_75_25(self):
+    def test_mid_hold_when_buys_beat_sells(self):
         self.assertTrue(_middy_mid_hold(self._flow()))
 
-    def test_mid_hold_fails_below_75_25(self):
-        # 200 buys vs 100 sells is 2:1 — under the 3:1 ratio.
-        self.assertFalse(_middy_mid_hold(self._flow(buys=200)))
+    def test_mid_hold_fails_when_buys_do_not_beat_sells(self):
+        # 100 buys vs 100 sells is a tie — a tie does not beat
+        # sells. 90 vs 100 is below.
+        self.assertFalse(_middy_mid_hold(self._flow(buys=100)))
+        self.assertFalse(_middy_mid_hold(self._flow(buys=90)))
 
-    def test_mid_hold_fails_when_not_gaining(self):
-        self.assertFalse(_middy_mid_hold(
+    def test_mid_hold_passes_when_falling_but_buys_beat_sells(self):
+        # The still-gaining condition is REMOVED (James, 2026-11-25
+        # "That one too"): a falling coin still holds while buys
+        # beat sells — the hold test is buys > sells only.
+        self.assertTrue(_middy_mid_hold(
             self._flow(buys=300, change_5m=-1.0)))
 
     def test_mid_hold_fails_on_missing_data(self):
         self.assertFalse(_middy_mid_hold({}))
         self.assertFalse(_middy_mid_hold(
-            {"txns_m5_buys": 300, "txns_m5_sells": 100}))
+            {"txns_m5_buys": None, "txns_m5_sells": 100}))
         self.assertFalse(_middy_mid_hold(
+            {"txns_m5_buys": 300, "txns_m5_sells": None}))
+
+    def test_mid_hold_ignores_missing_change(self):
+        # The 5-minute change is no longer part of the hold test,
+        # so a missing change no longer fails it.
+        self.assertTrue(_middy_mid_hold(
+            {"txns_m5_buys": 300, "txns_m5_sells": 100}))
+        self.assertTrue(_middy_mid_hold(
             {"txns_m5_buys": 300, "txns_m5_sells": 100,
              "change_5m_pct": None}))
 
-    def test_below_5_pct_never_sells(self):
+    def test_below_17_pct_never_sells(self):
         self.assertIsNone(_middy_take_profit_reason(
-            self._flow(buys=100), 1.0, 1.04, 1.04))
+            self._flow(buys=100), 1.0, 1.16, 1.16))
 
-    def test_plus_15_pct_sells_when_hold_test_fails(self):
+    def test_plus_18_pct_sells_when_hold_test_fails(self):
         reason = _middy_take_profit_reason(
-            self._flow(buys=100), 1.0, 1.15, 1.15)
+            self._flow(buys=100), 1.0, 1.18, 1.18)
         self.assertIsNotNone(reason)
         self.assertIn("small take-profit", reason)
 
-    def test_plus_15_pct_holds_when_hold_test_passes(self):
+    def test_plus_18_pct_holds_when_hold_test_passes(self):
         self.assertIsNone(_middy_take_profit_reason(
-            self._flow(), 1.0, 1.15, 1.15))
+            self._flow(), 1.0, 1.18, 1.18))
 
     def test_plus_30_pct_holds_in_the_higher_window(self):
-        # +30% is inside the higher window (25%-37%): with the
-        # coin still gaining and buys 75/25, it holds for more.
+        # +30% is inside the higher window (25%-37%): with buys
+        # beating sells, it holds for more.
         self.assertIsNone(_middy_take_profit_reason(
             self._flow(), 1.0, 1.30, 1.30))
 
@@ -555,7 +577,7 @@ class TestMiddyTakeProfit(MiddyBase):
         self.assertIn("higher window", reason)
 
     def test_37_pct_is_the_ceiling_even_with_a_strong_flow(self):
-        # +37% with the coin still gaining and buys 75/25: the
+        # +37% with buys beating sells: the
         # ceiling sells anyway — secure the profit immediately
         # and move on, never hold past it.
         reason = _middy_take_profit_reason(
@@ -938,20 +960,20 @@ class TestMiddyIntegration(MiddyBase):
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, change_5m=0.9))
         self.assertEqual(self._buys(outcomes), [])
 
-    def test_below_14k_mcap_never_buys(self):
-        # The bar is $20,000 CAD, enforced as $14,000 USD (fixed
+    def test_below_12k_mcap_never_buys(self):
+        # The bar is $17,000 CAD, enforced as $12,000 USD (fixed
         # rate 1.4296 CAD/USD, Bank of Canada 2026-11-24): a coin
-        # under $14,000 USD is under $20,000 CAD and never buys.
+        # under $12,000 USD is under $17,000 CAD and never buys.
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
-            bot_id, _middy_entry(MIDDY_MINT, 0.0106, mcap=13000))
+            bot_id, _middy_entry(MIDDY_MINT, 0.0106, mcap=11000))
         self.assertEqual(self._buys(outcomes), [])
 
-    def test_19k_mcap_buys_true_20k_cad_bar(self):
+    def test_19k_mcap_buys_true_17k_cad_bar(self):
         # Firefly (2026-11-24): $19,260 USD was skipped by the old
         # $20,000 USD bar, but $19,260 USD is about $27,500 CAD —
         # above James's $20,000 CAD rule. A $19,000 coin passes
-        # the true CAD bar now.
+        # the $17,000 CAD bar now.
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, mcap=19000))
@@ -959,12 +981,34 @@ class TestMiddyIntegration(MiddyBase):
         self.assertEqual(len(buys), 1)
         self.assertIsNotNone(self._position(bot_id, MIDDY_MINT))
 
-    def test_dominance_below_1_35_never_buys(self):
+    def test_dominance_tie_never_buys(self):
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
             bot_id, _middy_entry(MIDDY_MINT, 0.0106,
-                                 buys=130, sells=100))
+                                 buys=100, sells=100))
         self.assertEqual(self._buys(outcomes), [])
+
+    def test_below_175_usd_5m_volume_never_buys(self):
+        # The floor is $250 CAD (~$175 USD) applied to the
+        # 5-minute bucket — the closest version of James's
+        # 7-minute window (no 7-minute volume exists). A coin
+        # with $100 of 5-minute volume never buys. (volume_h1 is
+        # set so the momentum gate would pass — only the floor
+        # blocks this buy.)
+        bot_id = self._insert_bot(rules=middy_ruleset())
+        outcomes = self._buy_twice(
+            bot_id, _middy_entry(MIDDY_MINT, 0.0106, volume_m5=100,
+                                 volume_h1=1000))
+        self.assertEqual(self._buys(outcomes), [])
+
+    def test_175_usd_5m_volume_passes_the_floor(self):
+        # Exactly $175 of 5-minute volume meets the floor, and
+        # the momentum gate passes (175 > 2000/12 hourly pace).
+        bot_id = self._insert_bot(rules=middy_ruleset())
+        outcomes = self._buy_twice(
+            bot_id, _middy_entry(MIDDY_MINT, 0.0106, volume_m5=175,
+                                 volume_h1=2000))
+        self.assertEqual(len(self._buys(outcomes)), 1)
 
     def test_max_2_open_blocks_a_third_buy(self):
         bot_id = self._insert_bot(rules=middy_ruleset())
@@ -980,11 +1024,11 @@ class TestMiddyIntegration(MiddyBase):
     def test_take_profit_sells_all_when_hold_test_fails(self):
         bot_id = self._insert_bot(rules=middy_ruleset())
         self._insert_position(bot_id, MIDDY_MINT, 100.0, 0.01)
-        # +15% with buys 100 vs sells 100: the 75/25 hold test
-        # fails — sell all at the small take-profit level.
+        # +18% with buys 100 vs sells 100: the hold test fails —
+        # sell all at the small take-profit level (+17%).
         # The 5-minute change now comes from the loop's own marks.
-        self._insert_mark(bot_id, MIDDY_MINT, 0.0115 / 1.1505, _now(-330))
-        entry = _middy_entry(MIDDY_MINT, 0.0115, change_5m=15.0,
+        self._insert_mark(bot_id, MIDDY_MINT, 0.0118 / 1.1505, _now(-330))
+        entry = _middy_entry(MIDDY_MINT, 0.0118, change_5m=15.0,
                              buys=100, sells=100)
         outcomes = self._run([entry])
         sells = self._sells(outcomes)
@@ -995,12 +1039,12 @@ class TestMiddyIntegration(MiddyBase):
     def test_take_profit_holds_when_hold_test_passes(self):
         bot_id = self._insert_bot(rules=middy_ruleset())
         self._insert_position(bot_id, MIDDY_MINT, 100.0, 0.01)
-        # +15% with buys 300 vs sells 100 and the coin still
-        # gaining: the 75/25 hold test passes — hold for the mid
-        # level.
+        # +18% with buys 300 vs sells 100: the hold test passes
+        # (buys beat sells) — hold for the mid level, even though
+        # the small take-profit level (+17%) is reached.
         # The 5-minute change now comes from the loop's own marks.
-        self._insert_mark(bot_id, MIDDY_MINT, 0.0115 / 1.1505, _now(-330))
-        entry = _middy_entry(MIDDY_MINT, 0.0115, change_5m=15.0,
+        self._insert_mark(bot_id, MIDDY_MINT, 0.0118 / 1.1505, _now(-330))
+        entry = _middy_entry(MIDDY_MINT, 0.0118, change_5m=15.0,
                              buys=300, sells=100)
         outcomes = self._run([entry])
         self.assertEqual(self._sells(outcomes), [])
@@ -1009,9 +1053,9 @@ class TestMiddyIntegration(MiddyBase):
     def test_ceiling_sells_even_with_a_strong_flow(self):
         bot_id = self._insert_bot(rules=middy_ruleset())
         self._insert_position(bot_id, MIDDY_MINT, 100.0, 0.01)
-        # +37% with buys 300 vs sells 100 and the coin still
-        # gaining: at the ceiling — secure the profit immediately
-        # and move on. The ceiling is absolute, no chasing higher.
+        # +37% with buys 300 vs sells 100: at the ceiling — secure
+        # the profit immediately and move on. The ceiling is
+        # absolute, no chasing higher.
         # The 5-minute change now comes from the loop's own marks.
         self._insert_mark(bot_id, MIDDY_MINT, 0.0137 / 1.1505, _now(-330))
         entry = _middy_entry(MIDDY_MINT, 0.0137, change_5m=15.0,
@@ -1025,9 +1069,9 @@ class TestMiddyIntegration(MiddyBase):
     def test_higher_window_holds_with_a_strong_flow(self):
         bot_id = self._insert_bot(rules=middy_ruleset())
         self._insert_position(bot_id, MIDDY_MINT, 100.0, 0.01)
-        # +30% with buys 300 vs sells 100 and the coin still
-        # gaining: inside the higher window (25%-37%) with the
-        # hold test passing — hold for more.
+        # +30% with buys 300 vs sells 100: inside the higher
+        # window (25%-37%) with the hold test passing — hold for
+        # more.
         # The 5-minute change now comes from the loop's own marks.
         self._insert_mark(bot_id, MIDDY_MINT, 0.013 / 1.1505, _now(-330))
         entry = _middy_entry(MIDDY_MINT, 0.013, change_5m=15.0,

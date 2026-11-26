@@ -760,13 +760,13 @@ PIT_NOTES = [
 
 MIDDY_CATEGORY = "Middy"
 MIDDY_PRESET_NAME = "Middy"
-# Middy (James's spec, 2026-11-24) — the mid-exposure preset,
-# paper-first. His numbers: buys beat sells by 35%+, min mcap
-# $20k CAD, buy 20% of balance per trade, max 2 coins open, take
-# profit sells ALL in two tiers with a HARD CEILING at 37%
-# (small TP 5%-25% on coins Middy is done with; higher window
-# 25%-37% only while still gaining and buys beat sells 75/25 —
-# at 37% secure the profit immediately and move on), trailing stop -8% from the peak, HARD stop
+# Middy (James's spec, 2026-11-24, retuned 2026-11-25) — the
+# mid-exposure preset, paper-first. His numbers: buys just beat
+# sells (any positive edge), min mcap $17k CAD, buy 20% of balance
+# per trade, max 2 coins open, take profit sells ALL — small TP at
+# +17% on coins Middy is done with; higher window 25%-37% only
+# while buys beat sells — at 37% secure the profit immediately
+# and move on), trailing stop -8% from the peak, HARD stop
 # 5.5% from entry, slow coins out after 120 seconds, daily-loss
 # breaker 20% of the starting balance, 5-minute re-buy cooldown
 # after a losing close, and NO BLIND TRADES — every entry
@@ -775,24 +775,37 @@ MIDDY_PRESET_NAME = "Middy"
 # $20 of real money James set aside stays put until paper results
 # verify actual profit (his order, 2026-11-24 ~11:34 MST).
 MIDDY_SCAN_INTERVAL_SECONDS = 10
-MIDDY_BUY_DOMINANCE_RATIO = 1.35
+# Buys just beat sells — any positive edge (James, 2026-11-25
+# ~21:07 MST, "Buys just beat sells"). The old 1.35x bar is gone:
+# a tie (buys == sells) does NOT beat sells and fails closed.
+MIDDY_BUY_DOMINANCE_RATIO = 1.0
 # The coin must actually be moving: a 1% 5-minute gain floor.
 # REMY DEFAULT — James gave no gain threshold; the momentum gate
 # also requires a positive 5-minute gain.
 MIDDY_MIN_GAIN_5M_PCT = 1.0
-# Min mcap $20,000 CAD (JAMES'S NUMBER). The engine's market-cap
-# field is USD and the app has no CAD price source, so the CAD bar
-# is enforced as a FIXED-RATE USD figure: $20,000 CAD at the Bank
-# of Canada rate 1.4296 CAD/USD (2026-11-24) = $13,990 USD,
-# rounded to $14,000. The USD figure is FIXED — it never moves
-# with the rate. (James, 2026-11-24 ~17:15: "Set it to true $20k
-# CAD" — the old $20,000 USD bar was ~37% stricter than his rule
-# and skipped Firefly at $19,260 USD, about $27,500 CAD.)
-MIDDY_MIN_MCAP_CAD = 20000.0
-MIDDY_MIN_MCAP_USD = 14000.0
-# Min 5-minute volume $1,000 — REMY DEFAULT, the engine's standard
-# minimum (same as the scanner default). James gave no floor.
-MIDDY_MIN_VOLUME_5M_USD = 1000.0
+# Min mcap $17,000 CAD (JAMES'S NUMBER, retuned 2026-11-25
+# ~21:05 MST from $20,000 CAD). The engine's market-cap field is
+# USD and the app has no CAD price source, so the CAD bar is
+# enforced as a FIXED-RATE USD figure: $17,000 CAD at the Bank of
+# Canada rate 1.4296 CAD/USD (2026-11-24) = $11,892 USD, rounded
+# to $12,000 per James's "about 12k usd". The USD figure is
+# FIXED — it never moves with the rate. Note: $12,000 USD is
+# $17,155 CAD at the fixed rate, so the enforced bar is ~$155 CAD
+# stricter than $17,000 CAD — James's rounded number, recorded
+# transparently, not hidden.
+MIDDY_MIN_MCAP_CAD = 17000.0
+MIDDY_MIN_MCAP_USD = 12000.0
+# Min volume $250 CAD over 7 minutes, from the coin's chart
+# history (JAMES'S NUMBER, 2026-11-25 ~21:05 MST). CLOSEST
+# VERSION — the 7-minute window is NOT enforced as written: no
+# 7-minute volume exists anywhere in the app's data. Chart-history
+# points carry price only (GeckoTerminal closes, feed ticks), and
+# the feeds carry 5-minute and 1-hour volume buckets only. The
+# floor is therefore applied to the 5-minute bucket at the fixed
+# rate: $250 CAD / 1.4296 = $175 USD. The window differs (5
+# minutes, not 7); the amount is James's number, converted, never
+# scaled or guessed.
+MIDDY_MIN_VOLUME_5M_USD = 175.0
 MIDDY_BUY_SIZE_PCT = 20
 MIDDY_MAX_OPEN_TRADES = 2
 MIDDY_STOP_LOSS_PCT = 5.5
@@ -802,21 +815,24 @@ MIDDY_TRAILING_STOP_PCT = 8.0
 # with, and a mid level to secure MORE profit — never hold past
 # the mid level, no exceptions, no chasing higher. Rationale, his
 # words: going higher exposes Middy to rugs and to others securing
-# their profit. The percentages are JAMES'S NUMBERS (2026-11-24
-# ~12:48): small is 5%-25%, the higher window is 25% to no more
-# than 37%, and at 37% the profit is secured immediately and
-# Middy moves on. The earlier higher holds (+26-55% momentum
-# hold, past-+55% "bitcoin Jr." hold) are REMOVED — superseded
-# by this ceiling. (Remy's earlier +10%/+25% proposal is
-# superseded by James's numbers.)
-MIDDY_TP_SMALL_PCT = 5.0
+# their profit. The percentages are JAMES'S NUMBERS: small is
+# +17% (retuned 2026-11-25 ~21:10 MST from +5% — "Sell all at
+# 17% profit"), the higher window is 25% to no more than 37%,
+# and at 37% the profit is secured immediately and Middy moves
+# on. The earlier higher holds (+26-55% momentum hold, past-+55%
+# "bitcoin Jr." hold) are REMOVED — superseded by this ceiling.
+# (Remy's earlier +10%/+25% proposal is superseded by James's
+# numbers.)
+MIDDY_TP_SMALL_PCT = 17.0
 MIDDY_TP_MID_PCT = 25.0
 MIDDY_TP_CEILING_PCT = 37.0
-# Mid-level hold test: hold for the mid level ONLY while the coin
-# is still gaining AND buys beat sells 75/25 (3:1). JAMES'S NUMBER
-# (2026-11-24 ~12:34) — a stricter buy flow than the 1.35x entry
-# dominance gate.
-MIDDY_MID_HOLD_BUY_RATIO = 3.0
+# Mid-level hold test: hold for the mid level ONLY while buys
+# beat sells — any positive edge (James, 2026-11-25 ~21:08 MST,
+# "Both", and ~21:09 MST, "That one too"). The old 75/25 (3:1)
+# ratio is gone AND the still-gaining condition is REMOVED
+# entirely — the hold test is buys > sells only. The 2026-11-24
+# numbers (75/25 + still gaining) are superseded by these.
+MIDDY_MID_HOLD_BUY_RATIO = 1.0
 # Slow coins: 120 seconds of slowness sells all. "Slow" is a flat
 # coin — the 5-minute change within +/-0.5%, the same flat band
 # as Pit. REMY DEFAULT for the band; James gave the 120 seconds.
@@ -891,24 +907,35 @@ def middy_ruleset() -> dict:
 # Shown on the preset list, in plain words, next to the enforced
 # rules — never dropped, never pretended to be enforced.
 MIDDY_NOTES = [
-    "Entry — buys beat sells by 35%+ in the 5-minute bucket "
-    "(buys at least 1.35x sells). Closest version: the feed gives "
-    "5-minute transaction buckets, not real-time ticks — the ratio "
-    "is measured on the bucket, never guessed.",
+    "Entry — buys just beat sells in the 5-minute bucket "
+    "(any positive edge — a tie does not beat sells). Closest "
+    "version: the feed gives 5-minute transaction buckets, not "
+    "real-time ticks — the ratio is measured on the bucket, "
+    "never guessed.",
     "Entry — NO BLIND TRADES: the signal must still be passing "
     "on a second scan before any buy — a one-scan spike never "
     "buys. The buy filter, the four-part momentum gate, the "
     "dominance gate and the scam gate are all re-checked on the "
     "confirming scan.",
-    "Entry — market cap at least $20,000 CAD. Enforced as $14,000 "
+    "Entry — market cap at least $17,000 CAD. Enforced as $12,000 "
     "USD — a fixed-rate conversion at 1.4296 CAD/USD (Bank of "
     "Canada, 2026-11-24); the app has no live CAD price source, "
     "so the USD figure is fixed and never moves with the rate. "
-    "A coin under $20,000 CAD can never pass.",
-    "Entry — minimum 5-minute gain 1% and minimum 5-minute "
-    "volume $1,000. REMY DEFAULTS — James gave no gain floor or "
-    "volume floor; the momentum gate also requires a positive "
-    "5-minute gain and rising volume.",
+    "Note: $12,000 USD is $17,155 CAD at the fixed rate, so the "
+    "enforced bar is about $155 CAD stricter than $17,000 CAD — "
+    "James's rounded number, recorded transparently. "
+    "A coin under $17,000 CAD can never pass.",
+    "Entry — minimum 5-minute gain 1% and minimum volume $250 CAD "
+    "(about $175 USD at the fixed 1.4296 rate) over the last "
+    "7 minutes from the coin's chart history. CLOSEST VERSION: "
+    "no 7-minute volume exists anywhere in the app's data — chart "
+    "points carry price only, and the feeds carry 5-minute and "
+    "1-hour volume buckets only — so the floor is applied to the "
+    "5-minute bucket ($175 USD). The window differs (5 minutes, "
+    "not 7); the amount is James's number, converted, never "
+    "scaled or guessed. The 1% gain floor is a REMY DEFAULT — "
+    "James gave no gain floor; the momentum gate also requires "
+    "a positive 5-minute gain and rising volume.",
     "Entry — standard safety gates: the pre-buy scam gate rejects "
     "a coin when the top 10 holders own 21% or more (the "
     "engine's standard default, same as Scanner — James gave no "
@@ -917,15 +944,17 @@ MIDDY_NOTES = [
     "or symbol). The top-10 watch sells everything when a held "
     "coin's top-10 share drops 10% from its peak.",
     "Exits — take profit sells ALL, in two tiers with a HARD "
-    "CEILING: a small take profit (5%-25%) on coins Middy is done "
-    "with (take the small profit, exit, forget the coin — never "
+    "CEILING: a small take profit at +17% on coins Middy is done "
+    "with (take the profit, exit, forget the coin — never "
     "rebuy); a higher window (25% to no more than 37%) to secure "
-    "MORE profit, held ONLY while the coin is still gaining AND "
-    "buys beat sells 75/25 (3:1). The +37% cap is the ceiling — "
+    "MORE profit, held ONLY while buys beat sells (any positive "
+    "edge — no 75/25 ratio, no still-gaining check). The +37% cap "
+    "is the ceiling — "
     "Middy NEVER holds past it, no exceptions, no chasing higher "
     "(James, 2026-11-24 ~12:35: going higher exposes Middy to "
     "rugs and to others securing their profit). The percentages "
-    "are JAMES'S NUMBERS (2026-11-24 ~12:48): small is 5%-25%, "
+    "are JAMES'S NUMBERS: small is +17% (retuned 2026-11-25 "
+    "~21:10 MST from +5%), "
     "the higher window is 25% to no more than 37%, and at 37% "
     "the profit is secured "
     "immediately and Middy moves on. The earlier higher holds "
@@ -996,7 +1025,7 @@ MIDDY_NOTES = [
     "ranks by the strongest 5-minute gain and buys at most one "
     "coin per scan — the strongest gainer that passes the buy "
     "filter, the four-part momentum gate (rising volume, buyers "
-    "over sellers, positive 1-hour trend), the 35% buy-dominance "
+    "over sellers, positive 1-hour trend), the buys-beat-sells "
     "gate, the scam gate and the 2-scan confirmation. A coin the "
     "market is not going crazy for never passes those gates — a "
     "big price spike with weak buys is filtered, never bought.",
@@ -1066,8 +1095,8 @@ def preset_bots() -> list:
          "endpoint": "bot_preset_pit"},
         {"key": "middy",
          "name": MIDDY_PRESET_NAME,
-         "tagline": "Mid-exposure sniper — buys beat sells 35%+, "
-                    "20% a trade, sell all at +10-25%, 5.5% stop.",
+         "tagline": "Mid-exposure sniper — buys beat sells, "
+                    "20% a trade, sell all at +17%, 5.5% stop.",
          "category": MIDDY_CATEGORY,
          "rules": middy_ruleset(),
          "notes": list(MIDDY_NOTES),
@@ -1512,8 +1541,8 @@ def summarize_rules(rules) -> str:
         sources = " and ".join(rules["scan_sources"])
         lines.append(
             f"Scan {sources} every {rules['scan_interval_seconds']} "
-            f"seconds for gainers whose buys beat sells by 35% or "
-            f"more, checking the safety gates.")
+            f"seconds for gainers whose buys beat sells, "
+            f"checking the safety gates.")
     else:
         lines.append(
             f"Watch your own coin list every "
@@ -1618,10 +1647,11 @@ def summarize_rules(rules) -> str:
     if rules["kind"] == "middy":
         lines.append(
             "Take profit sells ALL, in two tiers with a hard "
-            "ceiling: a small take profit (5%-25%) on coins Middy "
+            "ceiling: a small take profit at +17% on coins Middy "
             "is done with; a higher window (25% to no more than "
-            "37%) to secure more profit, held only while the coin "
-            "is still gaining and buys beat sells 75/25 (3:1). "
+            "37%) to secure more profit, held only while buys "
+            "beat sells (any positive edge — no 75/25 ratio, no "
+            "still-gaining check). "
             "At 37% the profit is secured immediately and Middy "
             "moves on — the ceiling, never hold past it, no "
             "exceptions: going higher exposes Middy to rugs and "
@@ -1672,9 +1702,9 @@ def summarize_rules(rules) -> str:
         mcap = buy_filter.get("min_market_cap_usd", 0.0)
         max_mcap = buy_filter.get("max_market_cap_usd", 0.0)
         if rules["kind"] == "middy":
-            # The bar is $20,000 CAD, enforced as a fixed-rate USD
+            # The bar is $17,000 CAD, enforced as a fixed-rate USD
             # figure — state the CAD basis in the UI, never a bare
-            # USD number that reads as a $20,000 USD bar.
+            # USD number that reads as a $17,000 USD bar.
             mcap_clause = (f", and a market cap of at least "
                            f"${MIDDY_MIN_MCAP_CAD:,.0f} CAD (enforced as "
                            f"${mcap:,.0f} USD at a fixed rate)"
