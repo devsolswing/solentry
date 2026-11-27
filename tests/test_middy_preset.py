@@ -1,8 +1,10 @@
-"""Middy preset (2026-11-24, retuned 2026-11-25): James's spec —
-mid-exposure paper-first sniper. Buys just beat sells (any
-positive edge), min mcap $17k CAD, buy 20% of balance per trade,
-max 2 coins open, take profit sells ALL — small TP at +17% on
-coins Middy is done with; higher window 25%-37% only while buys
+"""Middy preset (2026-11-24, retuned 2026-11-25, filters retuned
+2026-11-26): James's spec — mid-exposure paper-first sniper.
+Buys just beat sells (any positive edge), turnover (5-minute
+volume / market cap) at least 0.01, only coins under 10 minutes
+old and under 75% of the bonding curve, buy 20% of balance per
+trade, max 2 coins open, take profit sells ALL — small TP at +17%
+on coins Middy is done with; higher window 25%-37% only while buys
 beat sells — at 37% secure the profit immediately and move on),
 trailing stop -8% from the peak, HARD stop 5.5% from entry, slow
 coins out after 120 seconds, daily-loss breaker 20% of the
@@ -65,18 +67,27 @@ def _now(offset_seconds=0):
                 "%Y-%m-%dT%H:%M:%SZ")
 
 
+def _now_ms() -> int:
+    """Current time as a ms epoch — the scan feed's pairCreatedAt unit."""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
 def _entry(mint, price, change_5m=2.0, change_1h=25.0,
            volume_m5=5000, volume_h1=12000, buys=140, sells=100,
-           mcap=25000):
+           mcap=25000, age_minutes=5.0):
     """A realistic Middy candidate: +2% in 5 minutes, $25k mcap,
-    volume rising (5x the hourly pace), buys 1.4x sells."""
+    volume rising (5x the hourly pace), buys 1.4x sells. Fresh
+    by default: 5 minutes old, inside the 10-minute lifecycle
+    window (James, 2026-11-26). Tests that need an old, missing,
+    or future creation time override pair_created_at after the
+    call, or pass age_minutes."""
     return {"mint": mint, "symbol": mint[:6], "name": mint,
             "price_usd": price, "change_5m_pct": change_5m,
             "change_1h_pct": change_1h, "change_6h_pct": None,
             "change_24h_pct": None, "liquidity_usd": 1000,
             "market_cap_usd": mcap,
             "dex_id": "pumpfun", "pair_address": "pair" + mint,
-            "pair_created_at": 0,
+            "pair_created_at": _now_ms() - int(age_minutes * 60_000),
             "volume_m5_usd": volume_m5, "volume_h1_usd": volume_h1,
             "txns_m5_buys": buys, "txns_m5_sells": sells}
 
@@ -143,6 +154,15 @@ class _FakeRpc:
         self.mint = mint
         self.progress_pct = progress_pct
         self.uri = uri
+        # One fake serves every RPC read in these tests: the
+        # curve account is served for all three test mints, at
+        # the same progress. In production the RPC serves any
+        # mint's curve account, so the fake must too — otherwise
+        # a second or third candidate coin could never pass the
+        # curve half of Middy's lifecycle window in a test.
+        self.curve_addrs = {bonding_curve_pda(m)[0]
+                            for m in (MIDDY_MINT, MIDDY_MINT2,
+                                      MIDDY_MINT3)}
         self.curve_addr, _ = bonding_curve_pda(mint)
         self.meta_addr = metadata_pda(mint)
         self.urls = []
@@ -152,7 +172,7 @@ class _FakeRpc:
         return self
 
     def get_account_info(self, pubkey):
-        if pubkey == self.curve_addr:
+        if pubkey in self.curve_addrs:
             return {"data": _curve_bytes(self.progress_pct)}
         if pubkey == self.meta_addr:
             return {"data": _metadata_bytes(self.uri)}
@@ -403,6 +423,51 @@ class TestMiddyRuleset(MiddyBase):
         self.assertIsNone(err, err)
         self.assertEqual(cleaned["kind"], "middy")
 
+    def test_ruleset_carries_turnover_not_floors(self):
+        # The flat floors are GONE (2026-11-26): the preset's
+        # buy filter gates on the turnover ratio only. The
+        # volume/mcap keys stay at 0.0 (off) on purpose — the
+        # validator fills a missing key from the shared default
+        # ($1,000 volume), so omitting them would silently
+        # reintroduce a floor.
+        filt = middy_ruleset()["buy_filter"]
+        self.assertEqual(filt["min_turnover_ratio"], 0.01)
+        self.assertEqual(filt["min_volume_5m_usd"], 0.0)
+        self.assertEqual(filt["min_market_cap_usd"], 0.0)
+        self.assertEqual(filt["max_market_cap_usd"], 0.0)
+        cleaned, err = validate_ruleset(middy_ruleset())
+        self.assertIsNone(err, err)
+        self.assertEqual(
+            cleaned["buy_filter"]["min_turnover_ratio"], 0.01)
+
+    def test_turnover_ratio_out_of_range_rejected(self):
+        rules = middy_ruleset()
+        for bad in (-0.1, 10.1, "fast"):
+            rules["buy_filter"]["min_turnover_ratio"] = bad
+            _, err = validate_ruleset(rules)
+            self.assertIsNotNone(err, bad)
+
+    def test_old_stored_rules_without_turnover_load_as_no_gate(self):
+        # A bot created before the turnover gate stores the old
+        # floors and no min_turnover_ratio key — it loads as 0.0
+        # (no gate), never as a guessed ratio, and its old floors
+        # are preserved as stored, not rewritten. That is the
+        # preset-propagation rule in action: an existing bot
+        # keeps its old rules until it is deleted and recreated
+        # from the new preset.
+        rules = middy_ruleset()
+        rules["buy_filter"]["min_volume_5m_usd"] = 175.0
+        rules["buy_filter"]["min_market_cap_usd"] = 12000.0
+        del rules["buy_filter"]["min_turnover_ratio"]
+        cleaned, err = validate_ruleset(rules)
+        self.assertIsNone(err, err)
+        self.assertEqual(
+            cleaned["buy_filter"]["min_turnover_ratio"], 0.0)
+        self.assertEqual(
+            cleaned["buy_filter"]["min_volume_5m_usd"], 175.0)
+        self.assertEqual(
+            cleaned["buy_filter"]["min_market_cap_usd"], 12000.0)
+
     def test_preset_list_ends_with_middy(self):
         presets = preset_bots()
         self.assertEqual(presets[-1]["key"], "middy")
@@ -416,9 +481,14 @@ class TestMiddyRuleset(MiddyBase):
         self.assertIn("120 seconds", summary)
         self.assertIn("20% of the starting balance", summary)
         self.assertIn("5 minutes", summary)
-        self.assertIn("market cap of at least $17,000 CAD", summary)
-        self.assertIn("enforced as $12,000 USD at a fixed rate", summary)
-        self.assertNotIn("$17,000 USD", summary)
+        # The flat floors are gone (2026-11-26): the summary
+        # states the turnover gate, never a $ volume or mcap
+        # floor that no longer applies.
+        self.assertIn("turnover", summary)
+        self.assertIn("0.01", summary)
+        self.assertNotIn("$17,000 CAD", summary)
+        self.assertNotIn("$12,000 USD", summary)
+        self.assertNotIn("$175", summary)
         self.assertNotIn("Sell ladder: sell 100%", summary)
 
     def test_notes_name_the_not_enforced_rules(self):
@@ -427,9 +497,14 @@ class TestMiddyRuleset(MiddyBase):
         self.assertIn("1 second", joined)
         self.assertIn("80%", joined)
         self.assertIn("paper first", joined.lower())
-        self.assertIn("$12,000 USD", joined)
-        self.assertIn("fixed-rate", joined)
-        self.assertNotIn("$17,000 USD", joined)
+        # The old floors are gone — the notes say so (named only
+        # as the removed floors), and name the turnover gate and
+        # the Block-0 gap instead.
+        self.assertNotIn("$12,000 USD", joined)
+        self.assertNotIn("fixed-rate", joined)
+        self.assertIn("are GONE", joined)
+        self.assertIn("0.01", joined)
+        self.assertIn("bundled", joined.lower())
 
 
 class TestMiddyHardExits(MiddyBase):
@@ -511,6 +586,94 @@ class TestMiddyEntryGates(MiddyBase):
         ok, why = _middy_entry_gates(
             self.db, self.cfg, entry, self.fake_rpc, {})
         self.assertTrue(ok, why)
+
+    def test_lifecycle_fresh_coin_passes(self):
+        # 5 minutes old, 30% curve (the fake RPC default) —
+        # inside both halves of the lifecycle window.
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, _middy_entry(MIDDY_MINT, 0.01),
+            self.fake_rpc, {})
+        self.assertTrue(ok, why)
+
+    def test_lifecycle_old_coin_rejected(self):
+        # 11 minutes old — past the 10-minute window.
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg,
+            _middy_entry(MIDDY_MINT, 0.01, age_minutes=11.0),
+            self.fake_rpc, {})
+        self.assertFalse(ok)
+        self.assertIn("older than 10 minutes", why)
+
+    def test_lifecycle_at_10_minutes_rejected(self):
+        # Boundary: exactly 10 minutes old is NOT under 10 minutes.
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg,
+            _middy_entry(MIDDY_MINT, 0.01, age_minutes=10.0),
+            self.fake_rpc, {})
+        self.assertFalse(ok)
+        self.assertIn("older than 10 minutes", why)
+
+    def test_lifecycle_missing_creation_time_fails_closed(self):
+        entry = _middy_entry(MIDDY_MINT, 0.01)
+        entry["pair_created_at"] = None
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, entry, self.fake_rpc, {})
+        self.assertFalse(ok)
+        self.assertIn("no pair creation time", why)
+
+    def test_lifecycle_future_creation_time_rejected(self):
+        entry = _middy_entry(MIDDY_MINT, 0.01)
+        entry["pair_created_at"] = _now_ms() + 60_000
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, entry, self.fake_rpc, {})
+        self.assertFalse(ok)
+        self.assertIn("in the future", why)
+
+    def test_lifecycle_seconds_epoch_creation_time_accepted(self):
+        # A seconds-epoch creation time is normalized to ms, not
+        # mistaken for a 1970 coin.
+        entry = _middy_entry(MIDDY_MINT, 0.01)
+        entry["pair_created_at"] = (_now_ms() - 300_000) // 1000
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, entry, self.fake_rpc, {})
+        self.assertTrue(ok, why)
+
+    def test_curve_above_75_pct_rejected(self):
+        rpc = _FakeRpc(MIDDY_MINT, progress_pct=80.0)
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, _middy_entry(MIDDY_MINT, 0.01),
+            rpc, {})
+        self.assertFalse(ok)
+        self.assertIn("80.0% filled", why)
+
+    def test_curve_at_75_pct_rejected(self):
+        # Boundary: exactly 75% is NOT under 75%.
+        rpc = _FakeRpc(MIDDY_MINT, progress_pct=75.0)
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, _middy_entry(MIDDY_MINT, 0.01),
+            rpc, {})
+        self.assertFalse(ok)
+        self.assertIn("75.0% filled", why)
+
+    def test_curve_at_74_pct_passes(self):
+        rpc = _FakeRpc(MIDDY_MINT, progress_pct=74.0)
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, _middy_entry(MIDDY_MINT, 0.01),
+            rpc, {})
+        self.assertTrue(ok, why)
+
+    def test_curve_unreadable_rejected_fail_closed(self):
+        class _NoCurveRpc(_FakeRpc):
+            def get_account_info(self, pubkey):
+                if pubkey == self.curve_addr:
+                    return None
+                return super().get_account_info(pubkey)
+
+        ok, why = _middy_entry_gates(
+            self.db, self.cfg, _middy_entry(MIDDY_MINT, 0.01),
+            _NoCurveRpc(MIDDY_MINT), {})
+        self.assertFalse(ok)
+        self.assertIn("curve", why)
 
 
 class TestMiddyTakeProfit(MiddyBase):
@@ -960,20 +1123,22 @@ class TestMiddyIntegration(MiddyBase):
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, change_5m=0.9))
         self.assertEqual(self._buys(outcomes), [])
 
-    def test_below_12k_mcap_never_buys(self):
-        # The bar is $17,000 CAD, enforced as $12,000 USD (fixed
-        # rate 1.4296 CAD/USD, Bank of Canada 2026-11-24): a coin
-        # under $12,000 USD is under $17,000 CAD and never buys.
+    def test_low_mcap_no_longer_blocks_when_turnover_passes(self):
+        # The flat floors are GONE (2026-11-26): a $11,000 coin
+        # is no longer blocked by a mcap floor. Its turnover is
+        # 5000 / 11000 = 0.454 — far above 0.01 — so it buys.
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, mcap=11000))
-        self.assertEqual(self._buys(outcomes), [])
+        self.assertEqual(len(self._buys(outcomes)), 1)
+        self.assertIsNotNone(self._position(bot_id, MIDDY_MINT))
 
-    def test_19k_mcap_buys_true_17k_cad_bar(self):
+    def test_19k_mcap_buys_turnover_passes(self):
         # Firefly (2026-11-24): $19,260 USD was skipped by the old
         # $20,000 USD bar, but $19,260 USD is about $27,500 CAD —
-        # above James's $20,000 CAD rule. A $19,000 coin passes
-        # the $17,000 CAD bar now.
+        # above James's $20,000 CAD rule. Under the turnover gate
+        # a $19,000 coin with $5,000 of 5-minute volume has
+        # turnover 0.263 — above 0.01 — so it buys.
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, mcap=19000))
@@ -988,25 +1153,25 @@ class TestMiddyIntegration(MiddyBase):
                                  buys=100, sells=100))
         self.assertEqual(self._buys(outcomes), [])
 
-    def test_below_175_usd_5m_volume_never_buys(self):
-        # The floor is $250 CAD (~$175 USD) applied to the
-        # 5-minute bucket — the closest version of James's
-        # 7-minute window (no 7-minute volume exists). A coin
-        # with $100 of 5-minute volume never buys. (volume_h1 is
-        # set so the momentum gate would pass — only the floor
-        # blocks this buy.)
+    def test_low_turnover_never_buys(self):
+        # The turnover gate (2026-11-26) replaces the old $175
+        # volume floor: $100 of 5-minute volume on a $25,000 coin
+        # is turnover 0.004 — below 0.01 — so it never buys.
+        # (volume_h1 is set so the momentum gate would pass —
+        # only the turnover gate blocks this buy.)
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
             bot_id, _middy_entry(MIDDY_MINT, 0.0106, volume_m5=100,
                                  volume_h1=1000))
         self.assertEqual(self._buys(outcomes), [])
 
-    def test_175_usd_5m_volume_passes_the_floor(self):
-        # Exactly $175 of 5-minute volume meets the floor, and
-        # the momentum gate passes (175 > 2000/12 hourly pace).
+    def test_turnover_at_0_01_passes(self):
+        # Exactly 0.01 turnover meets the gate: $250 of 5-minute
+        # volume on a $25,000 coin. The momentum gate passes
+        # (250 > 2000/12 hourly pace).
         bot_id = self._insert_bot(rules=middy_ruleset())
         outcomes = self._buy_twice(
-            bot_id, _middy_entry(MIDDY_MINT, 0.0106, volume_m5=175,
+            bot_id, _middy_entry(MIDDY_MINT, 0.0106, volume_m5=250,
                                  volume_h1=2000))
         self.assertEqual(len(self._buys(outcomes)), 1)
 

@@ -107,10 +107,11 @@ BUY_FILTER_DEFAULT = {"min_volume_5m_usd": 1000.0,
                       "require_buy_dominance": True,
                       "min_signal_pct": 5.0,
                       "min_market_cap_usd": 0.0,
-                      "max_market_cap_usd": 0.0}
+                      "max_market_cap_usd": 0.0,
+                      "min_turnover_ratio": 0.0}
 BUY_FILTER_KEYS = ("min_volume_5m_usd", "require_buy_dominance",
                    "min_signal_pct", "min_market_cap_usd",
-                   "max_market_cap_usd")
+                   "max_market_cap_usd", "min_turnover_ratio")
 
 
 def _gte(a: float, b: float) -> bool:
@@ -235,6 +236,33 @@ def passes_buy_filter(entry, filter_cfg=None,
         if not _gte(max_mcap, mcap):
             return False, (f"market cap ${mcap:,.0f} is above the "
                            f"${max_mcap:,.0f} maximum")
+    try:
+        min_turnover = float(cfg.get(
+            "min_turnover_ratio",
+            BUY_FILTER_DEFAULT["min_turnover_ratio"]))
+    except (TypeError, ValueError):
+        return False, "buy filter is misconfigured"
+    if min_turnover > 0:
+        # Turnover gate (Middy, 2026-11-26): 5-minute volume /
+        # current market cap must clear the bar. Both figures must
+        # be present and the cap must be positive — fail-closed,
+        # never a guess at the coin's size or flow. A zero bar
+        # means no turnover gate (every other preset).
+        mcap = entry.get("market_cap_usd")
+        if mcap is None:
+            return False, "no market cap data"
+        try:
+            mcap = float(mcap)
+        except (TypeError, ValueError):
+            return False, "no market cap data"
+        if not mcap > 0:
+            return False, "no market cap data"
+        turnover = vol_m5 / mcap
+        if not _gte(turnover, min_turnover):
+            return False, (f"turnover {turnover:.3f} is below the "
+                           f"{min_turnover:.3f} minimum "
+                           f"(5-minute volume ${vol_m5:,.0f} / market "
+                           f"cap ${mcap:,.0f})")
     return True, ""
 
 

@@ -245,7 +245,11 @@ SCANNER_RULES = {
                    "require_buy_dominance": True,
                    "min_signal_pct": SCANNER_BUY_GAIN_PCT,
                    "min_market_cap_usd": 0.0,
-                   "max_market_cap_usd": 0.0},
+                   "max_market_cap_usd": 0.0,
+                   # Turnover gate, 0.0 = off (Middy sets 0.01,
+                   # 2026-11-26). The key is in every preset's
+                   # filter so a preset validates to itself.
+                   "min_turnover_ratio": 0.0},
     "max_new_positions_per_scan": SCANNER_MAX_NEW_PER_SCAN,
 }
 
@@ -337,7 +341,8 @@ CLYDE_RULES = {
                    "require_buy_dominance": True,
                    "min_signal_pct": CLYDE_BUY_THRESHOLD_PCT,
                    "min_market_cap_usd": CLYDE_MIN_MARKET_CAP,
-                   "max_market_cap_usd": 0.0},
+                   "max_market_cap_usd": 0.0,
+                   "min_turnover_ratio": 0.0},
     "max_new_positions_per_scan": 1,
 }
 
@@ -464,7 +469,8 @@ GNAT_RULES = {
                    "require_buy_dominance": True,
                    "min_signal_pct": GNAT_BUY_THRESHOLD_PCT,
                    "min_market_cap_usd": 0.0,
-                   "max_market_cap_usd": 0.0},
+                   "max_market_cap_usd": 0.0,
+                   "min_turnover_ratio": 0.0},
     "max_new_positions_per_scan": 1,
 }
 
@@ -647,7 +653,8 @@ PIT_RULES = {
                    "require_buy_dominance": True,
                    "min_signal_pct": PIT_BUY_THRESHOLD_PCT,
                    "min_market_cap_usd": PIT_MCAP_MIN_USD,
-                   "max_market_cap_usd": PIT_MCAP_MAX_USD},
+                   "max_market_cap_usd": PIT_MCAP_MAX_USD,
+                   "min_turnover_ratio": 0.0},
     "max_new_positions_per_scan": 1,
     "pit": {
         "buy_ratio_min": PIT_MIN_BUY_SELL_RATIO,
@@ -760,17 +767,19 @@ PIT_NOTES = [
 
 MIDDY_CATEGORY = "Middy"
 MIDDY_PRESET_NAME = "Middy"
-# Middy (James's spec, 2026-11-24, retuned 2026-11-25) — the
-# mid-exposure preset, paper-first. His numbers: buys just beat
-# sells (any positive edge), min mcap $17k CAD, buy 20% of balance
-# per trade, max 2 coins open, take profit sells ALL — small TP at
-# +17% on coins Middy is done with; higher window 25%-37% only
-# while buys beat sells — at 37% secure the profit immediately
-# and move on), trailing stop -8% from the peak, HARD stop
-# 5.5% from entry, slow coins out after 120 seconds, daily-loss
-# breaker 20% of the starting balance, 5-minute re-buy cooldown
-# after a losing close, and NO BLIND TRADES — every entry
-# confirms on a second scan first.
+# Middy (James's spec, 2026-11-24, retuned 2026-11-25, filters
+# retuned 2026-11-26) — the mid-exposure preset, paper-first.
+# His numbers: buys just beat sells (any positive edge),
+# turnover (5-minute volume / market cap) at least 0.01, only
+# coins under 10 minutes old and under 75% of the bonding
+# curve, buy 20% of balance per trade, max 2 coins open, take
+# profit sells ALL — small TP at +17% on coins Middy is done
+# with; higher window 25%-37% only while buys beat sells — at
+# 37% secure the profit immediately and move on), trailing stop
+# -8% from the peak, HARD stop 5.5% from entry, slow coins out
+# after 120 seconds, daily-loss breaker 20% of the starting
+# balance, 5-minute re-buy cooldown after a losing close, and
+# NO BLIND TRADES — every entry confirms on a second scan first.
 # Paper first: the preset creates a paper bot, silent off, and the
 # $20 of real money James set aside stays put until paper results
 # verify actual profit (his order, 2026-11-24 ~11:34 MST).
@@ -783,29 +792,27 @@ MIDDY_BUY_DOMINANCE_RATIO = 1.0
 # REMY DEFAULT — James gave no gain threshold; the momentum gate
 # also requires a positive 5-minute gain.
 MIDDY_MIN_GAIN_5M_PCT = 1.0
-# Min mcap $17,000 CAD (JAMES'S NUMBER, retuned 2026-11-25
-# ~21:05 MST from $20,000 CAD). The engine's market-cap field is
-# USD and the app has no CAD price source, so the CAD bar is
-# enforced as a FIXED-RATE USD figure: $17,000 CAD at the Bank of
-# Canada rate 1.4296 CAD/USD (2026-11-24) = $11,892 USD, rounded
-# to $12,000 per James's "about 12k usd". The USD figure is
-# FIXED — it never moves with the rate. Note: $12,000 USD is
-# $17,155 CAD at the fixed rate, so the enforced bar is ~$155 CAD
-# stricter than $17,000 CAD — James's rounded number, recorded
-# transparently, not hidden.
-MIDDY_MIN_MCAP_CAD = 17000.0
-MIDDY_MIN_MCAP_USD = 12000.0
-# Min volume $250 CAD over 7 minutes, from the coin's chart
-# history (JAMES'S NUMBER, 2026-11-25 ~21:05 MST). CLOSEST
-# VERSION — the 7-minute window is NOT enforced as written: no
-# 7-minute volume exists anywhere in the app's data. Chart-history
-# points carry price only (GeckoTerminal closes, feed ticks), and
-# the feeds carry 5-minute and 1-hour volume buckets only. The
-# floor is therefore applied to the 5-minute bucket at the fixed
-# rate: $250 CAD / 1.4296 = $175 USD. The window differs (5
-# minutes, not 7); the amount is James's number, converted, never
-# scaled or guessed.
-MIDDY_MIN_VOLUME_5M_USD = 175.0
+# Turnover gate (James, 2026-11-26 ~13:24 MST, "The new filters"):
+# 5-minute volume / current market cap must clear M >= 0.01.
+# REPLACES the old flat floors — min volume $250 CAD over 7
+# minutes (enforced as $175 USD on the 5-minute bucket) and min
+# mcap $17,000 CAD (enforced as $12,000 USD). Both floors are
+# GONE: a small coin with real flow now passes where the floors
+# blocked it, and a big coin with thin flow now fails where the
+# floors passed it. 0.01 is a REMY DEFAULT awaiting James's call:
+# at his old floors the boundary was ~0.015 ($175 / $12,000), so
+# 0.01 is slightly looser than the old pair. The volume and mcap
+# figures are the same ones the old floors used (the feed's
+# 5-minute volume bucket and market cap) — only the comparison
+# changed, from two absolute floors to one ratio.
+MIDDY_MIN_TURNOVER_RATIO = 0.01
+# Lifecycle window (James, 2026-11-26, "The new filters"): only
+# coins under 10 minutes old AND under 75% bonding-curve
+# completion. Age is the pair's creation time from the scan feed
+# (DexScreener pairCreatedAt); the curve read is the same
+# on-chain read Gnat's curve band uses.
+MIDDY_MAX_AGE_MINUTES = 10
+MIDDY_CURVE_MAX_PCT = 75.0
 MIDDY_BUY_SIZE_PCT = 20
 MIDDY_MAX_OPEN_TRADES = 2
 MIDDY_STOP_LOSS_PCT = 5.5
@@ -889,11 +896,18 @@ MIDDY_RULES = {
                   "concentration_pct": MIDDY_TOP10_CONCENTRATION_PCT,
                   "slow_climb_sell_pct": 0.0,
                   "check_interval_seconds": 15.0},
-    "buy_filter": {"min_volume_5m_usd": MIDDY_MIN_VOLUME_5M_USD,
+    # The flat floors are GONE (2026-11-26): min_volume_5m_usd
+    # and min_market_cap_usd are 0.0 (off) and the turnover ratio
+    # below is the size gate. The keys stay in the dict at 0.0
+    # on purpose — the validator fills any missing key from the
+    # shared default ($1,000 volume), so omitting them would
+    # silently reintroduce a floor.
+    "buy_filter": {"min_volume_5m_usd": 0.0,
                    "require_buy_dominance": True,
                    "min_signal_pct": MIDDY_MIN_GAIN_5M_PCT,
-                   "min_market_cap_usd": MIDDY_MIN_MCAP_USD,
-                   "max_market_cap_usd": 0.0},
+                   "min_market_cap_usd": 0.0,
+                   "max_market_cap_usd": 0.0,
+                   "min_turnover_ratio": MIDDY_MIN_TURNOVER_RATIO},
     "max_new_positions_per_scan": MIDDY_MAX_NEW_PER_SCAN,
 }
 
@@ -917,25 +931,40 @@ MIDDY_NOTES = [
     "buys. The buy filter, the four-part momentum gate, the "
     "dominance gate and the scam gate are all re-checked on the "
     "confirming scan.",
-    "Entry — market cap at least $17,000 CAD. Enforced as $12,000 "
-    "USD — a fixed-rate conversion at 1.4296 CAD/USD (Bank of "
-    "Canada, 2026-11-24); the app has no live CAD price source, "
-    "so the USD figure is fixed and never moves with the rate. "
-    "Note: $12,000 USD is $17,155 CAD at the fixed rate, so the "
-    "enforced bar is about $155 CAD stricter than $17,000 CAD — "
-    "James's rounded number, recorded transparently. "
-    "A coin under $17,000 CAD can never pass.",
-    "Entry — minimum 5-minute gain 1% and minimum volume $250 CAD "
-    "(about $175 USD at the fixed 1.4296 rate) over the last "
-    "7 minutes from the coin's chart history. CLOSEST VERSION: "
-    "no 7-minute volume exists anywhere in the app's data — chart "
-    "points carry price only, and the feeds carry 5-minute and "
-    "1-hour volume buckets only — so the floor is applied to the "
-    "5-minute bucket ($175 USD). The window differs (5 minutes, "
-    "not 7); the amount is James's number, converted, never "
-    "scaled or guessed. The 1% gain floor is a REMY DEFAULT — "
-    "James gave no gain floor; the momentum gate also requires "
-    "a positive 5-minute gain and rising volume.",
+    "Entry — turnover: 5-minute volume divided by market cap "
+    "must be at least 0.01. REPLACES the old flat floors (James, "
+    "2026-11-26, 'The new filters'): the $250 CAD volume floor "
+    "and the $17,000 CAD market-cap floor are GONE — a small coin "
+    "with real flow now passes where the floors blocked it, and "
+    "a big coin with thin flow now fails where the floors passed "
+    "it. 0.01 is a REMY DEFAULT awaiting James's call: at his "
+    "old floors the boundary was about 0.015 ($175 / $12,000), "
+    "so 0.01 is slightly looser. The volume and market-cap "
+    "figures are the same ones the old floors used.",
+    "Entry — lifecycle window: only coins under 10 minutes old "
+    "AND under 75% bonding-curve completion (James, 2026-11-26, "
+    "'The new filters'). Age is the pair's creation time from "
+    "the scan feed; the curve read is the same on-chain read "
+    "Gnat's curve band uses. A coin with no creation time, or a "
+    "curve the RPC cannot read, is never bought — fail-closed. "
+    "Note the interaction: the 5-minute gain gate needs about 5 "
+    "minutes of the loop's own price marks before it can fire, "
+    "so the effective entry window is roughly minutes 5 to 10 "
+    "of a coin's life.",
+    "Entry — skip bundled launches (multiple buys in the exact "
+    "same block as creation, Block 0): NOT enforced — no feed "
+    "in the app carries block-level trade data. DexScreener "
+    "pairs carry no block numbers and the Helius stream carries "
+    "price ticks only; finding the creation block would need "
+    "paging the mint's full transaction history and parsing "
+    "every transaction in that block, several RPC calls per "
+    "candidate per scan. Closest protection already enforced: "
+    "the top-10 gate (21%) — a dev who loaded up at creation "
+    "shows up there — plus the mint/freeze and metadata scam "
+    "gate.",
+    "Entry — minimum 5-minute gain 1%. The 1% gain floor is a "
+    "REMY DEFAULT — James gave no gain floor; the momentum gate "
+    "also requires a positive 5-minute gain and rising volume.",
     "Entry — standard safety gates: the pre-buy scam gate rejects "
     "a coin when the top 10 holders own 21% or more (the "
     "engine's standard default, same as Scanner — James gave no "
@@ -1402,6 +1431,13 @@ def validate_ruleset(raw, bot=None):
         if float(max_mcap) > 0 and float(max_mcap) < float(min_mcap):
             return _fail("The buy filter's maximum market cap cannot be "
                          "below its minimum.")
+        min_turnover = buy_filter.get(
+            "min_turnover_ratio",
+            BUY_FILTER_DEFAULT["min_turnover_ratio"])
+        if not _is_number(min_turnover) \
+                or not 0 <= float(min_turnover) <= 10:
+            return _fail("The buy filter's minimum turnover must be "
+                         "between 0 (no gate) and 10.")
         clean_filter = {
             "min_volume_5m_usd": float(min_vol),
             "require_buy_dominance": bool(
@@ -1409,6 +1445,7 @@ def validate_ruleset(raw, bot=None):
             "min_signal_pct": float(min_signal),
             "min_market_cap_usd": float(min_mcap),
             "max_market_cap_usd": float(max_mcap),
+            "min_turnover_ratio": float(min_turnover),
         }
     if kind in ("trenches", "scanner", "gnat", "pit", "middy") \
             and clean_filter is None:
@@ -1701,26 +1738,30 @@ def summarize_rules(rules) -> str:
                                         "pit", "middy"):
         mcap = buy_filter.get("min_market_cap_usd", 0.0)
         max_mcap = buy_filter.get("max_market_cap_usd", 0.0)
-        if rules["kind"] == "middy":
-            # The bar is $17,000 CAD, enforced as a fixed-rate USD
-            # figure — state the CAD basis in the UI, never a bare
-            # USD number that reads as a $17,000 USD bar.
-            mcap_clause = (f", and a market cap of at least "
-                           f"${MIDDY_MIN_MCAP_CAD:,.0f} CAD (enforced as "
-                           f"${mcap:,.0f} USD at a fixed rate)"
-                           if mcap else "")
+        turnover = buy_filter.get("min_turnover_ratio", 0.0) or 0.0
+        if rules["kind"] == "middy" and turnover:
+            # The flat floors are gone (2026-11-26): turnover
+            # replaces them — state the ratio, never a $ volume
+            # or mcap floor that no longer applies.
+            lines.append(
+                f"Buy filter — only buy a real signal: a 5-minute "
+                f"turnover (volume / market cap) of at least "
+                f"{float(turnover):.2f}"
+                f"{', buys outnumbering sells in the last 5 minutes' if buy_filter['require_buy_dominance'] else ''}, "
+                f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%. "
+                f"A coin missing any of that is skipped, never bought on a guess.")
         else:
             mcap_clause = (f", and a market cap of at least ${mcap:,.0f}"
                            if mcap else "")
-        lines.append(
-            f"Buy filter — only buy a real signal: at least "
-            f"${buy_filter['min_volume_5m_usd']:,.0f} of volume in the "
-            f"last 5 minutes"
-            f"{', buys outnumbering sells in the last 5 minutes' if buy_filter['require_buy_dominance'] else ''}, "
-            f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%"
-            f"{mcap_clause}"
-            f"{f', and at most ${max_mcap:,.0f}' if max_mcap else ''}. "
-            f"A coin missing any of that is skipped, never bought on a guess.")
+            lines.append(
+                f"Buy filter — only buy a real signal: at least "
+                f"${buy_filter['min_volume_5m_usd']:,.0f} of volume in the "
+                f"last 5 minutes"
+                f"{', buys outnumbering sells in the last 5 minutes' if buy_filter['require_buy_dominance'] else ''}, "
+                f"and a signal of at least {buy_filter['min_signal_pct']:.1f}%"
+                f"{mcap_clause}"
+                f"{f', and at most ${max_mcap:,.0f}' if max_mcap else ''}. "
+                f"A coin missing any of that is skipped, never bought on a guess.")
     lines.append(
         f"At most {rules['max_new_positions_per_scan']} new position(s) "
         f"per scan.")

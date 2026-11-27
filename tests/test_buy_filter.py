@@ -111,6 +111,9 @@ class TestBuyFilterUnit(unittest.TestCase):
             # Market-cap maximum, 0 = no cap (Pit Sweeper sets
             # $25,000 so it only buys coins still early).
             "max_market_cap_usd": 0.0,
+            # Turnover minimum (5-minute volume / market cap),
+            # 0 = no gate (Middy sets 0.01, 2026-11-26).
+            "min_turnover_ratio": 0.0,
         })
 
     def test_strong_signal_passes(self):
@@ -189,6 +192,58 @@ class TestBuyFilterUnit(unittest.TestCase):
                        "min_signal_pct": 5.0, "surprise": 1})
         self.assertFalse(ok)
         self.assertIn("Unknown", why)
+
+    def test_turnover_gate_off_by_default(self):
+        # No turnover ratio set: a coin with no market cap at
+        # all still passes the filter (every other preset).
+        ok, why = passes_buy_filter(_entry())
+        self.assertTrue(ok, why)
+
+    def test_turnover_above_bar_passes(self):
+        # Middy's gate: 5-minute volume / market cap >= 0.01.
+        # $500 of volume on a $25,000 coin is 0.02 — passes.
+        cfg = dict(BUY_FILTER_DEFAULT, min_turnover_ratio=0.01)
+        entry = _entry()
+        entry["market_cap_usd"] = 25000
+        ok, why = passes_buy_filter(entry, cfg)
+        self.assertTrue(ok, why)
+
+    def test_turnover_at_bar_passes(self):
+        # Exactly 0.01 meets the gate: $1,000 of volume on a
+        # $100,000 coin. (Volume must also clear the shared
+        # $1,000 floor — the turnover gate is checked after it.)
+        cfg = dict(BUY_FILTER_DEFAULT, min_turnover_ratio=0.01)
+        entry = _entry(volume_m5=1000)
+        entry["market_cap_usd"] = 100000
+        ok, why = passes_buy_filter(entry, cfg)
+        self.assertTrue(ok, why)
+
+    def test_turnover_below_bar_rejected(self):
+        # $1,000 of volume on a $250,000 coin is 0.004 — below
+        # 0.01. (Volume clears the shared $1,000 floor, so only
+        # the turnover gate blocks this buy.)
+        cfg = dict(BUY_FILTER_DEFAULT, min_turnover_ratio=0.01)
+        entry = _entry(volume_m5=1000)
+        entry["market_cap_usd"] = 250000
+        ok, why = passes_buy_filter(entry, cfg)
+        self.assertFalse(ok)
+        self.assertIn("turnover", why)
+        self.assertIn("0.004", why)
+
+    def test_turnover_missing_mcap_fails_closed(self):
+        # The gate needs both figures — no market cap, no buy.
+        cfg = dict(BUY_FILTER_DEFAULT, min_turnover_ratio=0.01)
+        ok, why = passes_buy_filter(_entry(), cfg)
+        self.assertFalse(ok)
+        self.assertIn("market cap data", why)
+
+    def test_turnover_zero_mcap_fails_closed(self):
+        cfg = dict(BUY_FILTER_DEFAULT, min_turnover_ratio=0.01)
+        entry = _entry()
+        entry["market_cap_usd"] = 0
+        ok, why = passes_buy_filter(entry, cfg)
+        self.assertFalse(ok)
+        self.assertIn("market cap data", why)
 
 
 class TestBuyFilterValidation(unittest.TestCase):

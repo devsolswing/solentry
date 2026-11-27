@@ -73,8 +73,10 @@ from .rules import (GNAT_BREAKEVEN_PLUS_PCT, GNAT_BUY_SIZE_PCT,
                     GNAT_TIME_DECAY_SECONDS, GNAT_TRAIL_HIGH_PCT,
                     GNAT_TRAIL_LOW_PCT, GNAT_TRAIL_TIGHTEN_AT_PCT,
                     MIDDY_BUY_DOMINANCE_RATIO, MIDDY_CATEGORY,
-                    MIDDY_COOLDOWN_SECONDS, MIDDY_DAILY_LOSS_BREAKER_PCT,
-                    MIDDY_MAX_BUYS_PER_HOUR, MIDDY_MID_HOLD_BUY_RATIO,
+                    MIDDY_COOLDOWN_SECONDS, MIDDY_CURVE_MAX_PCT,
+                    MIDDY_DAILY_LOSS_BREAKER_PCT,
+                    MIDDY_MAX_AGE_MINUTES, MIDDY_MAX_BUYS_PER_HOUR,
+                    MIDDY_MID_HOLD_BUY_RATIO,
                     MIDDY_MIN_BUYS_PER_HOUR, MIDDY_MIN_GAIN_5M_PCT, MIDDY_SLOW_FLAT_PCT,
                     MIDDY_SLOW_SECONDS, MIDDY_STOP_LOSS_PCT,
                     MIDDY_TP_CEILING_PCT, MIDDY_TP_MID_PCT,
@@ -1157,9 +1159,17 @@ def _middy_entry_gates(db, cfg, entry: dict, rpc_factory,
     sells. The spec's window is the feed's 5-minute bucket —
     transaction counts, not unique wallets, and no sub-5-minute
     flow exists in the app's data. Fail-closed: a coin whose
-    counts are missing is never bought. Devnet watchlist mints
-    skip the gate, exactly like Gnat's and Pit's, so the devnet
-    paper path still exercises the engine."""
+    counts are missing is never bought. Then the lifecycle
+    window (James, 2026-11-26, "The new filters"): only coins
+    under 10 minutes old AND under 75% bonding-curve completion.
+    Age is the pair's creation time from the scan feed
+    (DexScreener pairCreatedAt, ms epoch — the feed records it
+    and the reprice keeps it); the curve read is the same
+    on-chain read Gnat's curve band uses. Missing creation time,
+    a future creation time, or an unreadable curve fails closed.
+    Devnet watchlist mints skip the gate, exactly like Gnat's
+    and Pit's, so the devnet paper path still exercises the
+    engine."""
     mint = entry.get("mint")
     if not mint:
         return False, "no mint to check"
@@ -1180,6 +1190,49 @@ def _middy_entry_gates(db, cfg, entry: dict, rpc_factory,
         return False, (
             f"middy buy dominance: buys {buys} vs sells {sells} in "
             f"the last 5 minutes — buys must beat sells")
+    # Lifecycle window: age first, then curve. A coin whose age
+    # cannot be determined is never bought — an unknown-age coin
+    # is not a young coin.
+    created = entry.get("pair_created_at")
+    try:
+        created_ms = float(created) if created is not None else None
+    except (TypeError, ValueError):
+        created_ms = None
+    if created_ms is None:
+        return False, "middy lifecycle: no pair creation time"
+    if created_ms < 1e12:
+        # Seconds epoch, not milliseconds — normalize. A ms-epoch
+        # value for 2026 is ~1.79e12; a seconds value is ~1.79e9.
+        created_ms *= 1000.0
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000.0
+    age_ms = now_ms - created_ms
+    if age_ms < 0:
+        return False, "middy lifecycle: pair creation time is in the future"
+    if age_ms >= MIDDY_MAX_AGE_MINUTES * 60_000:
+        return False, (
+            f"middy lifecycle: coin is {age_ms / 60_000:.1f} minutes old "
+            f"— older than {MIDDY_MAX_AGE_MINUTES} minutes")
+    try:
+        client = _top10_client_for_mint(cfg, mint, rpc_factory, rpc_cache)
+    except Exception:
+        return False, "middy curve: RPC unavailable"
+    try:
+        curve_addr, _ = bonding_curve_pda(mint)
+        curve_account = client.get_account_info(curve_addr)
+    except Exception:
+        return False, "middy curve: could not read bonding curve"
+    try:
+        curve = parse_bonding_curve(
+            curve_account.get("data") if curve_account else None)
+    except Exception:
+        return False, "middy curve: bonding curve unreadable"
+    progress = curve_progress_pct(curve)
+    if progress is None:
+        return False, "middy curve: bonding curve unreadable"
+    if progress >= MIDDY_CURVE_MAX_PCT:
+        return False, (
+            f"middy curve: {progress:.1f}% filled, at or above the "
+            f"{MIDDY_CURVE_MAX_PCT:.0f}% ceiling")
     return True, ""
 
 
