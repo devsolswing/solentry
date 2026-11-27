@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -406,6 +407,22 @@ def _paper(app, user_id: int):
         "SELECT cash_usd FROM paper_portfolio WHERE user_id = ?",
         (user_id,)).fetchone()
     return row["cash_usd"] if row else 0.0
+
+
+def _wallet_sol_for_buy(app, user_id: int, mode: str,
+                        sol_price_usd) -> float | None:
+    """Spendable SOL for the quick-buy % buttons (buy-flow batch
+    4): the on-chain SOL balance in real mode (None when the RPC
+    is unreachable — never faked); paper cash converted at the
+    live SOL price in paper mode (None without a live SOL price —
+    paper cash is USD, so there is no SOL figure to take a % of
+    until the price exists)."""
+    if mode == "devnet":
+        wallet = _wallet(app, user_id)
+        return _real_balance(app, wallet["pubkey"]) if wallet else None
+    if sol_price_usd is None or sol_price_usd <= 0:
+        return None
+    return _paper(app, user_id) / sol_price_usd
 
 
 def _active_mode(db, user_id: int) -> str:
@@ -1121,6 +1138,46 @@ def _parse_buy_amount(app, form, price, sol_price_usd):
             return None, None, "SOL price unavailable right now."
         return usd / sol_price_usd, usd, None
     return 0.0, None, None
+
+
+def _pct_buy_buttons(app, wallet_sol, sol_price_usd,
+                     include_ata_rent, target="sol"):
+    """The % -button row for a buy form (buy-flow batch 4):
+    {"amounts": [{"pct", "sol", "usd", "label"}],
+    "disabled_reason", "wallet_sol"}. The SOL amounts come from
+    Config.pct_buy_amounts_sol — the one source of truth, so the
+    route never re-implements the tier; the USD figure is the SOL
+    amount at the live SOL price, floored to cents so the fill can
+    never buy more SOL than the button shows. target "sol" fills a
+    SOL input (coin popup / coin detail page); target "usd" fills
+    a $ input (quick trade) and needs a live SOL price to convert.
+    disabled_reason is the plain line the template shows when the
+    row cannot work at all."""
+    cfg = _cfg(app)
+    amounts_sol = cfg.pct_buy_amounts_sol(
+        wallet_sol, sol_price_usd, include_ata_rent)
+    amounts = []
+    for pct in (25, 50, 75, 100):
+        sol = amounts_sol[pct]
+        if sol is not None and sol_price_usd:
+            usd = math.floor(sol * sol_price_usd * 100) / 100
+        else:
+            usd = None
+        label = (("%.6f" % sol).rstrip("0").rstrip(".")
+                 if sol is not None else None)
+        amounts.append({"pct": pct, "sol": sol, "usd": usd,
+                        "label": label})
+    if wallet_sol is None:
+        reason = "Wallet balance unavailable right now."
+    elif all(a["sol"] is None for a in amounts):
+        reason = ("Not enough SOL in the wallet to leave the gas "
+                  "reserve behind — add SOL to the wallet.")
+    elif target == "usd" and not sol_price_usd:
+        reason = "Live SOL price unavailable right now."
+    else:
+        reason = None
+    return {"amounts": amounts, "disabled_reason": reason,
+            "wallet_sol": wallet_sol}
 
 
 def _parse_exit_fields(form):
@@ -3002,10 +3059,34 @@ def register_routes(app: Flask) -> None:
             r["value_sol"] = (eff / sol_price
                               if eff is not None and sol_price
                               else None)
+        # Quick-buy % buttons (buy-flow batch 4): 25/50/75/100% of
+        # the SOL in the wallet, each leaving the gas reserve
+        # behind. Real mode spends on-chain SOL; paper mode spends
+        # paper cash converted at the live SOL price (no live price
+        # = no paper SOL, so the buttons disable). The popup
+        # ticket's buttons skip the token-account rent when the
+        # coin is already held (its account exists); the
+        # quick-trade buttons always include it — no coin is picked
+        # yet, so fail safe.
+        if mode == "devnet":
+            wallet_sol = real_sol
+        elif sol_price:
+            wallet_sol = _paper(app, user["id"]) / sol_price
+        else:
+            wallet_sol = None
+        popup_held = (popup_coin or {}).get("held") or 0
+        pct_buttons = _pct_buy_buttons(
+            app, wallet_sol, sol_price,
+            include_ata_rent=not (popup_held > 0))
+        pct_buttons_quick = _pct_buy_buttons(
+            app, wallet_sol, sol_price,
+            include_ata_rent=True, target="usd")
         return {"wallet": wallet if mode == "devnet" else None,
                 "receive_address": wallet["pubkey"] if wallet else "",
                 "real_sol": real_sol,
                 "paper_cash": _paper(app, user["id"]),
+                "pct_buttons": pct_buttons,
+                "pct_buttons_quick": pct_buttons_quick,
                 "holdings_value": holdings_value, "prices": prices,
                 "bots": bots, "activity": activity,
                 "coin_rows": coin_rows, "mode": mode,
@@ -3456,6 +3537,14 @@ def register_routes(app: Flask) -> None:
         sol_price = _sol_price_usd()
         held_sol_value, sell_prefill_sol = _sell_prefill_for_row(
             row, sol_price)
+        # Quick-buy % buttons (buy-flow batch 4): the same row as
+        # the coin popup — the token-account rent is skipped when
+        # the coin is already held (its account exists).
+        wallet_sol = _wallet_sol_for_buy(
+            app, user["id"], mode, sol_price)
+        pct_buttons = _pct_buy_buttons(
+            app, wallet_sol, sol_price,
+            include_ata_rent=not ((row.get("held") or 0) > 0))
         return render_template(
             "coin_detail.html", coin=row, range_key=range_key,
             ranges=CHART_RANGES, candles_svg=candles_svg,
@@ -3481,6 +3570,7 @@ def register_routes(app: Flask) -> None:
             network_label=networks_mod.network_label(_cfg(app).network),
             sol_price_usd=sol_price,
             held_sol_value=held_sol_value,
+            pct_buttons=pct_buttons,
             sell_prefill_sol=sell_prefill_sol)
 
     @app.route("/api/coins/<coin_id>/tick")

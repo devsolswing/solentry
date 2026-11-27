@@ -15,7 +15,10 @@
 
 from __future__ import annotations
 
+import math
 import os
+
+from .solana import ATA_RENT_FALLBACK_LAMPORTS
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -281,6 +284,53 @@ class Config:
         if usd < self.user_buy_reserve_threshold_usd:
             return self.user_buy_reserve_small_sol
         return self.user_buy_reserve_large_sol
+
+    def pct_buy_amounts_sol(self, wallet_sol, sol_price_usd,
+                            include_ata_rent=False) -> dict:
+        """The SOL each quick-buy % button buys: {25: sol|None,
+        50: ..., 75: ..., 100: ...} (buy-flow batch 4). Each button
+        buys that % of the SOL in the wallet but ALWAYS leaves the
+        gas reserve behind — 100% is the wallet minus the reserve,
+        never the whole wallet. The reserve is the buy-size tier
+        for the button's own USD size at the live SOL price (no
+        live price fails safe to the large tier, exactly like
+        user_buy_gas_reserve_sol), PLUS the token-account rent
+        when include_ata_rent — the executor charges that rent on
+        a first buy of a coin with no token account yet, so a
+        button that forgot it would be refused at the edge (the
+        executor's own comment: without the rent, a buy at the
+        edge fails for insufficient funds). The tier is picked
+        from the button's raw % amount before capping: capping can
+        only shrink the buy, so the tier it picks is never smaller
+        than the capped amount needs. Amounts are floored to 6
+        decimals — never rounded up past the cap. None = the wallet
+        cannot cover the reserve at all, so the button is
+        disabled; a missing/unreadable wallet balance (None)
+        disables every button. This is the ONE source of truth for
+        the button math — the templates and the route never
+        re-implement the tier; the server-side reserve refusal in
+        the executors stays as the backstop."""
+        pcts = (25, 50, 75, 100)
+        if wallet_sol is None:
+            return {pct: None for pct in pcts}
+        try:
+            wallet = float(wallet_sol)
+        except (TypeError, ValueError):
+            return {pct: None for pct in pcts}
+        if wallet <= 0:
+            return {pct: None for pct in pcts}
+        rent_sol = (ATA_RENT_FALLBACK_LAMPORTS / 1_000_000_000
+                    if include_ata_rent else 0.0)
+        out = {}
+        for pct in pcts:
+            raw = wallet * pct / 100.0
+            usd = (raw * sol_price_usd
+                   if sol_price_usd else None)
+            reserve = self.user_buy_gas_reserve_sol(usd) + rent_sol
+            amount = min(raw, wallet - reserve)
+            amount = math.floor(amount * 1_000_000) / 1_000_000
+            out[pct] = amount if amount > 0 else None
+        return out
 
     def require_secrets(self) -> None:
         """Fail fast at startup when required secrets are missing."""

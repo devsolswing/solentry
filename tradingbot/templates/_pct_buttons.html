@@ -1,0 +1,30 @@
+{# Quick-buy % buttons (buy-flow batch 4): 25% / 50% / 75% / 100%
+   of the SOL in the wallet, each leaving the gas reserve behind
+   (100% = wallet minus reserve). Expects pct_buttons =
+   {"amounts": [{"pct", "sol", "usd", "label"}],
+   "disabled_reason"} and pct_buttons_target = "sol" (fills a SOL
+   input — coin popup / coin detail page) or "usd" (fills a $ input
+   — quick trade). A button is disabled when its amount is None
+   (the wallet cannot cover the reserve), or — for a $ form — when
+   there is no live SOL price to convert the amount to $. The label
+   shows the exact SOL amount the button buys; the click handler
+   copies data-amount-sol (or data-amount-usd for a $ form) into
+   the amount input. When the route did not pass pct_buttons (a
+   direct template render with a hand-built context), the row
+   renders nothing — the page still works, it just has no % buttons. #}
+{% if pct_buttons is defined and pct_buttons %}
+{% set pct_buttons_target = pct_buttons_target|default("sol") %}
+<div class="pct-buttons" role="group" aria-label="Buy a percentage of your SOL">
+  {% for b in pct_buttons.amounts %}
+  {% set no_usd = pct_buttons_target == "usd" and b.usd is none %}
+  {% if b.sol is none or no_usd %}
+  <button type="button" class="btn pct-btn" disabled title="{{ pct_buttons.disabled_reason }}">{{ b.pct }}%</button>
+  {% else %}
+  <button type="button" class="btn pct-btn" data-amount-sol="{{ b.sol }}" data-amount-usd="{{ b.usd }}">{{ b.pct }}% · {{ b.label }} SOL</button>
+  {% endif %}
+  {% endfor %}
+</div>
+{% if pct_buttons.disabled_reason %}
+<p class="muted small">{{ pct_buttons.disabled_reason }}</p>
+{% endif %}
+{% endif %}

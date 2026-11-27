@@ -19,6 +19,7 @@
     <form method="post" action="{{ url_for('coin_buy', coin_id=trade_coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      {% include "_pct_buttons.html" %}
       <label>Bot to look after this coin (optional)
         <select name="bot_id">
           <option value="">No bot — just buy it</option>
@@ -39,6 +40,7 @@
     <form method="post" action="{{ url_for('coin_buy', coin_id=trade_coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required></label>
+      {% include "_pct_buttons.html" %}
       <label>Real bot to manage this buy (required — its buy-size limit is the cap)
         <select name="bot_id" required>
           <option value="">Choose a real bot…</option>
@@ -162,6 +164,26 @@
     }
     wire('stop_loss', 'stop_loss_pct', 'data-exit-readback-sl', true);
     wire('take_profit', 'take_profit_pct', 'data-exit-readback-tp', false);
+  })();
+
+  /* Quick-buy % buttons (buy-flow batch 4): each button fills
+     the amount input with its SOL amount — the % of the wallet
+     SOL it buys, reserve already left behind server-side. */
+  (function () {
+    var ticket = document.querySelector('.trade-ticket');
+    if (!ticket) return;
+    ticket.querySelectorAll('.pct-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var form = btn.closest('form');
+        if (!form) return;
+        var input = form.querySelector('input[name="amount_sol"]');
+        if (!input) return;
+        var amount = parseFloat(btn.getAttribute('data-amount-sol'));
+        if (!(amount > 0)) return;
+        input.value = amount;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
   })();
   </script>
 </div>

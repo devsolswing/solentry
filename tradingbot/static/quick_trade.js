@@ -125,6 +125,7 @@
     qtResults.innerHTML = '';
     qtAmountKind();
     qtExitReadback();
+    qtPctSync();
   }
 
   /* One small Solana tag when the coin has a Solana presence;
@@ -202,6 +203,37 @@
     if (el) el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', qtExitReadback);
   });
   qtExitReadback();
+
+  /* Quick-buy % buttons (buy-flow batch 4): each button fills the
+     buy amount with its $ value — the % of the wallet SOL it buys,
+     reserve already left behind server-side. The amount is $ so
+     the kind switches to $ first (a tokens amount would be the
+     wrong unit); the equiv + exit readback update off the input
+     event, like a typed amount. The buttons stay disabled until a
+     coin is picked, and a button the server disabled (no wallet
+     balance / no live SOL price) stays disabled. */
+  var qtPctButtons = Array.prototype.slice.call(
+    document.querySelectorAll('#quick-trade-buy-form .pct-btn'));
+  var qtPctEnabled = qtPctButtons.map(function (btn) { return !btn.disabled; });
+  function qtPctSync() {
+    qtPctButtons.forEach(function (btn, i) {
+      btn.disabled = !qtCoin || !qtPctEnabled[i];
+    });
+  }
+  qtPctButtons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (!qtCoin) return;
+      var usd = parseFloat(btn.getAttribute('data-amount-usd'));
+      if (!(usd > 0)) return;
+      var usdRadio = document.querySelector('input[name="quick-amount-kind"][value="usd"]');
+      if (usdRadio) usdRadio.checked = true;
+      qtAmountKind();
+      qtBuyAmount.value = usd;
+      qtBuyAmount.dispatchEvent(new Event('input', { bubbles: true }));
+      qtExitReadback();
+    });
+  });
+  qtPctSync();
 
   /* A link can open the popup directly: /wallet?trade=buy, or the
      coins page with ?trade=sell — used by the home BUY/SELL buttons

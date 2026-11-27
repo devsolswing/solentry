@@ -31,6 +31,7 @@
       <form id="quick-trade-buy-form" method="post" action="{{ url_for('coin_buy', coin_id='SOL') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>Amount ({{ 'CAD $' if mode == 'paper' else '$' }}) <input id="quick-trade-buy-amount" type="number" name="usd" step="any" min="0" placeholder="0" required></label>
+        {% set pct_buttons = pct_buttons_quick %}{% set pct_buttons_target = "usd" %}{% include "_pct_buttons.html" %}
         {% if mode == 'paper' %}
         <label>Bot to look after this coin (optional)
           <select name="bot_id">

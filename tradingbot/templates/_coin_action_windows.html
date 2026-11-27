@@ -22,6 +22,7 @@
     <form method="post" action="{{ url_for('coin_buy', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required data-jupiter-amount="buy"></label>
+      {% include "_pct_buttons.html" %}
       <label>Bot to look after this coin (optional)
         <select name="bot_id">
           <option value="">No bot — just buy it</option>
@@ -34,6 +35,7 @@
     <form method="post" action="{{ url_for('coin_buy', coin_id=coin.coin_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Amount (SOL)<input type="number" name="amount_sol" step="any" min="0" placeholder="0.1" required data-jupiter-amount="buy"></label>
+      {% include "_pct_buttons.html" %}
       <label>Real bot to manage this buy (required — its buy-size limit is the cap)
         <select name="bot_id" required>
           <option value="">Choose a real bot…</option>
@@ -46,6 +48,27 @@
     {% endif %}
     <p><button class="btn ghost big" type="button" data-overlay-close>← Back to coin</button></p>
   </div>
+  <script nonce="{{ csp_nonce }}">
+  /* Quick-buy % buttons (buy-flow batch 4): each button fills
+     the amount input with its SOL amount — the % of the wallet
+     SOL it buys, reserve already left behind server-side. */
+  (function () {
+    var overlay = document.getElementById('coin-buy-overlay');
+    if (!overlay) return;
+    overlay.querySelectorAll('.pct-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var form = btn.closest('form');
+        if (!form) return;
+        var input = form.querySelector('input[name="amount_sol"]');
+        if (!input) return;
+        var amount = parseFloat(btn.getAttribute('data-amount-sol'));
+        if (!(amount > 0)) return;
+        input.value = amount;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
+  })();
+  </script>
 </div>
 
 <div class="overlay hidden" id="coin-sell-overlay" role="dialog" aria-label="Sell {{ coin.name }}">
