@@ -475,7 +475,12 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                  db, cfg: Config, rpc, signing_bot: dict,
                  decision_price_usd=None,
                  decision_price_age_seconds=None,
-                 sol_price_usd=None) -> dict:
+                 sol_price_usd=None,
+                 user_buy_reserve_sol=None) -> dict:
+    """One real pump.fun BUY. `bot` is the managing bot, or None
+    for a User buy (no bot watching): the buy-size cap is skipped
+    — the % -of-wallet buttons are the cap — and the reserve is
+    the buy-size tier passed in `user_buy_reserve_sol` (SOL)."""
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
@@ -553,13 +558,25 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
             balance = rpc.get_balance_lamports(wallet_pubkey)
         except Exception:
             return _skip("real balance unavailable")
-        allowed = balance * float(bot["buy_size_pct"]) / 100.0
-        if amount_lamports > allowed * 1.001 + 1:
-            return _skip("amount exceeds bot buy size")
+        if bot is not None:
+            allowed = balance * float(bot["buy_size_pct"]) / 100.0
+            if amount_lamports > allowed * 1.001 + 1:
+                return _skip("amount exceeds bot buy size")
+            reserve = FEE_RESERVE_LAMPORTS
+        else:
+            # User buy (no bot watching): the % -of-wallet buttons
+            # replace the bot's buy-size cap, and the reserve is
+            # the buy-size tier (James, 2026-11-26 ~21:45, $5 USD
+            # threshold) — the caller passes the tier for this
+            # buy's USD size; without it the large tier is the
+            # fail-safe.
+            reserve = sol_to_lamports(
+                user_buy_reserve_sol
+                if user_buy_reserve_sol is not None
+                else cfg.user_buy_reserve_large_sol)
         # Reserve: the fee reserve PLUS the ATA rent when the buy
         # creates the token account (~0.00204 SOL). Without the
         # rent, a buy at the edge fails for insufficient funds.
-        reserve = FEE_RESERVE_LAMPORTS
         if ata_missing:
             reserve += _ata_rent_lamports(rpc)
         if balance - amount_lamports < reserve:
@@ -596,8 +613,10 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
         signed_b64, signature = sign_message(seed, message)
         # Record the signature BEFORE the send: the reconciler
         # settles it later even if this call never hears back.
-        record_pending_trade(db, user_id, bot["id"], mint, "buy",
-                             signature)
+        # A User buy has no bot — the pending row carries no bot.
+        record_pending_trade(db, user_id,
+                             bot["id"] if bot is not None else None,
+                             mint, "buy", signature)
         confirmed, confirm_error = _send_and_confirm(
             rpc, signed_b64, signature)
         if confirmed is None:
@@ -784,10 +803,17 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
                        amount: float, price: float, db, cfg: Config,
                        rpc_client=None,
                        decision_price_age_seconds=None,
-                       sol_price_usd=None) -> dict:
+                       sol_price_usd=None,
+                       user_buy_reserve_sol=None) -> dict:
     """Execute one real trade for a silent bot, signed by the user's
     dedicated signing bot. Same (bot, user_id, coin, side, amount,
     price, db, cfg) protocol as the silent loop's real executor.
+
+    `bot` is the managing bot — or None for a User buy / a manual
+    sell (buy-flow rebuild, 2026-11-26): a User buy has no bot
+    watching, so there is no buy-size cap; the reserve it must
+    leave behind is `user_buy_reserve_sol` (SOL, the buy-size
+    tier for this buy's USD size — the large tier when None).
 
     `coin` must be a pump.fun token mint (a Solana address); major
     coins such as "SOL" have no swap path here and are refused with
@@ -821,10 +847,10 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
         return _skip("real execution needs devnet or mainnet")
     if bot is not None and bot["mode"] != "real":
         return _skip("bot is not in real mode")
-    if side == "buy" and bot is None:
-        # Manual sells pass bot=None (the user's Sell button
-        # overrides the bot); buys still require a real bot.
-        return _skip("a real bot is required for buys")
+    # User buys (bot None) are allowed: no bot watching means no
+    # buy-size cap — the % -of-wallet buttons are the cap, and the
+    # reserve is enforced inside _execute_buy. Manual sells
+    # already pass bot=None.
     if side not in ("buy", "sell"):
         return _skip("unknown side")
     if amount is None or float(amount) <= 0:
@@ -845,7 +871,8 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
                                 db, cfg, rpc, signing_bot,
                                 price,
                                 decision_price_age_seconds,
-                                sol_price_usd)
+                                sol_price_usd,
+                                user_buy_reserve_sol)
         last = None
         for _attempt in range(max(1, int(cfg.sell_requote_attempts))):
             last = _execute_sell(bot, user_id, coin, float(amount),

@@ -271,17 +271,36 @@ class TestManualSellNoBot(ManualSellBase):
         self.assertIn("You hold", html)
         self.assertIn('name="amount_sol"', html)
 
-    def test_buy_without_bot_still_refused(self):
-        # (e) Guard against over-removal: buys still require a
-        # real bot — only sells lost the bot requirement.
+    def test_buy_without_bot_is_a_user_buy(self):
+        # (e) Batch 1 (buy-flow rebuild, 2026-11-26): the bot
+        # requirement is gone for buys too — no bot picked means
+        # a User buy, no bot watching. The old "Pick one of your
+        # real bots" refusal is superseded; the manual-sell guard
+        # this test used to pin no longer applies to buys.
         self._choose_mode("devnet")
-        resp = self.client.post(f"/coins/{GRAD_MINT}/buy", data={
-            "csrf_token": csrf(self.client, f"/coins/{GRAD_MINT}"),
-            "amount_sol": "0.1", "bot_id": ""})
+
+        def fake_execute(*args, **kwargs):
+            return {"status": "executed", "signature": "fakesigBUY",
+                    "coin_amount": 1000000.0, "sol_spent": 0.1,
+                    "signing_bot": "test"}
+
+        mock_exec = mock.Mock(side_effect=fake_execute)
+        with mock.patch.object(routes, "is_curve_complete",
+                               return_value=False), \
+                mock.patch.object(routes, "execute_real_trade",
+                                  mock_exec):
+            resp = self.client.post(f"/coins/{GRAD_MINT}/buy", data={
+                "csrf_token": csrf(self.client, f"/coins/{GRAD_MINT}"),
+                "amount_sol": "0.1", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
-        self.assertIn("Nothing was bought", html)
-        self.assertIn("Pick one of your real bots", html)
+        self.assertIn("Bought", html)
+        self.assertNotIn("Pick one of your real bots", html)
+        mock_exec.assert_called_once()
+        self.assertIsNone(mock_exec.call_args[0][0])
+        # A User buy creates no bot position.
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) c FROM bot_positions").fetchone()["c"], 0)
 
     def test_manual_sell_overrides_bot_rules_and_selling_point(self):
         # (f) Refinement 2026-11-25: the manual sell overrides the

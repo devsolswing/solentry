@@ -180,6 +180,22 @@ class Config:
         # executor re-quotes before selling.
         self.decision_price_max_age_seconds: float = float(env.get(
             "DECISION_PRICE_MAX_AGE_SECONDS", "30"))
+        # Buy-flow gas reserve (James, 2026-11-26 ~21:45, threshold
+        # revised to USD 2026-11-26 ~21:48 when the multi-currency
+        # picker was deferred — USD is the only buy currency for
+        # now): a buy under $5 USD holds back 0.0012 SOL; a buy of
+        # $5 USD or more holds back 0.012 SOL. Open question, asked
+        # 2026-11-26 ~21:39: what happens when the real exit fee
+        # comes in GREATER than the reserve held back — no top-up
+        # or auto-raise behaviour exists until he answers; a sell
+        # that fails for fees says so plainly in the log.
+        self.user_buy_reserve_threshold_usd: float = float(env.get(
+            "USER_BUY_RESERVE_THRESHOLD_USD", "5"))
+        self.user_buy_reserve_small_sol: float = float(env.get(
+            "USER_BUY_RESERVE_SMALL_SOL", "0.0012"))
+        self.user_buy_reserve_large_sol: float = float(env.get(
+            "USER_BUY_RESERVE_LARGE_SOL", "0.012"))
+
         # Pending-trade horizon: a sent signature with no receipt
         # after this long is finally marked failed (seconds).
         self.pending_trade_horizon_seconds: float = float(env.get(
@@ -253,6 +269,18 @@ class Config:
         # a pathological subscription count.
         self.helius_max_stream_mints: int = max(
             1, int(env.get("HELIUS_MAX_STREAM_MINTS", "50")))
+
+    def user_buy_gas_reserve_sol(self, amount_usd) -> float:
+        """The SOL to hold back after a User buy, by the buy's size
+        in USD (see the tiers set in __init__). An unparseable
+        amount fails safe to the large tier — never to no reserve."""
+        try:
+            usd = float(amount_usd)
+        except (TypeError, ValueError):
+            return self.user_buy_reserve_large_sol
+        if usd < self.user_buy_reserve_threshold_usd:
+            return self.user_buy_reserve_small_sol
+        return self.user_buy_reserve_large_sol
 
     def require_secrets(self) -> None:
         """Fail fast at startup when required secrets are missing."""

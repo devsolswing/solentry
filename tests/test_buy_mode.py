@@ -14,7 +14,7 @@ import tradingbot.coin_meta as coin_meta_mod
 import tradingbot.home_holdings as home_holdings_mod
 import tradingbot.jupiter as jupiter_mod
 import tradingbot.routes as routes
-from helpers import csrf, make_client, signup
+from helpers import csrf, grant_fuel, make_client, signup
 
 # Gate — the devnet pump.fun mint used as the test coin throughout
 # this file. SOL is the unit of account, never a listed/buyable
@@ -334,20 +334,41 @@ class TestBuySelectors(unittest.TestCase):
                                  "coin": "SOL", "amount": "1"}).status_code,
             404)
 
-    def test_real_buy_without_bot_refused_plainly_with_no_fill(self):
+    def test_real_buy_without_bot_is_a_user_buy(self):
+        # Batch 1 (buy-flow rebuild, 2026-11-26): no bot picked
+        # means a User buy — no bot watching — not a refusal. The
+        # executor is mocked here; the unblock + reserve are
+        # covered end-to-end in tests/test_buy_flow_batch1.py.
         self._create()
+        user_id = self.db.execute(
+            "SELECT id FROM users WHERE username = 'alice'"
+            ).fetchone()["id"]
+        grant_fuel(self.db, user_id, 100)
         self.client.post("/choose-mode", data={
             "csrf_token": csrf(self.client, "/dashboard"),
             "mode": "devnet"})
         cash_before = self.db.execute(
             "SELECT cash_usd FROM paper_portfolio").fetchone()["cash_usd"]
-        resp = self.client.post(f"/coins/{GATE}/buy", data={
-            "csrf_token": csrf(self.client, f"/coins/{GATE}"),
-            "amount_sol": "0.1", "bot_id": ""})
+        with mock.patch.object(routes, "is_curve_complete",
+                               return_value=False), \
+                mock.patch.object(routes, "execute_real_trade",
+                                  return_value={
+                                      "status": "executed",
+                                      "signature": "sig-user-buy",
+                                      "coin_amount": 1000000.0,
+                                      "sol_spent": 0.1,
+                                      "signing_bot": "test"}) as mock_exec:
+            resp = self.client.post(f"/coins/{GATE}/buy", data={
+                "csrf_token": csrf(self.client, f"/coins/{GATE}"),
+                "amount_sol": "0.1", "bot_id": ""})
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
-        self.assertIn("Nothing was bought", html)
-        self.assertIn("Pick one of your real bots", html)
+        self.assertIn("Bought", html)
+        self.assertNotIn("Pick one of your real bots", html)
+        mock_exec.assert_called_once()
+        self.assertIsNone(mock_exec.call_args[0][0])
+        # A User buy is not a paper trade and creates no bot
+        # position.
         self.assertEqual(self.db.execute(
             "SELECT COUNT(*) c FROM paper_trades").fetchone()["c"], 0)
         self.assertEqual(self.db.execute(

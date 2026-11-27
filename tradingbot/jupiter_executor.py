@@ -626,12 +626,19 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
                          rpc_client=None, quote: dict | None = None,
                          decision_price_usd=None,
                          decision_price_age_seconds=None,
-                         sol_price_usd=None) -> dict:
+                         sol_price_usd=None,
+                         user_buy_reserve_sol=None) -> dict:
     """Execute one real Jupiter swap for a bot, signed by the
     user's dedicated signing bot. Same (bot, user_id, coin, side,
     amount, db, cfg) protocol as the pump.fun executor's
     execute_real_trade, so the manual coin-page trades and the
     silent loop can both call it.
+
+    `bot` is the managing bot — or None for a User buy / a manual
+    sell (buy-flow rebuild, 2026-11-26): a User buy has no bot
+    watching, so there is no buy-size cap; the reserve it must
+    leave behind is `user_buy_reserve_sol` (SOL, the buy-size
+    tier for this buy's USD size — the large tier when None).
 
     `mint` is a graduated pump.fun coin's mint address — the only
     coins Jupiter ever trades for this app. `amount` is SOL for
@@ -657,10 +664,10 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
         return _skip("Jupiter swaps need mainnet")
     if bot is not None and bot["mode"] != "real":
         return _skip("bot is not in real mode")
-    if side == "buy" and bot is None:
-        # Manual sells pass bot=None (the user's Sell button
-        # overrides the bot); buys still require a real bot.
-        return _skip("a real bot is required for buys")
+    # User buys (bot None) are allowed: no bot watching means no
+    # buy-size cap — the % -of-wallet buttons are the cap, and the
+    # reserve is enforced inside _execute_jupiter_buy. Manual sells
+    # already pass bot=None.
     if side not in ("buy", "sell"):
         return _skip("unknown side")
     if amount is None or float(amount) <= 0:
@@ -688,7 +695,8 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
                 bot, user_id, mint, decimals, float(amount),
                 db, cfg, rpc, signing_bot, wallet_pubkey, seed,
                 wsol_ata, quote, decision_price_usd,
-                decision_price_age_seconds, sol_price_usd)
+                decision_price_age_seconds, sol_price_usd,
+                user_buy_reserve_sol)
         last = None
         for _attempt in range(max(1, int(cfg.sell_requote_attempts))):
             # First attempt uses the caller's quote (a test
@@ -720,18 +728,34 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
                          wallet_pubkey, seed, wsol_ata, quote,
                          decision_price_usd=None,
                          decision_price_age_seconds=None,
-                         sol_price_usd=None):
+                         sol_price_usd=None,
+                         user_buy_reserve_sol=None):
     """One real Jupiter BUY: `amount_sol` SOL, all of it swapped
-    for the coin at `mint` (no fee — removed 2026-11-12)."""
+    for the coin at `mint` (no fee — removed 2026-11-12). `bot`
+    is the managing bot, or None for a User buy (no bot watching):
+    the buy-size cap is skipped and the reserve is the buy-size
+    tier passed in `user_buy_reserve_sol` (SOL)."""
     amount_lamports = sol_to_lamports(amount_sol)
     try:
         balance = rpc.get_balance_lamports(wallet_pubkey)
     except Exception:
         return _skip("real balance unavailable")
-    allowed = balance * float(bot["buy_size_pct"]) / 100.0
-    if amount_lamports > allowed * 1.001 + 1:
-        return _skip("amount exceeds bot buy size")
-    if balance - amount_lamports < FEE_RESERVE_LAMPORTS:
+    if bot is not None:
+        allowed = balance * float(bot["buy_size_pct"]) / 100.0
+        if amount_lamports > allowed * 1.001 + 1:
+            return _skip("amount exceeds bot buy size")
+        reserve_lamports = FEE_RESERVE_LAMPORTS
+    else:
+        # User buy (no bot watching): the % -of-wallet buttons
+        # replace the bot's buy-size cap, and the reserve is the
+        # buy-size tier (James, 2026-11-26 ~21:45, $5 USD
+        # threshold) — the caller passes the tier for this buy's
+        # USD size; without it the large tier is the fail-safe.
+        reserve_lamports = sol_to_lamports(
+            user_buy_reserve_sol
+            if user_buy_reserve_sol is not None
+            else cfg.user_buy_reserve_large_sol)
+    if balance - amount_lamports < reserve_lamports:
         return _skip("insufficient SOL left for fees")
     # No fee (removed 2026-11-12): the whole trade amount is
     # swapped for tokens.

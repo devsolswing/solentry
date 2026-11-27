@@ -1032,6 +1032,74 @@ def _decision_price_age(app, coin: str) -> float | None:
     return None
 
 
+def _parse_buy_amount(app, form, price, sol_price_usd):
+    """The buy amount from the form, as (amount_sol, amount_usd,
+    error). Buy amounts are USD only (James, 2026-11-26 ~21:48 —
+    the multi-currency picker + live FX source are deferred to a
+    later date; USD is the default currency because the live SOL
+    and coin prices are USD-denominated). The new buy forms post
+    `amount` in USD: the typed amount converts at the LIVE SOL
+    price, then the live coin price — exact, never more or less
+    than typed, with no FX step. The legacy fields (amount_sol /
+    amount_tokens / amount_usd / usd) are still accepted — old
+    cached pages and tests post them. `amount_usd` is the buy's
+    size in USD: it picks the gas-reserve tier, nothing else. A
+    SOL-denominated buy with no live SOL price still parses — its
+    USD size is None and the tier fails safe to the large one."""
+    amount_raw = (form.get("amount") or "").strip()
+    if amount_raw:
+        try:
+            usd = float(amount_raw)
+        except ValueError:
+            return None, None, "Amount must be a number."
+        if usd <= 0:
+            return None, None, "Amount must be more than 0."
+        if sol_price_usd is None:
+            return None, None, "SOL price unavailable right now."
+        return usd / sol_price_usd, usd, None
+    amount_sol_raw = (form.get("amount_sol") or "").strip()
+    if amount_sol_raw:
+        try:
+            amount_sol = float(amount_sol_raw)
+        except ValueError:
+            return None, None, "Amount must be a number."
+        if amount_sol <= 0:
+            return None, None, "Amount must be more than 0."
+        # A SOL-denominated buy needs no SOL price to size the
+        # spend — only to size it in USD for the reserve tier. With
+        # no live SOL price the USD size is unknown (None) and the
+        # tier fails safe to the large one, so the buy still reaches
+        # the fuel gate instead of refusing here on a price it
+        # never needed.
+        if sol_price_usd is None:
+            return amount_sol, None, None
+        return amount_sol, amount_sol * sol_price_usd, None
+    amount_tokens_raw = (form.get("amount_tokens") or "").strip()
+    if amount_tokens_raw:
+        try:
+            tokens = float(amount_tokens_raw)
+        except ValueError:
+            return None, None, "Amount must be a number."
+        if tokens <= 0:
+            return None, None, "Amount must be more than 0."
+        if price is None or price <= 0 or sol_price_usd is None:
+            return None, None, (
+                "Price unavailable right now — the buy needs current "
+                "prices to convert tokens.")
+        return tokens * price / sol_price_usd, tokens * price, None
+    usd_raw = (form.get("amount_usd") or form.get("usd") or "").strip()
+    if usd_raw:
+        try:
+            usd = float(usd_raw)
+        except ValueError:
+            return None, None, "Amount must be a number."
+        if usd <= 0:
+            return None, None, "Amount must be more than 0."
+        if sol_price_usd is None:
+            return None, None, "SOL price unavailable right now."
+        return usd / sol_price_usd, usd, None
+    return 0.0, None, None
+
 def _trade_sol_prices(app):
     """(primary, secondary) SOL prices in USD for a manual trade's
     price-gate context: the feed's SOL tick only (the one SOL
@@ -3653,15 +3721,17 @@ def register_routes(app: Flask) -> None:
 
     def _real_bot_for_trade(app, user, bot_id_raw: str):
         """The real bot a manual real trade is governed by. Returns
-        (bot, error_message). The bot's buy-size % is the per-trade
-        cap the executor enforces, and its platform must be one real
-        trading is built against (pump.fun)."""
+        (bot, error_message) — or (None, None) for a User buy: no
+        bot picked means no bot watching (buy-flow rebuild,
+        2026-11-26), and the % -of-wallet buttons + the gas reserve
+        replace the bot's buy-size cap. A bot id that is invalid,
+        not the user's, or a paper bot is still an error. The bot's
+        buy-size % is the per-trade cap the executor enforces, and
+        its platform must be one real trading is built against
+        (pump.fun)."""
         db = _db(app)
         if not (bot_id_raw or "").strip():
-            return None, ("Pick one of your real bots to manage this "
-                          "trade — its buy-size limit is the cap. "
-                          "Create a real bot first if you don't have "
-                          "one.")
+            return None, None
         try:
             bot_id = int(bot_id_raw)
         except ValueError:
@@ -3770,39 +3840,20 @@ def register_routes(app: Flask) -> None:
         # (detail page / popup ticket), as a token amount, or as $
         # (quick Buy/Sell popup) — all convert at the server's own
         # live prices, never at a price the browser sent.
-        amount_sol_raw = (request.form.get("amount_sol") or "").strip()
-        amount_tokens_raw = (request.form.get("amount_tokens")
-                             or "").strip()
-        amount_usd_raw = (request.form.get("amount_usd") or "").strip()
-        try:
-            if amount_sol_raw:
-                amount_sol = float(amount_sol_raw)
-            elif amount_tokens_raw:
-                tokens = float(amount_tokens_raw)
-                sol_price = _sol_price_usd()
-                if price is None or price <= 0 or sol_price is None:
-                    return _coin_result(
-                        "Nothing was bought",
-                        ["Price unavailable right now — the buy needs "
-                         "current prices to convert tokens."],
-                        False, coin_id_resolved, label)
-                amount_sol = tokens * price / sol_price
-            elif amount_usd_raw:
-                amount_usd = float(amount_usd_raw)
-                sol_price = _sol_price_usd()
-                if sol_price is None:
-                    return _coin_result(
-                        "Nothing was bought",
-                        ["SOL price unavailable right now."],
-                        False, coin_id_resolved, label)
-                amount_sol = amount_usd / sol_price
-            else:
-                amount_sol = 0.0
-        except ValueError:
+        # Amounts arrive as a typed USD amount (new buy forms),
+        # as SOL, as a token amount, or as $ (legacy forms) — all
+        # convert at the server's own live prices, never at a price
+        # the browser sent. `amount_usd` is the buy's size in USD:
+        # it picks the gas-reserve tier, nothing else.
+        sol_price = _sol_price_usd()
+        (amount_sol, amount_usd,
+         amount_error) = _parse_buy_amount(
+             app, request.form, price, sol_price)
+        if amount_error:
             return _coin_result(
-                "Nothing was bought", ["Amount must be a number."],
-                False, coin_id_resolved, label)
-        if amount_sol <= 0:
+                "Nothing was bought", [amount_error], False,
+                coin_id_resolved, label)
+        if amount_sol is None or amount_sol <= 0:
             return _coin_result(
                 "Nothing was bought", ["Amount must be more than 0."],
                 False, coin_id_resolved, label)
@@ -3879,19 +3930,30 @@ def register_routes(app: Flask) -> None:
                 ["Bonding curve unavailable — the trade venue could "
                  "not be determined."],
                 False, coin_id_resolved, label)
+        # Gas reserve (buy-flow rebuild, James 2026-11-26 ~21:45,
+        # threshold in USD since 2026-11-26 ~21:48): the buy's size
+        # in USD picks the tier — under $5 USD holds back 0.0012
+        # SOL, $5 USD or more holds back 0.012 SOL — so the wallet
+        # can always sell back to SOL. A buy whose USD size is
+        # unknown fails safe to the large tier. The executor
+        # enforces it for User buys (bot None); a bot buy keeps
+        # its own fee reserve and ignores this value.
+        reserve_sol = _cfg(app).user_buy_gas_reserve_sol(amount_usd)
         if complete:
             result = execute_jupiter_swap(
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
                 db, _cfg(app), decision_price_usd=price or 0.0,
                 decision_price_age_seconds=decision_age,
-                sol_price_usd=sol_price_usd)
+                sol_price_usd=sol_price_usd,
+                user_buy_reserve_sol=reserve_sol)
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
                 price or 0.0, db, _cfg(app),
                 decision_price_age_seconds=decision_age,
-                sol_price_usd=sol_price_usd)
+                sol_price_usd=sol_price_usd,
+                user_buy_reserve_sol=reserve_sol)
             venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
             return _coin_result(
