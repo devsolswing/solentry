@@ -59,7 +59,8 @@ from .charts import (CHART_RANGES, fetch_market_chart,
                      mint_candles_from_feed, search_coins)
 from .coin_meta import ensure_coin_meta, stored_display
 from .config import Config
-from .executor import execute_real_trade, is_curve_complete, send_and_confirm
+from .executor import (execute_real_trade, fix_for_skip_reason,
+                       is_curve_complete, send_and_confirm)
 from .jupiter_executor import execute_jupiter_swap
 from .paper import (PAPER_BUY_HAIRCUT_PCT, InsufficientCash,
                     InsufficientHolding, paper_buy as ledger_buy,
@@ -1119,6 +1120,25 @@ def _parse_buy_amount(app, form, price, sol_price_usd):
             return None, None, "SOL price unavailable right now."
         return usd / sol_price_usd, usd, None
     return 0.0, None, None
+
+
+def _trade_failure_lines(result, side: str):
+    """Result-page lines for a failed real trade: what went wrong,
+    how to fix it, and the transaction ID — or a plain statement
+    that there is none when the trade never reached the chain
+    (James, 2026-11-26: the log must never invent a transaction
+    ID). The same lines go into the activity log."""
+    reason = result.get("reason", "real execution failed")
+    sig = result.get("signature")
+    lines = [f"No {side} was placed — {reason}.",
+             f"Fix: {fix_for_skip_reason(reason)}"]
+    if sig:
+        lines.append(f"Transaction: {sig}")
+    else:
+        lines.append("No transaction reached the chain — there is no "
+                     "transaction ID.")
+    return lines
+
 
 def _trade_sol_prices(app):
     """(primary, secondary) SOL prices in USD for a manual trade's
@@ -3843,6 +3863,15 @@ def register_routes(app: Flask) -> None:
             # source, never a Jupiter quote.
             result = _paper_buy_for(app, user, coin_id_resolved, usd,
                                     request.form.get("bot_id") or "")
+            if not result["ok"]:
+                _log(app, user["id"], "paper_buy_failed",
+                     f"Paper buy of {coin_id_resolved} failed — "
+                     f"{result['message']} No transaction — paper "
+                     f"trades never reach the chain.",
+                     "paper")
+                return _coin_result(
+                    "Nothing was bought", [result["message"]], False,
+                    coin_id_resolved, label)
             lines = [result["message"]]
             if result["ok"]:
                 lines.append(
@@ -3976,11 +4005,13 @@ def register_routes(app: Flask) -> None:
                 user_buy_reserve_sol=reserve_sol)
             venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
+            failure_lines = _trade_failure_lines(result, "buy")
+            _log(app, user["id"], "real_buy_failed",
+                 f"Real buy of {coin_id_resolved} failed — "
+                 + " ".join(failure_lines), "real")
             return _coin_result(
-                "Nothing was bought",
-                [f"No buy was placed — "
-                 f"{result.get('reason', 'real execution failed')}."],
-                False, coin_id_resolved, label)
+                "Nothing was bought", failure_lines, False,
+                coin_id_resolved, label)
         # Fuel drawdown: the trade executed — 1 package credit,
         # keyed by the confirmed signature. A bookkeeping failure
         # never breaks the trade result. Manual trades write no
@@ -4278,11 +4309,13 @@ def register_routes(app: Flask) -> None:
                 price or 0.0, db, _cfg(app))
             venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
+            failure_lines = _trade_failure_lines(result, "sell")
+            _log(app, user["id"], "real_sell_failed",
+                 f"Real sell of {coin_id_resolved} failed — "
+                 + " ".join(failure_lines), "real")
             return _coin_result(
-                "Nothing was sold",
-                [f"No sell was placed — "
-                 f"{result.get('reason', 'real execution failed')}."],
-                False, coin_id_resolved, label)
+                "Nothing was sold", failure_lines, False,
+                coin_id_resolved, label)
         # Fuel drawdown: the trade executed — 1 package credit,
         # keyed by the confirmed signature.
         gate_fuel_mod.consume_fuel(

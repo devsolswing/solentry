@@ -78,7 +78,10 @@ bounded re-quote, above).
 from __future__ import annotations
 
 import base64
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 from . import pumpfun
 from .config import Config
@@ -131,8 +134,77 @@ def _check_instructions_only_allowed(instructions: list):
         raise ValueError("refused: instruction for an unexpected program")
 
 
-def _skip(reason: str) -> dict:
-    return {"status": "skipped", "reason": reason}
+def _skip(reason: str, signature: str | None = None) -> dict:
+    """A refused trade. `signature` carries the known transaction
+    signature when the trade reached the chain (sent but rejected
+    or unconfirmed) — the caller surfaces it in the failure log
+    instead of leaving the user with no transaction ID. Every skip
+    logs at warning: a refused trade is never silent (buy-flow
+    rebuild, 2026-11-26)."""
+    logger.warning("real trade skipped: %s%s",
+                   reason,
+                   f" (signature {signature})" if signature else "")
+    result = {"status": "skipped", "reason": reason}
+    if signature:
+        result["signature"] = signature
+    return result
+
+
+# Fix guidance for a refused trade, by reason substring (buy-flow
+# rebuild, 2026-11-26): the failure log states what went wrong AND
+# what fixes it. The first matching substring wins (most specific
+# first); anything unmatched gets the generic line. A reason that
+# names a sent signature is logged with it by the caller — a trade
+# that never reached the chain has no transaction ID, and the log
+# says so instead of inventing one.
+SKIP_FIX_GUIDANCE = (
+    ("amount exceeds bot buy size",
+     "Buy a smaller amount, or raise the bot's buy-size %."),
+    ("insufficient sol left for fees",
+     "The trade would leave less SOL than the gas reserve behind "
+     "(0.0012 SOL for buys under $5 USD, the larger tier for $5+). "
+     "Buy less, or add SOL to the wallet."),
+    ("insufficient funds",
+     "The exit fee came in higher than the SOL held back for gas. "
+     "No trade was placed — add a little SOL to the wallet so the "
+     "sell can pay its fee, then try again."),
+    ("decision price is stale",
+     "Wait a moment for the live price to refresh, then try again."),
+    ("no decision price for this buy",
+     "No live price right now — wait for the feed to price the "
+     "coin, then try again."),
+    ("bonding curve unavailable",
+     "The coin's bonding curve could not be read — try again in a "
+     "moment."),
+    ("transaction rejected:",
+     "The chain rejected the transaction — the reason above is the "
+     "node's own wording. Check the transaction ID on a block "
+     "explorer; if it never landed, nothing moved and you can "
+     "retry."),
+    ("transaction not confirmed",
+     "The transaction was sent but the chain never confirmed it. "
+     "Check the transaction ID — if it never landed, nothing moved "
+     "and you can retry."),
+    ("no jupiter route for this coin",
+     "Jupiter has no liquid route for this coin right now — try "
+     "again later."),
+    ("signing bot unavailable",
+     "The signing bot could not be reached — try again in a "
+     "moment."),
+    ("real balance unavailable",
+     "The wallet balance could not be read — try again in a "
+     "moment."),
+)
+
+
+def fix_for_skip_reason(reason) -> str:
+    """What fixes a refused trade, from its reason string."""
+    lowered = str(reason or "").lower()
+    for needle, guidance in SKIP_FIX_GUIDANCE:
+        if needle in lowered:
+            return guidance
+    return ("Try again in a moment — if it keeps failing, send the "
+            "reason above to support with the transaction ID.")
 
 
 def _priority_fee_instruction(rpc, cfg: Config, accounts: list):
@@ -623,7 +695,8 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
             if (confirm_error or "").startswith(
                     "transaction rejected:"):
                 _set_pending_status(db, signature, "failed")
-            return _skip(confirm_error or "transaction not confirmed")
+            return _skip(confirm_error or "transaction not confirmed",
+                         signature=signature)
         _set_pending_status(db, signature, "confirmed")
         coin_amount = tokens / pumpfun.TOKEN_BASE
         try:
@@ -752,7 +825,8 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
             if (confirm_error or "").startswith(
                     "transaction rejected:"):
                 _set_pending_status(db, signature, "failed")
-            return _skip(confirm_error or "transaction not confirmed")
+            return _skip(confirm_error or "transaction not confirmed",
+                         signature=signature)
         _set_pending_status(db, signature, "confirmed")
         # Executed SOL received, from the wallet's own balance delta
         # — the on-chain proceeds, not a quoted estimate. The loop

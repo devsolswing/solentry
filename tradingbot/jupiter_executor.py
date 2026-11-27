@@ -823,7 +823,8 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
     confirmed, confirm_error = _send_and_confirm(
         rpc, signed_b64, signature)
     if confirmed is None:
-        return _skip(confirm_error or "transaction not confirmed")
+        return _skip(confirm_error or "transaction not confirmed",
+                     signature=signature)
     coin_amount = float(quote["out_amount_ui"])
     try:
         ata_after = rpc.get_token_account_balance(out_ata)
@@ -904,7 +905,8 @@ def _execute_jupiter_sell(bot, user_id, mint, decimals,
     confirmed, confirm_error = _send_and_confirm(
         rpc, signed_b64, signature)
     if confirmed is None:
-        return _skip(confirm_error or "transaction not confirmed")
+        return _skip(confirm_error or "transaction not confirmed",
+                     signature=signature)
     sol_received = lamports_to_sol(expected_sol_lamports)
     if sol_before is not None:
         try:
