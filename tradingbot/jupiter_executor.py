@@ -627,7 +627,8 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
                          decision_price_usd=None,
                          decision_price_age_seconds=None,
                          sol_price_usd=None,
-                         user_buy_reserve_sol=None) -> dict:
+                         user_buy_reserve_sol=None,
+                         max_fee_sol: float | None = None) -> dict:
     """Execute one real Jupiter swap for a bot, signed by the
     user's dedicated signing bot. Same (bot, user_id, coin, side,
     amount, db, cfg) protocol as the pump.fun executor's
@@ -647,7 +648,11 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
     here. `decision_price_usd` is the feed price that picked the
     trade (buys only): the fresh quote's implied price must agree
     with it within the two-source tolerance, or the buy refuses.
-    Returns {"status": "executed", "signature",
+    `max_fee_sol` is a per-trade swap-fee budget in SOL (Trenches
+    quick buy/sell, 0.001 max) — it replaces the configured
+    per-trade budget for this one swap, and the executed result
+    reports the budget applied (`fee_budget_sol`) so the receipt
+    can state it. Returns {"status": "executed", "signature",
     "coin_amount", "signing_bot": ...} or {"status": "skipped",
     "reason": ...}. There is NO trading fee (removed 2026-11-12):
     the whole trade amount is swapped. Never raises for a refused
@@ -696,7 +701,7 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
                 db, cfg, rpc, signing_bot, wallet_pubkey, seed,
                 wsol_ata, quote, decision_price_usd,
                 decision_price_age_seconds, sol_price_usd,
-                user_buy_reserve_sol)
+                user_buy_reserve_sol, max_fee_sol)
         last = None
         for _attempt in range(max(1, int(cfg.sell_requote_attempts))):
             # First attempt uses the caller's quote (a test
@@ -706,7 +711,8 @@ def execute_jupiter_swap(bot, user_id: int, mint: str, side: str,
             last = _execute_jupiter_sell(
                 bot, user_id, mint, decimals, float(amount),
                 db, cfg, rpc, signing_bot, wallet_pubkey, seed,
-                wsol_ata, quote if _attempt == 0 else None)
+                wsol_ata, quote if _attempt == 0 else None,
+                max_fee_sol)
             if last.get("status") == "executed":
                 return last
             if last.get("reason") != "transaction not confirmed":
@@ -729,12 +735,15 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
                          decision_price_usd=None,
                          decision_price_age_seconds=None,
                          sol_price_usd=None,
-                         user_buy_reserve_sol=None):
+                         user_buy_reserve_sol=None,
+                         max_fee_sol: float | None = None):
     """One real Jupiter BUY: `amount_sol` SOL, all of it swapped
     for the coin at `mint` (no fee — removed 2026-11-12). `bot`
     is the managing bot, or None for a User buy (no bot watching):
     the buy-size cap is skipped and the reserve is the buy-size
-    tier passed in `user_buy_reserve_sol` (SOL)."""
+    tier passed in `user_buy_reserve_sol` (SOL). `max_fee_sol`
+    replaces the configured per-trade fee budget for this one swap
+    (Trenches quick buy, 0.001 max)."""
     amount_lamports = sol_to_lamports(amount_sol)
     try:
         balance = rpc.get_balance_lamports(wallet_pubkey)
@@ -813,9 +822,11 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
             parsed, resolved_keys, wallet_pubkey, SOL_MINT,
             swap_lamports, "buy", wsol_ata)
         # Fee budget: the swap's maximum fee must fit the
-        # per-trade budget, or nothing is signed.
-        check_swap_fee_budget(parsed, resolved_keys,
-                              cfg.jupiter_max_fee_sol)
+        # per-trade budget, or nothing is signed. A quick buy
+        # passes its own tighter budget (0.001 SOL) here.
+        fee_budget = (max_fee_sol if max_fee_sol is not None
+                      else cfg.jupiter_max_fee_sol)
+        check_swap_fee_budget(parsed, resolved_keys, fee_budget)
         signed_b64, signature = sign_versioned_transaction(
             seed, swap_tx_b64, wallet_pubkey)
     except ValueError as exc:
@@ -836,7 +847,8 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
     # real spend for cost basis. A failed read leaves the key out.
     result = {"status": "executed", "signature": confirmed,
               "coin_amount": coin_amount,
-              "signing_bot": signing_bot["support_id"]}
+              "signing_bot": signing_bot["support_id"],
+              "fee_budget_sol": fee_budget}
     try:
         balance_after = rpc.get_balance_lamports(wallet_pubkey)
         result["sol_spent"] = lamports_to_sol(balance - balance_after)
@@ -847,10 +859,13 @@ def _execute_jupiter_buy(bot, user_id, mint, decimals,
 
 def _execute_jupiter_sell(bot, user_id, mint, decimals,
                           amount_tokens, db, cfg, rpc, signing_bot,
-                          wallet_pubkey, seed, wsol_ata, quote):
+                          wallet_pubkey, seed, wsol_ata, quote,
+                          max_fee_sol: float | None = None):
     """One real Jupiter SELL: `amount_tokens` of the coin at `mint`
     -> SOL. All proceeds go to the seller's wallet (no fee —
-    removed 2026-11-12)."""
+    removed 2026-11-12). `max_fee_sol` replaces the configured
+    per-trade fee budget for this one swap (Trenches quick Sell
+    All Now, 0.001 max)."""
     token_base = int(round(amount_tokens * (10 ** decimals)))
     if token_base <= 0:
         return _skip("amount too small to sell")
@@ -896,8 +911,9 @@ def _execute_jupiter_sell(bot, user_id, mint, decimals,
         verify_jupiter_transaction(
             parsed, resolved_keys, wallet_pubkey, mint,
             token_base, "sell", wsol_ata)
-        check_swap_fee_budget(parsed, resolved_keys,
-                              cfg.jupiter_max_fee_sol)
+        fee_budget = (max_fee_sol if max_fee_sol is not None
+                      else cfg.jupiter_max_fee_sol)
+        check_swap_fee_budget(parsed, resolved_keys, fee_budget)
         signed_b64, signature = sign_versioned_transaction(
             seed, swap_tx_b64, wallet_pubkey)
     except ValueError as exc:
@@ -916,4 +932,5 @@ def _execute_jupiter_sell(bot, user_id, mint, decimals,
             pass
     return {"status": "executed", "signature": confirmed,
             "coin_amount": sol_received, "sol_received": sol_received,
-            "signing_bot": signing_bot["support_id"]}
+            "signing_bot": signing_bot["support_id"],
+            "fee_budget_sol": fee_budget}

@@ -1,5 +1,5 @@
-{# One trenches badge button (shared by trenches.html and the
-   /api/trenches refresh, so the server and the poll render the
+{# One trenches badge (shared by trenches.html, dashboard.html and
+   the /api/trenches refresh, so the server and the poll render the
    same markup). Two lines inside the button, nothing truncated:
    icon + full name + ticker + unit price on top (the price in
    significant figures, never $0.0000); the coin's true 1h market
@@ -10,8 +10,24 @@
    the chart every 5s; data-sparkline-pct-1h refreshes the %
    on the same poll (Helius ticks carry no 1h %, so the tick
    path alone can never move it). data-trenches-mint lets the
-   5s list refresh match this row to the server's rows. #}
-<a class="coin-row trenches-row" href="{{ url_for('coin_popup', coin_id=t.mint) }}" data-trenches-mint="{{ t.mint }}">
+   5s list refresh match this row to the server's rows, and
+   data-held lets the poll swap the buttons in when a holding
+   appears or disappears without a reload.
+
+   Trenches quick buy (buy-flow batch 6, James 2026-11-27
+   ~07:32-07:40): Buy 1 / Buy 2 buttons under each badge — one tap
+   buys right away, no popup, no confirmation. Each form posts
+   only its slot (quick_slot 1 or 2); the server resolves the SOL
+   amount from the user's saved Buy 1 / Buy 2 setting, so the
+   label's amount is display-only and a stale label can never buy
+   the wrong amount. Sell All Now shows only when the coin is held
+   in the active mode right now (live holdings) — no holding, no
+   button. The forms submit normally without JavaScript (plain
+   result page); with JavaScript the delegated handler in
+   _trenches_quick.html fetches instead and shows the receipt
+   popup in place. #}
+<div class="trenches-badge" data-trenches-mint="{{ t.mint }}" data-held="{{ 1 if t.held|default(false) else 0 }}">
+<a class="coin-row trenches-row" href="{{ url_for('coin_popup', coin_id=t.mint) }}">
   <span class="coin-ico" aria-hidden="true">{{ t.symbol[:1] }}</span>
   <span class="trenches-main">
     <span class="trenches-top">
@@ -24,3 +40,26 @@
     </span>
   </span>
 </a>
+<div class="trenches-quick">
+  <form method="post" action="{{ url_for('coin_buy', coin_id=t.mint) }}" data-quick-buy data-quick-slot="1" data-coin-name="{{ t.name }}" data-coin-symbol="{{ t.symbol }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="quick_buy" value="1">
+    <input type="hidden" name="quick_slot" value="1">
+    <button class="btn small trenches-quick-btn" type="submit">Buy 1 · <span data-quick-amount>{{ "%.3g"|format(t.quick_buy1_sol|default(0.02)) }}</span> SOL</button>
+  </form>
+  <form method="post" action="{{ url_for('coin_buy', coin_id=t.mint) }}" data-quick-buy data-quick-slot="2" data-coin-name="{{ t.name }}" data-coin-symbol="{{ t.symbol }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="quick_buy" value="1">
+    <input type="hidden" name="quick_slot" value="2">
+    <button class="btn small trenches-quick-btn" type="submit">Buy 2 · <span data-quick-amount>{{ "%.3g"|format(t.quick_buy2_sol|default(0.05)) }}</span> SOL</button>
+  </form>
+  {% if t.held|default(false) %}
+  <form method="post" action="{{ url_for('coin_sell', coin_id=t.mint) }}" data-quick-sell-all data-coin-name="{{ t.name }}" data-coin-symbol="{{ t.symbol }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="sell_all" value="1">
+    <input type="hidden" name="quick_sell" value="1">
+    <button class="btn small trenches-quick-btn trenches-sell-btn" type="submit">Sell All Now</button>
+  </form>
+  {% endif %}
+</div>
+</div>

@@ -285,6 +285,20 @@ body.app-shell .wrap { flex: 1 1 auto; overflow-y: auto; padding-bottom: 84px; }
 .trenches-list .coin-price { flex: 0 0 auto; white-space: nowrap; }
 .trenches-bottom { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .trenches-bottom .coin-change { flex: 0 0 auto; white-space: nowrap; }
+/* Trenches quick buy (buy-flow batch 6): one-tap Buy 1 / Buy 2
+   under each badge, Sell All Now only when the coin is held. The
+   badge wrapper stacks the coin link over the buttons; the list
+   gap stays tight because the wrapper is the flex child. Buy
+   buttons are the gold gradient; Sell All Now is the red danger
+   button so a fast exit can never be mistaken for a buy. */
+.trenches-badge { display: flex; flex-direction: column; gap: 6px; }
+.trenches-list .trenches-badge .coin-row { margin: 0; }
+.trenches-quick { display: flex; gap: 6px; flex-wrap: wrap; }
+.trenches-quick-btn { padding: 6px 10px; font-size: 13px; }
+.trenches-sell-btn { background: #dc2626; border-color: #ef4444; color: #fff; }
+.quick-amounts { display: flex; flex-wrap: wrap; gap: 6px; align-items: end; margin-bottom: 10px; }
+.quick-amounts label { font-size: 13px; }
+.quick-amounts input[type="number"] { width: 90px; }
 .chart-ranges { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
 .range-btn { flex: 1 1 auto; text-align: center; padding: 8px 4px; background: #1a0805; border: 1px solid #ffb300; border-radius: 999px; color: #ffd700; text-decoration: none; font-size: 13px; font-weight: 700; }
 .range-btn.active { background: linear-gradient(180deg, #ffd700 0%, #ff7a18 45%, #e62e1b 100%); color: #1a0505; border-color: #ffcf3d; }

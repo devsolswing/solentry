@@ -1,0 +1,191 @@
+{# Trenches quick-buy receipt popup + the delegated one-tap handler
+   (buy-flow batch 6, James 2026-11-27 ~07:32-07:41). Included by
+   trenches.html and dashboard.html — both render trenches badges.
+
+   How it works: each badge's Buy 1 / Buy 2 / Sell All Now form
+   submits normally without JavaScript (plain result page). With
+   JavaScript, this handler intercepts the submit, posts the same
+   form with format=json, and:
+   - a bought coin opens this receipt popup with the full details
+     (amount, coins, price, signature + Solscan link, signing bot,
+     venue, SOL spent, priority-fee price/cap, new balance);
+   - a sold coin does NOT get a receipt popup (none was ordered) —
+     the button row is replaced by a short "Sold" line and the list
+     refreshes so Sell All Now disappears;
+   - a refused trade opens the popup with the plain reason instead
+     (heading + lines from the server, never a guessed error).
+   Every value is set with textContent, never innerHTML — coin names
+   come from the feed and are never trusted as markup. #}
+<div class="overlay hidden" id="trenches-receipt-overlay" role="dialog" aria-label="Trade receipt">
+  <div class="coin-popup">
+    <p class="popup-head"><button class="popup-close" type="button" data-receipt-close aria-label="Close">✕</button></p>
+    <h2 data-receipt-title>Receipt</h2>
+    <div data-receipt-body></div>
+    <p><button class="btn big" type="button" data-receipt-close>Done</button></p>
+  </div>
+</div>
+<script nonce="{{ csp_nonce }}">
+(function () {
+  'use strict';
+  var overlay = document.getElementById('trenches-receipt-overlay');
+  if (!overlay) return;
+  var titleEl = overlay.querySelector('[data-receipt-title]');
+  var bodyEl = overlay.querySelector('[data-receipt-body]');
+
+  function fmtSol(v) {
+    if (v == null || isNaN(v)) return '—';
+    return Number(v).toFixed(4) + ' SOL';
+  }
+  function fmtPrice(v) {
+    if (v == null || isNaN(v) || !(v > 0)) return 'no data';
+    if (v >= 0.01) return '$' + Number(v).toFixed(4);
+    return '$' + Number(v).toPrecision(4);
+  }
+  function row(label, valueEl) {
+    var p = document.createElement('p');
+    var strong = document.createElement('strong');
+    strong.textContent = label + ': ';
+    p.appendChild(strong);
+    p.appendChild(valueEl);
+    return p;
+  }
+  function textRow(label, text) {
+    var span = document.createElement('span');
+    span.textContent = text;
+    return row(label, span);
+  }
+  function closeReceipt() { overlay.classList.add('hidden'); }
+  overlay.querySelectorAll('[data-receipt-close]').forEach(function (btn) {
+    btn.addEventListener('click', closeReceipt);
+  });
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) closeReceipt();
+  });
+
+  function showReceipt(title, build) {
+    titleEl.textContent = title;
+    bodyEl.innerHTML = '';
+    build(bodyEl);
+    overlay.classList.remove('hidden');
+  }
+  function showLines(title, lines) {
+    showReceipt(title, function (body) {
+      (lines || ['Nothing happened.']).forEach(function (line) {
+        var p = document.createElement('p');
+        p.textContent = line;
+        body.appendChild(p);
+      });
+    });
+  }
+  function refreshTrenches() {
+    document.dispatchEvent(new Event('trenches:refresh'));
+  }
+
+  function receiptBody(r, coinName, coinSymbol) {
+    return function (body) {
+      body.appendChild(textRow('Coin', coinName + ' (' + coinSymbol + ')'));
+      if (r.side === 'buy') {
+        var got = document.createElement('span');
+        got.textContent = fmtSol(r.amount_sol) + ' → '
+          + (r.coin_amount != null
+            ? Number(r.coin_amount).toLocaleString('en-US', { maximumFractionDigits: 4 }) + ' ' + coinSymbol
+            : '—');
+        body.appendChild(row('Bought', got));
+        body.appendChild(textRow('Price', fmtPrice(r.price_usd)));
+        if (r.sol_spent != null) {
+          body.appendChild(textRow('SOL spent', fmtSol(r.sol_spent) + ' (amount + network fee)'));
+        }
+      } else {
+        var sold = document.createElement('span');
+        sold.textContent = (r.coin_amount != null
+          ? Number(r.coin_amount).toLocaleString('en-US', { maximumFractionDigits: 4 }) + ' ' + coinSymbol
+          : '—') + (r.sol_received != null ? ' → ' + fmtSol(r.sol_received) : '');
+        body.appendChild(row('Sold', sold));
+        body.appendChild(textRow('Price', fmtPrice(r.price_usd)));
+      }
+      if (r.signature) {
+        var link = document.createElement('a');
+        link.href = 'https://solscan.io/tx/' + r.signature;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = String(r.signature).slice(0, 12) + '… (Solscan)';
+        body.appendChild(row('Signature', link));
+      } else if (r.mode === 'paper') {
+        body.appendChild(textRow('Signature', 'Paper trade — no transaction reached the chain.'));
+      }
+      if (r.signing_bot) body.appendChild(textRow('Signing bot', r.signing_bot));
+      if (r.venue) body.appendChild(textRow('Venue', r.venue));
+      if (r.priority_fee_micro_lamports != null) {
+        body.appendChild(textRow('Priority fee',
+          r.priority_fee_micro_lamports.toLocaleString('en-US')
+          + ' µL per compute unit — capped so the fee stays under 0.001 SOL.'));
+      } else if (r.fee_budget_sol != null) {
+        body.appendChild(textRow('Swap fee',
+          'Budget ' + Number(r.fee_budget_sol).toFixed(4)
+          + ' SOL max — the swap was refused if its fee went over it.'));
+      } else if (r.priority_fee_max_sol != null) {
+        body.appendChild(textRow('Priority fee',
+          'Capped at ' + Number(r.priority_fee_max_sol).toFixed(4) + ' SOL max.'));
+      }
+      if (r.new_balance_sol != null) {
+        body.appendChild(textRow('New wallet balance', fmtSol(r.new_balance_sol)));
+      }
+      if (r.new_paper_cash != null) {
+        body.appendChild(textRow('New paper cash', '$' + Number(r.new_paper_cash).toFixed(2) + ' CAD.'));
+      }
+    };
+  }
+
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || !form.matches) return;
+    var isBuy = form.matches('form[data-quick-buy]');
+    var isSell = form.matches('form[data-quick-sell-all]');
+    if (!isBuy && !isSell) return;
+    e.preventDefault();
+    var btn = form.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    var coinName = form.getAttribute('data-coin-name') || '';
+    var coinSymbol = form.getAttribute('data-coin-symbol') || '';
+    var data = new FormData(form);
+    data.set('format', 'json');
+    fetch(form.action, {
+      method: 'POST', body: data, credentials: 'same-origin'
+    })
+      .then(function (resp) { return resp.json(); })
+      .then(function (payload) {
+        if (btn) btn.disabled = false;
+        if (!payload || !payload.ok) {
+          showLines((payload && payload.heading) || 'Nothing happened',
+            (payload && payload.lines) || ['The trade did not go through.']);
+          return;
+        }
+        if (isBuy) {
+          showReceipt('Bought',
+            receiptBody(payload.receipt || {}, coinName, coinSymbol));
+          refreshTrenches();
+          return;
+        }
+        // Sell All Now: no receipt popup was ordered — a short
+        // inline line in place of the button, then refresh the
+        // list so Sell All Now disappears.
+        var quick = form.closest('.trenches-quick');
+        if (quick) {
+          var done = document.createElement('p');
+          done.className = 'muted small';
+          var r = payload.receipt || {};
+          done.textContent = 'Sold ✓'
+            + (r.sol_received != null ? ' — ' + fmtSol(r.sol_received) + ' back' : '')
+            + (r.signature ? ' — ' + String(r.signature).slice(0, 12) + '…' : '');
+          quick.replaceChildren(done);
+        }
+        refreshTrenches();
+      })
+      .catch(function () {
+        if (btn) btn.disabled = false;
+        showLines('Could not reach the server',
+          ['The trade may or may not have gone through — check Logs before retrying.']);
+      });
+  });
+})();
+</script>

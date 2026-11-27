@@ -57,6 +57,22 @@ def _parse_devnet_trench_mints(env: dict) -> list[str]:
     return [m.strip() for m in str(raw).split(",") if m.strip()]
 
 
+def _env_float(raw, default: float, minimum: float | None = None) -> float:
+    """A float env value that falls back to `default` when missing,
+    unparseable, non-finite, or below `minimum` — a bad Railway
+    var must never crash the app at startup (the quick-buy
+    defaults are the fail-safe)."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
 class Config:
     """All secrets come from env vars. Nothing secret lives in code."""
 
@@ -199,6 +215,25 @@ class Config:
         self.user_buy_reserve_large_sol: float = float(env.get(
             "USER_BUY_RESERVE_LARGE_SOL", "0.012"))
 
+        # Trenches quick buy (buy-flow batch 6, James 2026-11-27
+        # ~07:32-07:41, cap settled ~08:45): one-tap Buy 1 / Buy 2
+        # buttons on each Trenches badge, both amounts settable by
+        # the user in the buy popup. Defaults 0.02 / 0.05 SOL worth
+        # of the coin. Priority fee if needed to enter or exit fast,
+        # CAPPED at 0.001 SOL max per trade — the cap is a per-trade
+        # SOL budget, not a per-compute-unit price: the executor
+        # converts it to a unit price against the 200,000-unit
+        # default budget (0.001 SOL / 200,000 CU = 5,000
+        # micro-lamports per CU), so a spiking fee market can never
+        # push one quick trade past 0.001 SOL in priority fees.
+        self.quick_buy1_sol: float = _env_float(
+            env.get("QUICK_BUY1_SOL"), 0.02, minimum=0.001)
+        self.quick_buy2_sol: float = _env_float(
+            env.get("QUICK_BUY2_SOL"), 0.05, minimum=0.001)
+        self.quick_trade_priority_fee_max_sol: float = _env_float(
+            env.get("QUICK_TRADE_PRIORITY_FEE_MAX_SOL"), 0.001,
+            minimum=0.000001)
+
         # Pending-trade horizon: a sent signature with no receipt
         # after this long is finally marked failed (seconds).
         self.pending_trade_horizon_seconds: float = float(env.get(
@@ -284,6 +319,17 @@ class Config:
         if usd < self.user_buy_reserve_threshold_usd:
             return self.user_buy_reserve_small_sol
         return self.user_buy_reserve_large_sol
+
+    def quick_buy_reserve_sol(self, amount_usd) -> float:
+        """The SOL a Trenches quick buy must leave behind: the
+        buy-size tier for its USD size PLUS the priority-fee cap
+        (0.001 SOL). The fee comes on top of the buy, so the
+        reserve the executor enforces already contains it — the
+        wallet keeps the tier reserve intact after the fee is
+        paid. A 0.02 SOL buy is the small tier (0.0012), so a
+        quick buy leaves 0.0022 SOL behind before ATA rent."""
+        return (self.user_buy_gas_reserve_sol(amount_usd)
+                + self.quick_trade_priority_fee_max_sol)
 
     def pct_buy_amounts_sol(self, wallet_sol, sol_price_usd,
                             include_ata_rent=False) -> dict:

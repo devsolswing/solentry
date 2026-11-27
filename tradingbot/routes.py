@@ -63,6 +63,7 @@ from .config import Config
 from .executor import (execute_real_trade, fix_for_skip_reason,
                        is_curve_complete, send_and_confirm)
 from .jupiter_executor import execute_jupiter_swap
+from . import quick_buy as quick_buy_mod
 from .user_exits import set_user_exit
 from .paper import (PAPER_BUY_HAIRCUT_PCT, InsufficientCash,
                     InsufficientHolding, paper_buy as ledger_buy,
@@ -1534,6 +1535,27 @@ def _trenches_entry(mint: str) -> dict | None:
     except Exception:
         return None
     return next((r for r in rows if r["mint"] == mint), None)
+
+
+def _annotate_trenches_rows(db, user_id: int, mode: str,
+                            rows: list) -> list:
+    """Annotate trenches rows for the quick-buy badges (buy-flow
+    batch 6): each row gains `held` — Sell All Now shows only when
+    the coin is held in the active mode, from live holdings — and
+    the user's Buy 1 / Buy 2 SOL amounts for the button labels.
+    The amounts are display-only here: a quick buy posts its slot
+    and the route resolves the SOL amount from the same table, so
+    a stale label can never buy the wrong amount. Rows rendered
+    without a user keep the template defaults (held False, the
+    0.02 / 0.05 defaults), so the partial never breaks on a
+    missing key."""
+    amounts = quick_buy_mod.get_quick_buy_amounts(db, user_id)
+    held = quick_buy_mod.held_mints_for_user(db, user_id, mode)
+    for row in rows:
+        row["held"] = row.get("mint") in held
+        row["quick_buy1_sol"] = amounts["buy1_sol"]
+        row["quick_buy2_sol"] = amounts["buy2_sol"]
+    return rows
 
 
 def _unlisted_coin_row(coin_id_resolved: str, price, prices: dict,
@@ -3025,6 +3047,13 @@ def register_routes(app: Flask) -> None:
         signing_bot = signing_bot_mod.get_signing_bot(db, user["id"])
         trenches_rows, trenches_error = (
             _trenches_list(app) if include_trenches else ([], None))
+        # Trenches quick buy (batch 6): the dashboard's trenches
+        # rows get the same badge buttons as the Trenches page —
+        # held flags + the user's Buy 1 / Buy 2 amounts.
+        if trenches_rows:
+            _annotate_trenches_rows(db, user["id"], mode, trenches_rows)
+        quick_amounts = quick_buy_mod.get_quick_buy_amounts(
+            db, user["id"])
         # Coin popup sell form: the popup holding's SOL value +
         # prefill (same rule as the coin detail page).
         popup_held_sol, popup_sell_prefill = (
@@ -3110,6 +3139,8 @@ def register_routes(app: Flask) -> None:
                 "held_sol_value": popup_held_sol,
                 "sell_prefill_sol": popup_sell_prefill,
                 "trenches_rows": trenches_rows,
+                "quick_buy1_sol": quick_amounts["buy1_sol"],
+                "quick_buy2_sol": quick_amounts["buy2_sol"],
                 "trenches_error": trenches_error}
 
     @app.route("/dashboard")
@@ -3726,8 +3757,15 @@ def register_routes(app: Flask) -> None:
         page render drops it, but the live refresh must not yank
         rows off the page during a stall. Returns {ok: True,
         rows: [{mint, html, price_usd, price_display, change_1h,
-        sparkline_svg}], error}."""
+        sparkline_svg, held}], error} — `held` is whether the user
+        holds the coin in the active mode right now, so the poll
+        can swap a row's buttons in when a holding appears or
+        disappears without a reload."""
+        user = _current_user(app)
+        db = _db(app)
+        mode = _active_mode(db, user["id"])
         rows, error = _trenches_list(app, drop_unpriced=False)
+        _annotate_trenches_rows(db, user["id"], mode, rows)
         out = []
         for row in rows:
             html = render_template("_trenches_row.html", t=row)
@@ -3738,9 +3776,44 @@ def register_routes(app: Flask) -> None:
                 "price_display": row.get("price_display"),
                 "change_1h": row.get("change_1h_pct"),
                 "sparkline_svg": row.get("sparkline_svg"),
+                "held": bool(row.get("held")),
             })
         return jsonify({"ok": True, "rows": out, "error": error,
                         "as_of": _now()})
+
+    @app.route("/api/quick-buy-amounts", methods=["POST"])
+    @login_required
+    def quick_buy_amounts_save():
+        """Save the user's Trenches quick-buy amounts (Buy 1 /
+        Buy 2, SOL) — the setting behind the one-tap badge buttons
+        (buy-flow batch 6). The buy popup posts here; a bad value
+        refuses plainly and the old amounts stay. The amounts are
+        stored server-side, never trusted from the browser at buy
+        time: a quick buy posts only its slot and the route
+        resolves the SOL amount from this table."""
+        _csrf_check()
+        user = _current_user(app)
+        db = _db(app)
+        buy1_raw = request.form.get("buy1_sol")
+        buy2_raw = request.form.get("buy2_sol")
+        if buy1_raw is None and buy2_raw is None:
+            # Read: the popup's save handler posts both fields; a
+            # post with neither is just asking for the current
+            # amounts (the settings form's initial state).
+            amounts = quick_buy_mod.get_quick_buy_amounts(
+                db, user["id"])
+            return jsonify({"ok": True,
+                            "buy1_sol": amounts["buy1_sol"],
+                            "buy2_sol": amounts["buy2_sol"]})
+        amounts, error = quick_buy_mod.set_quick_buy_amounts(
+            db, user["id"], buy1_raw, buy2_raw)
+        if error:
+            return jsonify({"ok": False, "error": error,
+                            "buy1_sol": amounts["buy1_sol"],
+                            "buy2_sol": amounts["buy2_sol"]}), 400
+        return jsonify({"ok": True,
+                        "buy1_sol": amounts["buy1_sol"],
+                        "buy2_sol": amounts["buy2_sol"]})
 
     @app.route("/api/home-holdings")
     @login_required
@@ -3910,7 +3983,19 @@ def register_routes(app: Flask) -> None:
         """The confirmation page after a popup action: what happened,
         the amounts, and the new balance/position — then back to the
         coins screen. Extra template context (for example the
-        no-fuel popup context) passes straight through."""
+        no-fuel popup context) passes straight through. A caller
+        that posts format=json (the Trenches one-tap quick buy /
+        Sell All Now, which fetch instead of navigating) gets the
+        same result as JSON — heading, lines and any structured
+        `receipt` extra — so the page can show the receipt popup
+        in place instead of leaving the list."""
+        if request.form.get("format") == "json":
+            payload = {"ok": ok, "heading": heading, "lines": lines,
+                       "coin_id": coin_id, "mode_label": mode_label}
+            receipt = extra.pop("receipt", None)
+            if receipt is not None:
+                payload["receipt"] = receipt
+            return jsonify(payload)
         return render_template(
             "coin_result.html", heading=heading, lines=lines, ok=ok,
             coin_id=coin_id, mode_label=mode_label, **extra)
@@ -3953,13 +4038,49 @@ def register_routes(app: Flask) -> None:
         coin_id_resolved, price, _source = _resolve_coin_price(coin_id)
         if coin_id_resolved is None:
             abort(404)
+        # Trenches quick buy (buy-flow batch 6, James 2026-11-27
+        # ~07:40: one tap buys right away, no popup, no
+        # confirmation): the badge posts only its slot — the SOL
+        # amount comes from the user's saved Buy 1 / Buy 2 setting,
+        # never from the browser. A posted amount is ignored on
+        # this path, so a stale badge label or a tampered form can
+        # never buy the wrong amount.
+        quick_buy = request.form.get("quick_buy") == "1"
+        quick_amount_sol = None
+        if quick_buy:
+            amounts = quick_buy_mod.get_quick_buy_amounts(
+                db, user["id"])
+            quick_slot = (request.form.get("quick_slot") or "").strip()
+            if quick_slot == "1":
+                quick_amount_sol = amounts["buy1_sol"]
+            elif quick_slot == "2":
+                quick_amount_sol = amounts["buy2_sol"]
+            else:
+                return _coin_result(
+                    "Nothing was bought",
+                    ["Quick buy needs a Buy 1 or Buy 2 button."],
+                    False, coin_id_resolved, label)
         if mode == "paper":
             # Buys are in SOL on the detail page and the coin popup:
             # convert at the current SOL price. The old $ form is
             # still accepted (it is what the tests post). A SOL price
             # the feed does not have refuses plainly — never guessed.
             amount_sol_raw = (request.form.get("amount_sol") or "").strip()
-            if amount_sol_raw:
+            if quick_amount_sol is not None:
+                # One-tap quick buy: the slot's SOL amount, priced
+                # at the live SOL price like any SOL buy. A paper
+                # quick buy pays no priority fee — paper never
+                # reaches the chain — so the fee cap does not apply
+                # here.
+                amount_sol = quick_amount_sol
+                sol_price = _sol_price_usd()
+                if sol_price is None:
+                    return _coin_result(
+                        "Nothing was bought",
+                        ["SOL price unavailable right now."],
+                        False, coin_id_resolved, label)
+                usd = amount_sol * sol_price
+            elif amount_sol_raw:
                 try:
                     amount_sol = float(amount_sol_raw)
                 except ValueError:
@@ -4054,9 +4175,32 @@ def register_routes(app: Flask) -> None:
             lines.extend(_store_user_exit_for_buy(
                 db, user["id"], coin_id_resolved, "paper", entry_price,
                 sl_pct, tp_pct))
+            # Receipt (batch 6): the structured facts behind the
+            # lines above, for the receipt popup when the buy came
+            # from a one-tap badge button. Paper never reaches the
+            # chain, so there is no signature — the popup says so
+            # plainly instead of showing a fake one.
+            receipt = None
+            if result["ok"]:
+                receipt_sol_price = _sol_price_usd()
+                receipt = {
+                    "side": "buy", "mode": "paper",
+                    "coin_id": coin_id_resolved,
+                    "amount_sol": (
+                        quick_amount_sol
+                        if quick_amount_sol is not None
+                        else (usd / receipt_sol_price
+                              if receipt_sol_price else None)),
+                    "amount_usd": usd,
+                    "coin_amount": result.get("amount"),
+                    "price_usd": price,
+                    "signature": None,
+                    "new_paper_cash": result.get("cash"),
+                }
             return _coin_result(
                 "Bought" if result["ok"] else "Nothing was bought",
-                lines, result["ok"], coin_id_resolved, label)
+                lines, result["ok"], coin_id_resolved, label,
+                receipt=receipt)
         # Real mode: the EXISTING pump.fun executor, with the same
         # guards as the silent loop. Anything it refuses is shown
         # plainly with no fill — never faked. Amounts arrive as SOL
@@ -4072,6 +4216,16 @@ def register_routes(app: Flask) -> None:
         (amount_sol, amount_usd,
          amount_error) = _parse_buy_amount(
              app, request.form, price, sol_price)
+        if quick_amount_sol is not None:
+            # One-tap quick buy: the slot's SOL amount overrides
+            # anything the form posted (the badge posts no amount
+            # at all). The USD size comes from the live SOL price
+            # — or stays unknown, failing safe to the large tier,
+            # when the SOL price is missing, exactly like a SOL buy.
+            amount_sol = quick_amount_sol
+            amount_usd = (amount_sol * sol_price
+                          if sol_price is not None else None)
+            amount_error = None
         if amount_error:
             return _coin_result(
                 "Nothing was bought", [amount_error], False,
@@ -4165,15 +4319,27 @@ def register_routes(app: Flask) -> None:
         # can always sell back to SOL. A buy whose USD size is
         # unknown fails safe to the large tier. The executor
         # enforces it for User buys (bot None); a bot buy keeps
-        # its own fee reserve and ignores this value.
-        reserve_sol = _cfg(app).user_buy_gas_reserve_sol(amount_usd)
+        # its own fee reserve and ignores this value. A quick buy
+        # (batch 6) holds back the tier PLUS the 0.001 SOL
+        # priority-fee cap — the fee comes on top of the buy, so
+        # the wallet keeps the tier reserve intact after the fee
+        # is paid — and passes the same cap to the executor so the
+        # fee instruction can never exceed it.
+        cfg = _cfg(app)
+        if quick_buy:
+            reserve_sol = cfg.quick_buy_reserve_sol(amount_usd)
+            fee_max_sol = cfg.quick_trade_priority_fee_max_sol
+        else:
+            reserve_sol = cfg.user_buy_gas_reserve_sol(amount_usd)
+            fee_max_sol = None
         if complete:
             result = execute_jupiter_swap(
                 bot, user["id"], coin_id_resolved, "buy", amount_sol,
                 db, _cfg(app), decision_price_usd=price or 0.0,
                 decision_price_age_seconds=decision_age,
                 sol_price_usd=sol_price_usd,
-                user_buy_reserve_sol=reserve_sol)
+                user_buy_reserve_sol=reserve_sol,
+                max_fee_sol=fee_max_sol)
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
@@ -4181,7 +4347,8 @@ def register_routes(app: Flask) -> None:
                 price or 0.0, db, _cfg(app),
                 decision_price_age_seconds=decision_age,
                 sol_price_usd=sol_price_usd,
-                user_buy_reserve_sol=reserve_sol)
+                user_buy_reserve_sol=reserve_sol,
+                priority_fee_max_sol=fee_max_sol)
             venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
             failure_lines = _trade_failure_lines(result, "buy")
@@ -4252,7 +4419,32 @@ def register_routes(app: Flask) -> None:
         lines.extend(_exit_lines)
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
-        return _coin_result("Bought", lines, True, coin_id_resolved, label)
+        # Receipt (batch 6): the structured facts behind the lines
+        # above, for the receipt popup after a one-tap badge buy.
+        # `sol_spent` is the exact SOL the chain took (balance
+        # delta: amount + network fee); the priority-fee price the
+        # trade actually used is reported when the pump.fun path
+        # added one, and the Jupiter path reports the fee budget
+        # it was held to. The popup states the cap rather than
+        # guessing an exact priority fee it cannot know.
+        receipt = {
+            "side": "buy", "mode": "real",
+            "coin_id": coin_id_resolved,
+            "amount_sol": amount_sol,
+            "coin_amount": coin_amount,
+            "price_usd": price,
+            "signature": result.get("signature", ""),
+            "signing_bot": result.get("signing_bot", ""),
+            "venue": venue_label,
+            "sol_spent": sol_spent,
+            "priority_fee_micro_lamports": result.get(
+                "priority_fee_micro_lamports"),
+            "fee_budget_sol": result.get("fee_budget_sol"),
+            "priority_fee_max_sol": fee_max_sol,
+            "new_balance_sol": new_sol,
+        }
+        return _coin_result("Bought", lines, True, coin_id_resolved,
+                            label, receipt=receipt)
 
     @app.route("/coins/<coin_id>/sell", methods=["POST"])
     @login_required
@@ -4489,12 +4681,20 @@ def register_routes(app: Flask) -> None:
         if complete:
             result = execute_jupiter_swap(
                 None, user["id"], coin_id_resolved, "sell", amount,
-                db, _cfg(app))
+                db, _cfg(app),
+                max_fee_sol=(
+                    _cfg(app).quick_trade_priority_fee_max_sol
+                    if request.form.get("quick_sell") == "1"
+                    else None))
             venue_label = "via Jupiter (mainnet)"
         else:
             result = execute_real_trade(
                 None, user["id"], coin_id_resolved, "sell", amount,
-                price or 0.0, db, _cfg(app))
+                price or 0.0, db, _cfg(app),
+                priority_fee_max_sol=(
+                    _cfg(app).quick_trade_priority_fee_max_sol
+                    if request.form.get("quick_sell") == "1"
+                    else None))
             venue_label = f"on pump.fun ({_cfg(app).network})"
         if result.get("status") != "executed":
             failure_lines = _trade_failure_lines(result, "sell")
@@ -4535,7 +4735,29 @@ def register_routes(app: Flask) -> None:
                  f"Signing bot: {result.get('signing_bot', '')}."]
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
-        return _coin_result("Sold", lines, True, coin_id_resolved, label)
+        # Receipt (batch 6): the structured facts for the one-tap
+        # Sell All Now confirmation. No receipt popup was ordered
+        # for sells — the JSON answer carries the same facts so the
+        # page can confirm inline and refresh the badge.
+        receipt = {
+            "side": "sell", "mode": "real",
+            "coin_id": coin_id_resolved,
+            "coin_amount": amount,
+            "price_usd": price,
+            "signature": result.get("signature", ""),
+            "signing_bot": result.get("signing_bot", ""),
+            "venue": venue_label,
+            "sol_received": result.get("sol_received"),
+            "priority_fee_micro_lamports": result.get(
+                "priority_fee_micro_lamports"),
+            "fee_budget_sol": result.get("fee_budget_sol"),
+            "priority_fee_max_sol": (
+                _cfg(app).quick_trade_priority_fee_max_sol
+                if request.form.get("quick_sell") == "1" else None),
+            "new_balance_sol": new_sol,
+        }
+        return _coin_result("Sold", lines, True, coin_id_resolved,
+                            label, receipt=receipt)
     # ------------------------------------------------------------------
     # Logs: the user's activity/trade log (latest 100, newest first,
     # active mode only) plus the losing-buy analysis (paper mode
@@ -4812,6 +5034,7 @@ def register_routes(app: Flask) -> None:
         db = _db(app)
         mode = _active_mode(db, user["id"])
         trenches_rows, trenches_error = _trenches_list(app)
+        _annotate_trenches_rows(db, user["id"], mode, trenches_rows)
         return render_template(
             "trenches.html", trenches_rows=trenches_rows,
             trenches_error=trenches_error, mode=mode,

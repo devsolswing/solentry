@@ -527,6 +527,23 @@ def priority_fee_from_samples(fees: list, cap_micro_lamports: int) -> int:
     return max(0, min(median, cap))
 
 
+def priority_fee_price_cap_for_max_sol(max_sol: float) -> int:
+    """The micro-lamports-per-compute-unit price cap that keeps one
+    trade's priority fee under `max_sol` SOL: the fee is price x
+    units, and a transaction with no limit instruction runs on the
+    200,000-unit default budget, so price = max_sol in
+    micro-lamports / 200,000. 0.001 SOL -> 5,000 micro-lamports
+    per CU. 0 or an unparseable cap means no fee at all (fail
+    closed, never an uncapped price)."""
+    try:
+        budget_micro = float(max_sol) * 1_000_000_000 * 1000
+    except (TypeError, ValueError):
+        return 0
+    if budget_micro <= 0:
+        return 0
+    return int(budget_micro // DEFAULT_COMPUTE_UNIT_LIMIT)
+
+
 def sign_message(seed: bytes, message: bytes) -> tuple[str, str]:
     """Sign a message. Returns (signed_tx_base64, signature_base58)."""
     signature = ed25519_sign(seed, message)

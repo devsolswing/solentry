@@ -97,6 +97,7 @@ from .solana import (ATA_RENT_FALLBACK_LAMPORTS,
                      ed25519_publickey_from_seed, is_valid_address,
                      held_token_balance, lamports_to_sol,
                      priority_fee_from_samples,
+                     priority_fee_price_cap_for_max_sol,
                      rpc_client_for_config, sign_message,
                      sol_to_lamports)
 
@@ -207,12 +208,18 @@ def fix_for_skip_reason(reason) -> str:
             "reason above to support with the transaction ID.")
 
 
-def _priority_fee_instruction(rpc, cfg: Config, accounts: list):
+def _priority_fee_instruction(rpc, cfg: Config, accounts: list,
+                              max_micro_lamports: int | None = None):
     """A Compute Budget priority-fee instruction for a trade, or
     None when no fee should be added: the RPC has no fee method
     (old fakes), the fee read fails, or every recent sample is
     zero. The price is the median non-zero sample, capped at the
-    configured cap — never a guessed price, never above the cap."""
+    configured cap — never a guessed price, never above the cap.
+    `max_micro_lamports` is a second, tighter cap for one trade
+    (the Trenches quick buy: 0.001 SOL max per trade, James
+    2026-11-27 ~08:45) — the price is the lower of the two caps,
+    so a spiking fee market can never push that trade past its
+    per-trade SOL budget."""
     getter = getattr(rpc, "get_recent_prioritization_fees", None)
     if getter is None:
         return None
@@ -220,8 +227,10 @@ def _priority_fee_instruction(rpc, cfg: Config, accounts: list):
         fees = getter(accounts)
     except Exception:
         return None
-    price = priority_fee_from_samples(
-        fees, cfg.priority_fee_cap_micro_lamports)
+    cap = cfg.priority_fee_cap_micro_lamports
+    if max_micro_lamports is not None:
+        cap = min(cap, int(max_micro_lamports))
+    price = priority_fee_from_samples(fees, cap)
     if price <= 0:
         return None
     return build_compute_budget_price_instruction(price)
@@ -548,11 +557,20 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
                  decision_price_usd=None,
                  decision_price_age_seconds=None,
                  sol_price_usd=None,
-                 user_buy_reserve_sol=None) -> dict:
+                 user_buy_reserve_sol=None,
+                 priority_fee_max_sol=None) -> dict:
     """One real pump.fun BUY. `bot` is the managing bot, or None
     for a User buy (no bot watching): the buy-size cap is skipped
     — the % -of-wallet buttons are the cap — and the reserve is
-    the buy-size tier passed in `user_buy_reserve_sol` (SOL)."""
+    the buy-size tier passed in `user_buy_reserve_sol` (SOL).
+    `priority_fee_max_sol` is a per-trade priority-fee budget in
+    SOL (Trenches quick buy, 0.001 max): the fee instruction's
+    unit price is capped so price x 200,000 units never exceeds
+    it, and the caller must already have folded the budget into
+    `user_buy_reserve_sol` so the reserve still holds after the
+    fee. The executed result reports the fee price actually used
+    (`priority_fee_micro_lamports`) so the receipt can state it —
+    the exact fee paid is inside `sol_spent` (balance delta)."""
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
@@ -671,11 +689,20 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
         instructions.append(pumpfun.build_buy_instruction(
             accts, tokens, max_sol_cost))
         # Priority fee (capped): a Compute Budget instruction up
-        # front so the trade lands faster on a busy network.
+        # front so the trade lands faster on a busy network. A
+        # quick buy passes its per-trade SOL budget here — the
+        # price cap is the lower of the configured cap and the
+        # budget converted to a unit price.
+        fee_price_cap = (
+            priority_fee_price_cap_for_max_sol(priority_fee_max_sol)
+            if priority_fee_max_sol is not None else None)
         fee_ix = _priority_fee_instruction(
-            rpc, cfg, [mint, accts["bonding_curve"], wallet_pubkey])
+            rpc, cfg, [mint, accts["bonding_curve"], wallet_pubkey],
+            fee_price_cap)
+        fee_price = None
         if fee_ix is not None:
             instructions.insert(0, fee_ix)
+            fee_price = int.from_bytes(fee_ix["data"][1:9], "little")
         _check_instructions_only_allowed(instructions)
         try:
             blockhash = rpc.get_latest_blockhash()
@@ -714,6 +741,8 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
         result = {"status": "executed", "signature": confirmed,
                   "coin_amount": coin_amount,
                   "signing_bot": signing_bot["support_id"]}
+        if fee_price is not None:
+            result["priority_fee_micro_lamports"] = fee_price
         try:
             balance_after = rpc.get_balance_lamports(wallet_pubkey)
             result["sol_spent"] = lamports_to_sol(
@@ -731,7 +760,8 @@ def _execute_buy(bot, user_id: int, mint: str, amount_sol: float,
 
 
 def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
-                  db, cfg: Config, rpc, signing_bot: dict) -> dict:
+                  db, cfg: Config, rpc, signing_bot: dict,
+                  priority_fee_max_sol=None) -> dict:
     wallet_pubkey, seed = _load_wallet(db, user_id, cfg)
     if wallet_pubkey is None:
         return _skip("no app wallet")
@@ -805,10 +835,19 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
             sol_before = None
         instructions = [pumpfun.build_sell_instruction(
             accts, token_base, min_sol_output)]
+        # Priority fee (capped): same per-trade SOL budget as the
+        # buy path — a quick Sell All Now never pays more than
+        # 0.001 SOL in priority fees either.
+        fee_price_cap = (
+            priority_fee_price_cap_for_max_sol(priority_fee_max_sol)
+            if priority_fee_max_sol is not None else None)
         fee_ix = _priority_fee_instruction(
-            rpc, cfg, [mint, accts["bonding_curve"], wallet_pubkey])
+            rpc, cfg, [mint, accts["bonding_curve"], wallet_pubkey],
+            fee_price_cap)
+        fee_price = None
         if fee_ix is not None:
             instructions.insert(0, fee_ix)
+            fee_price = int.from_bytes(fee_ix["data"][1:9], "little")
         _check_instructions_only_allowed(instructions)
         try:
             blockhash = rpc.get_latest_blockhash()
@@ -835,6 +874,8 @@ def _execute_sell(bot, user_id: int, mint: str, token_amount: float,
         # USD P&L instead of guessing one.
         result = {"status": "executed", "signature": confirmed,
                   "signing_bot": signing_bot["support_id"]}
+        if fee_price is not None:
+            result["priority_fee_micro_lamports"] = fee_price
         if sol_before is not None:
             try:
                 sol_after = rpc.get_balance_lamports(wallet_pubkey)
@@ -878,7 +919,8 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
                        rpc_client=None,
                        decision_price_age_seconds=None,
                        sol_price_usd=None,
-                       user_buy_reserve_sol=None) -> dict:
+                       user_buy_reserve_sol=None,
+                       priority_fee_max_sol=None) -> dict:
     """Execute one real trade for a silent bot, signed by the user's
     dedicated signing bot. Same (bot, user_id, coin, side, amount,
     price, db, cfg) protocol as the silent loop's real executor.
@@ -900,7 +942,10 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
     skipped and recorded, never treated as fresh).
     `sol_price_usd` is the one SOL price (the live feed's SOL tick;
     None fetches it live). There is no second SOL source any more
-    (single-price source, 2026-11-25). Returns
+    (single-price source, 2026-11-25). `priority_fee_max_sol` is a
+    per-trade priority-fee budget in SOL (Trenches quick buy/sell,
+    0.001 max) — the fee instruction's unit price is capped against
+    it and the executed result reports the price used. Returns
     {"status": "executed", "signature", "coin_amount",
     "signing_bot", plus "sol_spent" on buys / "sol_received" on
     sells — the executed SOL from the wallet's own balance delta,
@@ -946,11 +991,13 @@ def execute_real_trade(bot, user_id: int, coin: str, side: str,
                                 price,
                                 decision_price_age_seconds,
                                 sol_price_usd,
-                                user_buy_reserve_sol)
+                                user_buy_reserve_sol,
+                                priority_fee_max_sol)
         last = None
         for _attempt in range(max(1, int(cfg.sell_requote_attempts))):
             last = _execute_sell(bot, user_id, coin, float(amount),
-                                 db, cfg, rpc, signing_bot)
+                                 db, cfg, rpc, signing_bot,
+                                 priority_fee_max_sol)
             if last.get("status") == "executed":
                 return last
             if last.get("reason") != "transaction not confirmed":

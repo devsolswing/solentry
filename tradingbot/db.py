@@ -174,6 +174,18 @@ CREATE TABLE IF NOT EXISTS user_exits (
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
+-- Trenches quick-buy amounts (buy-flow batch 6, James 2026-11-27):
+-- the user's own Buy 1 / Buy 2 SOL amounts for the one-tap buttons
+-- on each Trenches badge. Both settable in the buy popup; the
+-- defaults are 0.02 / 0.05 SOL. No row means the defaults.
+CREATE TABLE IF NOT EXISTS quick_buy_amounts (
+    user_id INTEGER PRIMARY KEY,
+    buy1_sol REAL NOT NULL,
+    buy2_sol REAL NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
 -- Coin identity + logos, one row per mint (pump.fun-only app): the
 -- coin's real official name + ticker and its official logo URL,
 -- fetched once (on purchase, or lazily on render of a held row) from

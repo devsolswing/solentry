@@ -267,6 +267,23 @@
           var el = trenchesList.querySelector(
             '[data-trenches-mint="' + r.mint + '"]');
           if (el) {
+            var heldNow = el.getAttribute('data-held');
+            var heldNext = r.held ? '1' : '0';
+            if (heldNow !== null && heldNow !== heldNext
+                && typeof r.html === 'string' && r.html) {
+              /* Holding appeared or disappeared: the buttons must
+                 change with it (Sell All Now in or out) — the
+                 in-place price update cannot do that, so swap the
+                 whole row for the server's fresh markup. */
+              var tmp = document.createElement('div');
+              tmp.innerHTML = r.html;
+              var fresh = tmp.firstElementChild;
+              if (fresh) {
+                el.replaceWith(fresh);
+                changed = true;
+              }
+              return;
+            }
             var priceEl = el.querySelector('[data-live-price]');
             if (priceEl && typeof r.price_display === 'string') {
               priceEl.textContent = r.price_display;
@@ -318,6 +335,11 @@
     var staleMeta = document.querySelector('meta[http-equiv="refresh"]');
     if (staleMeta) staleMeta.remove();
     startTrenchesPoll();
+    /* One-tap quick buy (batch 6): after a badge trade lands, the
+       list re-fetches at once so Sell All Now appears (after a
+       buy) or disappears (after a sell) without waiting for the
+       next 5s tick. */
+    document.addEventListener('trenches:refresh', fetchTrenches);
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) stopTrenchesPoll();
       else startTrenchesPoll();

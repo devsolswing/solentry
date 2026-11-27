@@ -6,6 +6,20 @@
    buys/sells are native SOL. CSS-only radio switch — no JavaScript,
    so it works in any in-app browser. #}
 <div class="trade-ticket">
+  {# Trenches quick-buy amounts (buy-flow batch 6, James 2026-11-27
+     ~07:36-07:37): the two settable amount boxes, named Buy 1 and
+     Buy 2 — one tap on a Trenches badge buys that much SOL worth
+     of the coin. Saved server-side per user (never localStorage),
+     so they follow the user across devices. Each must be 0.001–10
+     SOL; a bad value refuses and the old amounts stay. #}
+  <form class="quick-amounts" data-quick-amounts-form method="post" action="{{ url_for('quick_buy_amounts_save') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted small"><strong>Trenches quick buy</strong> — one tap on a badge buys this much SOL worth of the coin. Priority fee capped at 0.001 SOL per quick trade.</p>
+    <label>Buy 1 (SOL) <input type="number" name="buy1_sol" step="0.001" min="0.001" max="10" value="{{ quick_buy1_sol|default(0.02) }}" required></label>
+    <label>Buy 2 (SOL) <input type="number" name="buy2_sol" step="0.001" min="0.001" max="10" value="{{ quick_buy2_sol|default(0.05) }}" required></label>
+    <button class="btn small" type="submit">Save quick-buy amounts</button>
+    <span class="muted small" data-quick-amounts-saved></span>
+  </form>
   <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-buy" checked>
   <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-sell">
   <input class="ticket-radio" type="radio" name="ticket-side" id="ticket-sellall">
@@ -183,6 +197,50 @@
         input.value = amount;
         input.dispatchEvent(new Event('input', { bubbles: true }));
       });
+    });
+  })();
+
+  /* Trenches quick-buy amounts (buy-flow batch 6): save Buy 1 /
+     Buy 2 without leaving the popup — a bad value refuses and the
+     old amounts stay. On save, the badge button labels on this
+     page update to the new amounts (the server resolves the buy
+     from the saved setting either way). */
+  (function () {
+    var ticket = document.querySelector('.trade-ticket');
+    if (!ticket) return;
+    var form = ticket.querySelector('[data-quick-amounts-form]');
+    if (!form) return;
+    var saved = form.querySelector('[data-quick-amounts-saved]');
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var btn = form.querySelector('button[type="submit"]');
+      if (btn) btn.disabled = true;
+      if (saved) saved.textContent = '';
+      fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        credentials: 'same-origin'
+      })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+          if (btn) btn.disabled = false;
+          if (!data || !data.ok) {
+            if (saved) saved.textContent = (data && data.error)
+              ? data.error : 'Could not save.';
+            return;
+          }
+          if (saved) saved.textContent = 'Saved ✓';
+          document.querySelectorAll('[data-quick-slot="1"] [data-quick-amount]').forEach(function (el) {
+            el.textContent = data.buy1_sol;
+          });
+          document.querySelectorAll('[data-quick-slot="2"] [data-quick-amount]').forEach(function (el) {
+            el.textContent = data.buy2_sol;
+          });
+        })
+        .catch(function () {
+          if (btn) btn.disabled = false;
+          if (saved) saved.textContent = 'Could not save — try again.';
+        });
     });
   })();
   </script>
