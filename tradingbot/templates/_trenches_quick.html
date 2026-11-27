@@ -10,7 +10,7 @@
      (amount, coins, price, signature + Solscan link, signing bot,
      venue, SOL spent, priority-fee price/cap, new balance);
    - a sold coin does NOT get a receipt popup (none was ordered) —
-     the button row is replaced by a short "Sold" line and the list
+     the button row is replaced by a short "Sell all" line and the list
      refreshes so Sell All Now disappears;
    - a refused trade opens the popup with the plain reason instead
      (heading + lines from the server, never a guessed error).
@@ -174,7 +174,7 @@
           var done = document.createElement('p');
           done.className = 'muted small';
           var r = payload.receipt || {};
-          done.textContent = 'Sold ✓'
+          done.textContent = 'Sell all'
             + (r.sol_received != null ? ' — ' + fmtSol(r.sol_received) + ' back' : '')
             + (r.signature ? ' — ' + String(r.signature).slice(0, 12) + '…' : '');
           quick.replaceChildren(done);

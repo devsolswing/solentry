@@ -440,6 +440,16 @@ class TestTrenchesBadgeRender(_Batch6RouteBase):
         self.assertIn("Sell All Now", html)
         self.assertIn('data-quick-sell-all', html)
 
+    def test_quick_sell_inline_line_reads_sell_all(self):
+        # James 2026-11-27: "Show sell not sold for selling
+        # position" — the inline line after Sell All Now reads
+        # "Sell all", never "Sold ✓". (The receipt popup's "Sold"
+        # row label and the result page's "Sold" heading are
+        # untouched — this is only the inline line.)
+        html = self._html("/trenches")
+        self.assertIn("'Sell all'", html)
+        self.assertNotIn("Sold ✓", html)
+
     def test_dashboard_trenches_rows_have_the_same_buttons(self):
         html = self._html("/dashboard")
         self.assertIn("Buy 1 ·", html)
