@@ -79,6 +79,12 @@ def create_app(config: Config | None = None) -> Flask:
     # that render a unit price with "%.4f" use this filter instead.
     from .home_holdings import fmt_price_sig
     app.jinja_env.filters["sig_price"] = fmt_price_sig
+    # Bot names carry an invisible mode suffix in storage
+    # ("Middydemobot" / "Middyrealsol") that must never render —
+    # templates show the plain name through this filter.
+    from .bot_names import display_bot_name
+
+    app.jinja_env.filters["display_bot_name"] = display_bot_name
     # One shared connection per app instance (sqlite, single-process
     # dev/Railway hobby deploy; check_same_thread off for the Flask
     # dev server's threaded mode).

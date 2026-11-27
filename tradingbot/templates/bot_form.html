@@ -6,7 +6,7 @@
   <p class="muted small">Bots are built by builderBot — it asks simple questions one at a time and turns your answers into the bot's rules. To build a new bot, press Create Bot on the Bots page. This page only changes the limits below; the trading rules themselves are set through builderBot or the assistant, which always shows them back and asks you to confirm.</p>
   <form method="post" action="{{ url_for('bot_edit', bot_id=bot.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>Name<input name="name" value="{{ bot.name }}" placeholder="My Bot"></label>
+    <label>Name<input name="name" value="{{ bot.name | display_bot_name }}" placeholder="My Bot"></label>
     <label>Buy size (% of bankroll per trade)<input type="number" name="buy_size_pct" step="any" min="1" max="100" value="{{ bot.buy_size_pct }}"></label>
     <label>Stop loss (%)<input type="number" name="stop_loss_pct" step="any" min="1" max="50" value="{{ bot.stop_loss_pct }}"></label>
     <label>Max open trades (1–5)<input type="number" name="max_open_trades" step="1" min="1" max="5" value="{{ bot.max_open_trades }}"></label>

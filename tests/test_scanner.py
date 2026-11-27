@@ -1276,7 +1276,7 @@ class TestScannerRoutes(unittest.TestCase):
         bots = self._bots()
         self.assertEqual(len(bots), 1)
         bot = bots[0]
-        self.assertEqual(bot["name"], "Scanner")
+        self.assertEqual(bot["name"], "Scannerdemobot")
         self.assertEqual(bot["mode"], "paper")
         self.assertEqual(bot["silent"], 0)
         rules, err = load_rules(bot)

@@ -690,7 +690,13 @@ class TestRulesRoutes(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.get_json()
 
-    def _bot(self, name="Trenches", mode=None):
+    def _bot(self, name=None, mode=None):
+        # Stored preset names carry the invisible mode suffix
+        # (Trenchesdemobot / Trenchesrealsol); the default follows
+        # the mode being looked up.
+        if name is None:
+            name = ("Trenchesrealsol" if mode == "real"
+                    else "Trenchesdemobot")
         if mode is None:
             return self.db.execute(
                 "SELECT * FROM bots WHERE user_id = ? AND name = ?",
@@ -778,9 +784,11 @@ class TestRulesRoutes(unittest.TestCase):
         self.assertIn(f"/bots/{bot['id']}", resp.headers["Location"])
 
     def test_trenches_preset_blocked_by_existing_trenches_bot(self):
-        # An existing bot actually named 'Trenches' in the category
-        # DOES block a duplicate, with the 'already have' flash.
-        trenches_id = self._insert_named_bot("Trenches")
+        # An existing Trenches bot in the category DOES block a
+        # duplicate, with the 'already have' flash. The stored name
+        # carries the mode suffix (Trenchesdemobot) — that is the
+        # name the duplicate check matches.
+        trenches_id = self._insert_named_bot("Trenchesdemobot")
         token = csrf(self.client, "/bots")
         resp = self.client.post("/bots/preset/trenches",
                                 data={"csrf_token": token},
@@ -835,8 +843,8 @@ class TestRulesRoutes(unittest.TestCase):
         self.assertEqual(real_bot["silent"], 0)
         count = self.db.execute(
             "SELECT COUNT(*) c FROM bots WHERE user_id = ? "
-            "AND name = 'Trenches'",
-            (self.user_id,)).fetchone()["c"]
+            "AND category = ?",
+            (self.user_id, TRENCHES_CATEGORY)).fetchone()["c"]
         self.assertEqual(count, 2)
         # Lands on the NEW (real) bot, not on the paper one.
         self.assertIn(f"/bots/{real_bot['id']}", resp.headers["Location"])
@@ -860,7 +868,7 @@ class TestRulesRoutes(unittest.TestCase):
         self.assertIn(f"/bots/{first['id']}", resp.headers["Location"])
         count = self.db.execute(
             "SELECT COUNT(*) c FROM bots WHERE user_id = ? "
-            "AND name = 'Trenches' AND mode = 'real'",
+            "AND name = 'Trenchesrealsol' AND mode = 'real'",
             (self.user_id,)).fetchone()["c"]
         self.assertEqual(count, 1)
         followed = self.client.post("/bots/preset/trenches",

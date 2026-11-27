@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Delete bot {{ bot.name }} — Trading Bot{% endblock %}
+{% block title %}Delete bot {{ bot.name | display_bot_name }} — Trading Bot{% endblock %}
 {% block content %}
 <div class="card narrow">
-  <h1>Delete bot '{{ bot.name }}'?</h1>
+  <h1>Delete bot '{{ bot.name | display_bot_name }}'?</h1>
   <p>This permanently deletes the bot — its rules, its API token, its pending suggestions and its scanner tracking are all wiped. Any open positions it looks after stay in your paper holdings — the bot just stops managing them.</p>
   <p class="muted small">Mode: {{ bot.mode }} · Strategy: {{ bot.strategy }} · Silent: {{ "ON" if bot.silent else "OFF" }}</p>
   <form method="post" action="{{ url_for('bot_delete', bot_id=bot.id) }}">

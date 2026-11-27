@@ -50,7 +50,7 @@
          data-delete-url="{{ url_for('bot_delete_confirm', bot_id=b.id) }}">
         <span class="bot-ico" aria-hidden="true">{% if b.category == 'Memecoin build' %}🔥{% elif b.category == 'scanner' %}🎯{% else %}🤖{% endif %}</span>
         <span class="bot-info">
-          <span class="bot-name"><strong>{{ b.name }}</strong> <span class="bot-status {{ 'on' if b.silent else 'off' }}">{% if b.silent %}● Active{% else %}○ Off{% endif %}</span> {% if b.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</span>
+          <span class="bot-name"><strong>{{ b.name | display_bot_name }}</strong> <span class="bot-status {{ 'on' if b.silent else 'off' }}">{% if b.silent %}● Active{% else %}○ Off{% endif %}</span> {% if b.silent %}<span class="badge silent-on">Silent ON</span>{% else %}<span class="badge silent-off">Silent OFF</span>{% endif %}</span>
           <span class="bot-id">ID: {{ b.id }}</span>
           <span class="muted small">Created: {{ b.created_at[:16] }}</span>
           <span class="muted small">{{ b.strategy }} · Buy {{ b.buy_size_pct }}% · Stop {{ b.stop_loss_pct }}% · Max {{ b.max_open_trades }}</span>

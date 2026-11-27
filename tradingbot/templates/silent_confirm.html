@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Silent trading — {{ bot.name }}{% endblock %}
+{% block title %}Silent trading — {{ bot.name | display_bot_name }}{% endblock %}
 {% block content %}
 <div class="card narrow">
-  <h1>Silent trading for '{{ bot.name }}'</h1>
+  <h1>Silent trading for '{{ bot.name | display_bot_name }}'</h1>
   {% if want_silent %}
   <p>You are about to turn <strong>silent trading ON</strong> for this bot.</p>
   <p>What that means:</p>

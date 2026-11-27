@@ -1133,6 +1133,13 @@ def init_db(path: str) -> sqlite3.Connection:
     _backfill_pumpfun_wallets(conn)
     _backfill_signing_bots(conn)
     _backfill_builderbots(conn)
+    # Bot modes (2026-11-26): existing preset bots get their invisible
+    # mode suffix ("Middydemobot" / "Middyrealsol") so the two copies
+    # of a preset are told apart without recreating anything.
+    # Idempotent — already-suffixed and non-preset names are untouched.
+    from .bot_names import backfill_bot_mode_suffixes
+
+    backfill_bot_mode_suffixes(conn)
     _reset_paper_50_cad(conn)
     _reset_paper_100_cad(conn)
     _purge_generated_fee_wallets(conn)

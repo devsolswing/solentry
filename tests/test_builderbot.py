@@ -179,7 +179,7 @@ class TestConversation(BuilderBotBase):
         result = bb.answer(self.db, self.user_id, self.enc_key, "yes")
         self.assertIn("created", result)
         bot = self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone()
         self.assertIsNotNone(bot)
         self.assertEqual(bot["mode"], "paper")
         self.assertEqual(bot["platform"], "pump.fun")
@@ -207,7 +207,7 @@ class TestConversation(BuilderBotBase):
         result = bb.answer(self.db, self.user_id, self.enc_key, "yes")
         self.assertIn("created", result)
         bot = self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone()
         rules = json.loads(bot["rules_json"])
         self.assertEqual(rules["kind"], "scanner")
         self.assertEqual(rules["scan_interval_seconds"], 30)
@@ -233,7 +233,7 @@ class TestConversation(BuilderBotBase):
         result = bb.answer(self.db, self.user_id, self.enc_key, "no")
         self.assertTrue(result.get("cancelled"))
         self.assertIsNone(self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone())
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone())
         self.assertIsNone(self.db.execute(
             "SELECT 1 FROM builderbot_chats WHERE user_id = ?",
             (self.user_id,)).fetchone())
@@ -800,7 +800,7 @@ class TestBuilderBotHttp(unittest.TestCase):
         data = self._ask("yes")
         self.assertIn("created", data)
         bot = self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone()
         self.assertIsNotNone(bot)
         self.assertEqual(json.loads(bot["rules_json"])["kind"],
                          "trenches")
@@ -837,7 +837,7 @@ class TestBuilderBotHttp(unittest.TestCase):
         data = self._ask("yes")
         self.assertIn("created", data)
         bot = self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone()
         self.assertIsNotNone(bot)
         # The stop loss the user actually answered (7%), not a value
         # leaked from another question.
@@ -878,7 +878,7 @@ class TestBuilderBotHttp(unittest.TestCase):
             self._ask(answer)
         self._ask("yes")
         bot = self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone()
         html = self.client.get(
             f"/bots/{bot['id']}/edit").get_data(as_text=True)
         self.assertNotIn('name="category"', html)
@@ -904,7 +904,7 @@ class TestBuilderBotHttp(unittest.TestCase):
             self._ask(answer)
         self._ask("yes")
         bot = self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone()
         record_trade(self.db, 1, bot["id"], "SOL", "sell", 1.0, 110.0,
                      110.0, pnl_usd=10.0, mode="paper",
                      now="2026-01-01T00:00:00Z")
@@ -920,7 +920,7 @@ class TestBuilderBotHttp(unittest.TestCase):
             self._ask(answer)
         self._ask("yes")
         bot = self.db.execute(
-            "SELECT * FROM bots WHERE name = 'Luna'").fetchone()
+            "SELECT * FROM bots WHERE name = 'Lunademobot'").fetchone()
         record_trade(self.db, 1, bot["id"], "SOL", "sell", 1.0, 90.0,
                      90.0, pnl_usd=-10.0, mode="paper",
                      now="2026-01-01T00:00:00Z")

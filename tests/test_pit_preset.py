@@ -1030,7 +1030,7 @@ class TestPitSharedBrain(PitBase):
                               (bot_id,)).fetchone()
         fresh = maybe_adopt_pit_version(self.db, bot)
         self.assertEqual(fresh["preset_version"], "1.1")
-        self.assertEqual(fresh["name"], "Pit Sweeper v1.1")
+        self.assertEqual(fresh["name"], "Pit Sweeper v1.1demobot")
         self.assertEqual(
             float(json.loads(fresh["rules_json"])
                   ["buy_filter"]["max_market_cap_usd"]), 30000.0)
@@ -1189,7 +1189,7 @@ class TestPitPresetRoute(PitBase):
             "SELECT * FROM bots WHERE user_id = ? AND name LIKE ?",
             (self.user_id, "Pit Sweeper%")).fetchone()
         self.assertIsNotNone(row, "Pit bot was not created")
-        self.assertEqual(row["name"], "Pit Sweeper v1.0")
+        self.assertEqual(row["name"], "Pit Sweeper v1.0demobot")
         self.assertEqual(row["preset_version"], "1.0")
         self.assertAlmostEqual(float(row["bankroll_sol"]), 0.20)
         self.assertEqual(row["stop_loss_pct"], 4.9)

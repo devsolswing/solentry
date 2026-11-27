@@ -638,7 +638,7 @@ class TestGnatPresetRoute(GnatBase):
             data={"csrf_token": csrf(self.client, "/bots")})
         self.assertEqual(resp.status_code, 302)
         row = self.db.execute(
-            "SELECT * FROM bots WHERE user_id = ? AND name = 'Gnat'",
+            "SELECT * FROM bots WHERE user_id = ? AND name = 'Gnatdemobot'",
             (self.user_id,)).fetchone()
         self.assertIsNotNone(row, "Gnat bot was not created")
         # Gnat's hard numbers, on the bot and in its rules.
@@ -672,7 +672,7 @@ class TestGnatPresetRoute(GnatBase):
             data={"csrf_token": csrf(self.client, "/bots")})
         self.assertEqual(resp.status_code, 302)
         rows = self.db.execute(
-            "SELECT id FROM bots WHERE user_id = ? AND name = 'Gnat'",
+            "SELECT id FROM bots WHERE user_id = ? AND name = 'Gnatdemobot'",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1, "duplicate Gnat bot created")
 

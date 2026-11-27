@@ -45,6 +45,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from .bot_names import display_bot_name
 from .config import Config
 from .db import init_db
 from .coin_meta import (ensure_coin_meta, get_coin_meta, metadata_pda,
@@ -145,6 +146,19 @@ def _log(db: sqlite3.Connection, user_id: int, kind: str,
         "INSERT INTO activity (user_id, kind, detail, created_at, mode) "
         "VALUES (?, ?, ?, ?, ?)", (user_id, kind, detail, _now(), mode))
     db.commit()
+
+
+def _display_bot(bot):
+    """A bot row with the stored mode suffix stripped from its name,
+    for log lines and summaries (the suffix never renders). The loop
+    keys everything by bot id, never by name, so the plain display
+    name is safe to carry through evaluation. Returns None for None.
+    """
+    if bot is None:
+        return None
+    row = dict(bot)
+    row["name"] = display_bot_name(row.get("name") or "")
+    return row
 
 
 def _live_sol_price_usd(feed, prices_data=None):
@@ -3728,7 +3742,8 @@ def top10_watch_once(db: sqlite3.Connection, cfg: Config,
             mints, feed=feed, cfg=cfg, rpc_factory=rpc_factory))
     actions: list = []
     now_ts = datetime.now(timezone.utc).timestamp()
-    bots = db.execute("SELECT * FROM bots WHERE silent = 1").fetchall()
+    bots = [_display_bot(b) for b in db.execute(
+        "SELECT * FROM bots WHERE silent = 1").fetchall()]
     for bot in bots:
         rules, error = load_rules(bot)
         if rules is None or error is not None:
@@ -3904,8 +3919,8 @@ def _fast_exit_once(db, cfg, feed, rpc_factory=None,
             continue
         if price <= 0:
             continue
-        bots = db.execute(
-            "SELECT * FROM bots WHERE silent = 1").fetchall()
+        bots = [_display_bot(b) for b in db.execute(
+            "SELECT * FROM bots WHERE silent = 1").fetchall()]
         for bot in bots:
             rules, error = load_rules(bot)
             if rules is None or error is not None:
@@ -4034,6 +4049,7 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     decision_price_as_of = time.time()
     bots = db.execute(
         "SELECT * FROM bots WHERE silent = 1 ORDER BY id").fetchall()
+    bots = [_display_bot(b) for b in bots]
     trenches_data = None
     needs_trenches = False
     for bot in bots:
@@ -4113,7 +4129,8 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             try:
                 rules, _err = load_rules(bot)
                 if rules is not None and rules.get("kind") == "pit":
-                    bot = pit_mod.maybe_adopt_pit_version(db, bot) or bot
+                    bot = _display_bot(
+                        pit_mod.maybe_adopt_pit_version(db, bot) or bot)
             except Exception:
                 pass
             actions = _evaluate_bot(db, cfg, bot, prices_data, rpc_factory,
@@ -4164,8 +4181,9 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
     from .builderbot import review_bot
     for outcome in outcomes:
         try:
-            bot = db.execute("SELECT * FROM bots WHERE id = ?",
-                             (outcome["bot_id"],)).fetchone()
+            bot = _display_bot(db.execute(
+                "SELECT * FROM bots WHERE id = ?",
+                (outcome["bot_id"],)).fetchone())
             if bot is not None:
                 review_bot(db, bot, cfg.encryption_key)
         except Exception:

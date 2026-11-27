@@ -48,6 +48,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
+from .bot_names import display_bot_name, suffixed_name
 from .ledger import bot_wl_summary
 from .paper import reset_paper_balance
 from .rules import (REGIME_DEFAULT, SLOW_LADDER, TRENDING_LADDER,
@@ -863,9 +864,12 @@ def create_bot_from_answers(db, user_id: int, answers: dict):
     rules = _build_ruleset(answers)
     kind = rules["kind"]
     if kind == "scanner":
+        # One Scanner bot per user per mode — a paper Scanner must
+        # not block a real one (same rule as the preset handlers).
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = "
-            "'scanner'", (user_id,)).fetchone()
+            "'scanner' AND mode = ?",
+            (user_id, answers["mode"])).fetchone()
         if existing:
             raise ValueError(
                 "You already have a Scanner bot — one per user. "
@@ -882,7 +886,8 @@ def create_bot_from_answers(db, user_id: int, answers: dict):
         "buy_size_pct, stop_loss_pct, max_open_trades, platform, mode, "
         "silent, rules_json, api_token_hash, created_at) VALUES "
         "(?, ?, ?, 'balanced', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
-        (user_id, answers["name"], json.dumps(coins), category,
+        (user_id, suffixed_name(answers["name"], answers["mode"]),
+         json.dumps(coins), category,
          float(answers["buy_size"]), float(answers["stop_loss"]),
          int(answers["max_open"]), "pump.fun", answers["mode"],
          json.dumps(rules), hash_token(token), _now()))
@@ -1015,7 +1020,7 @@ def _review_bot(db, bot, enc_key: bytes):
         "INSERT INTO activity (user_id, kind, detail, created_at, mode) "
         "VALUES (?, 'builderbot_adjust', ?, ?, ?)",
         (bot["user_id"],
-         f"builderBot tightened '{bot['name']}': {field} "
+         f"builderBot tightened '{display_bot_name(bot['name'])}': {field} "
          f"{old_value} → {new_value}. {reason}",
          _now(), bot["mode"]))
     db.commit()

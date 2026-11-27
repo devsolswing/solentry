@@ -27,6 +27,7 @@ import math
 import re
 from datetime import datetime, timezone
 
+from .bot_names import suffixed_name
 from .rules import (PIT_MISSED_COINS_TO_WIDEN, PIT_MISSED_RUG_DROP_PCT,
                     PIT_PRESET_NAME, PIT_PRESET_VERSION_INITIAL,
                     pit_ruleset, validate_ruleset)
@@ -234,7 +235,9 @@ def maybe_adopt_pit_version(db, bot):
         "UPDATE bots SET rules_json = ?, preset_version = ?, "
         "name = ? WHERE id = ?",
         (active["rules_json"], active["version"],
-         f"{PIT_PRESET_NAME} v{active['version']}", bot["id"]))
+         suffixed_name(f"{PIT_PRESET_NAME} v{active['version']}",
+                       bot["mode"]),
+         bot["id"]))
     db.commit()
     fresh = db.execute("SELECT * FROM bots WHERE id = ?",
                        (bot["id"],)).fetchone()

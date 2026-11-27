@@ -1396,7 +1396,7 @@ class TestMiddyRoutes(MiddyBase):
         self.assertIsNotNone(bot)
         self.assertEqual(bot["mode"], "paper")
         self.assertEqual(bot["silent"], 0)
-        self.assertEqual(bot["name"], "Middy")
+        self.assertEqual(bot["name"], "Middydemobot")
         self.assertAlmostEqual(float(bot["buy_size_pct"]), 20.0)
         self.assertAlmostEqual(float(bot["stop_loss_pct"]), 5.5)
         self.assertEqual(bot["max_open_trades"], 2)

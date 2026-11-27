@@ -316,7 +316,7 @@ class TestBotsPresets(UiBase):
             data={"csrf_token": csrf(self.client, "/bots")})
         self.assertEqual(resp.status_code, 302)
         row = self.db.execute(
-            "SELECT * FROM bots WHERE user_id = ? AND name = 'Clyde'",
+            "SELECT * FROM bots WHERE user_id = ? AND name = 'Clydedemobot'",
             (self.user_id,)).fetchone()
         self.assertIsNotNone(row, "Clyde bot was not created")
         # Clyde's hard numbers, on the bot and in its rules.
@@ -353,7 +353,7 @@ class TestBotsPresets(UiBase):
             data={"csrf_token": csrf(self.client, "/bots")})
         self.assertEqual(resp.status_code, 302)
         rows = self.db.execute(
-            "SELECT id FROM bots WHERE user_id = ? AND name = 'Clyde'",
+            "SELECT id FROM bots WHERE user_id = ? AND name = 'Clydedemobot'",
             (self.user_id,)).fetchall()
         self.assertEqual(len(rows), 1, "duplicate Clyde bot created")
 

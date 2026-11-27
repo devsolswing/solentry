@@ -93,6 +93,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
+from .bot_names import display_bot_name
 from .config import Config
 from .executor import execute_real_trade, is_curve_complete, send_and_confirm
 from .jupiter_executor import execute_jupiter_swap
@@ -892,7 +893,8 @@ def enforce_fuel_gate(db: sqlite3.Connection, user_id: int) -> bool:
         for bot in turning_off:
             _log_activity(
                 db, user_id, "gate_fuel_bot_off",
-                f"GATEkeeper turned off real bot '{bot['name']}' — out "
+                f"GATEkeeper turned off real bot "
+                f"'{display_bot_name(bot['name'])}' — out "
                 f"of fuel (0 trades left). Buy $GATE to turn it back "
                 f"on.")
     return False

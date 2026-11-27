@@ -39,6 +39,8 @@ from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 
 from . import assistant as assistant_mod
 from . import builderbot as builderbot_mod
+from .bot_names import (display_bot_name, preset_base_name,
+                        suffixed_name)
 from . import analysis as analysis_mod
 from . import candles as candles_mod
 from . import donations as donations_mod
@@ -352,10 +354,28 @@ def _sent_sol_today(db, user_id: int, exclude_intent_id: int = None) -> float:
     return lamports_to_sol(int(row["total"]))
 
 
-def _find_bot_by_name(db, user_id: int, name: str):
-    """First bot whose name contains `name` (assistant-style lookup)."""
+def _bot_mode(db, user_id: int) -> str:
+    """The bot mode for the user's session: 'real' when the session
+    is in real (devnet) mode, else 'paper' (same mapping as the bots
+    list in _dashboard_data)."""
+    return ("real" if _active_mode(db, user_id) == "devnet" else "paper")
+
+
+def _find_bot_by_name(db, user_id: int, name: str, mode: str | None = None):
+    """First bot whose name contains `name` (assistant-style lookup).
+
+    Scoped to `mode` when given: with the same preset running in
+    paper and real, an unscoped lookup always hits the older
+    (paper) copy, so the assistant must ask for the copy in the
+    user's current mode.
+    """
     if not name:
         return None
+    if mode is not None:
+        return db.execute(
+            "SELECT * FROM bots WHERE user_id = ? AND name LIKE ? "
+            "AND mode = ?",
+            (user_id, "%" + name + "%", mode)).fetchone()
     return db.execute(
         "SELECT * FROM bots WHERE user_id = ? AND name LIKE ?",
         (user_id, "%" + name + "%")).fetchone()
@@ -3742,7 +3762,7 @@ def register_routes(app: Flask) -> None:
         if not bot:
             return None, "That bot isn't yours."
         if bot["mode"] != "real":
-            return None, (f"Bot '{bot['name']}' is a paper bot — pick a "
+            return None, (f"Bot '{display_bot_name(bot['name'])}' is a paper bot — pick a "
                           f"real bot for a real trade.")
         return bot, None
 
@@ -4951,7 +4971,7 @@ def register_routes(app: Flask) -> None:
                         "That bot isn't yours — nothing was bought."}
             if bot["mode"] != "paper":
                 return {"ok": False, "message":
-                        f"Bot '{bot['name']}' is a real-mode bot — pick "
+                        f"Bot '{display_bot_name(bot['name'])}' is a real-mode bot — pick "
                         f"a paper bot to look after a paper buy. "
                         f"Nothing was bought."}
         if price is None:
@@ -4980,7 +5000,7 @@ def register_routes(app: Flask) -> None:
         _log(app, user["id"], "paper_buy",
              f"Bought {amount:.4f} {coin_id} for ${usd:.2f} (paper, "
              f"price source: {source})"
-             + (f" — looked after by bot '{bot['name']}'." if bot else "."),
+             + (f" — looked after by bot '{display_bot_name(bot['name'])}'." if bot else "."),
              "paper")
         _record_pnl_snapshot(
             app, user["id"],
@@ -5283,7 +5303,9 @@ def register_routes(app: Flask) -> None:
         Creates in the session's current mode (paper or real),
         silent off. One per user per mode — if a Trenches bot
         already exists in this mode, go to it instead of making a
-        duplicate.
+        duplicate. The stored name carries the mode suffix
+        (Trenchesdemobot / Trenchesrealsol), never shown — the Bots
+        page still reads Trenches.
         """
         _csrf_check()
         user = _current_user(app)
@@ -5292,8 +5314,7 @@ def register_routes(app: Flask) -> None:
         # trading mode. The stored session value is 'devnet' for
         # real trading; bots store 'real' (same mapping as the bots
         # list in _dashboard_data).
-        bot_mode = ("real" if _active_mode(db, user["id"]) == "devnet"
-                    else "paper")
+        bot_mode = _bot_mode(db, user["id"])
         # Match by exact preset name, not by rules kind: builderBot
         # bots can carry Trenches-kind rules under another name (live
         # 2026-11-24: Luna, bot 3), and a kind match wrongly blocked
@@ -5303,7 +5324,8 @@ def register_routes(app: Flask) -> None:
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
             "AND name = ? AND mode = ?",
-            (user["id"], TRENCHES_CATEGORY, TRENCHES_PRESET_NAME,
+            (user["id"], TRENCHES_CATEGORY,
+             suffixed_name(TRENCHES_PRESET_NAME, bot_mode),
              bot_mode)).fetchone()
         if existing:
             flash("You already have a Trenches bot.")
@@ -5315,7 +5337,8 @@ def register_routes(app: Flask) -> None:
             "api_token_hash, category, rules_json, platform) "
             "VALUES (?, ?, 'bold', '[]', 20, 7, ?, 0, 3, ?, ?, ?, "
             "'pump.fun')",
-            (user["id"], TRENCHES_PRESET_NAME, bot_mode,
+            (user["id"], suffixed_name(TRENCHES_PRESET_NAME, bot_mode),
+             bot_mode,
              hash_token(token),
              TRENCHES_CATEGORY, json.dumps(trenches_ruleset())))
         db.commit()
@@ -5332,17 +5355,21 @@ def register_routes(app: Flask) -> None:
     def bot_preset_scanner():
         """Create the Scanner sniper bot (∆scanner∆ preset).
 
-        Paper mode, silent off. One per user — if a Scanner bot
-        already exists, go to it instead of making a duplicate.
+        Creates in the session's current mode (paper or real),
+        silent off. One per user per mode — if a Scanner bot
+        already exists in this mode, go to it instead of making a
+        duplicate. The stored name carries the mode suffix
+        (Scannerdemobot / Scannerrealsol), never shown.
         """
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
+        bot_mode = _bot_mode(db, user["id"])
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-            "AND rules_json LIKE ?",
-            (user["id"], SCANNER_CATEGORY, '%"kind": "scanner"%')
-            ).fetchone()
+            "AND rules_json LIKE ? AND mode = ?",
+            (user["id"], SCANNER_CATEGORY, '%"kind": "scanner"%',
+             bot_mode)).fetchone()
         if existing:
             flash("You already have a Scanner bot.")
             return redirect(url_for("bot_detail", bot_id=existing["id"]))
@@ -5351,18 +5378,19 @@ def register_routes(app: Flask) -> None:
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform) "
-            "VALUES (?, ?, 'bold', '[]', 15, 7, 'paper', 0, 3, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', 15, 7, ?, 0, 3, ?, ?, ?, "
             "'pump.fun')",
-            (user["id"], SCANNER_PRESET_NAME, hash_token(token),
+            (user["id"], suffixed_name(SCANNER_PRESET_NAME, bot_mode),
+             bot_mode, hash_token(token),
              SCANNER_CATEGORY, json.dumps(scanner_ruleset())))
         db.commit()
         _log(app, user["id"], "bot_create",
              f"Created bot '{SCANNER_PRESET_NAME}' ({SCANNER_DISPLAY} "
-             f"preset, paper). Silent trading is off.", "paper")
+             f"preset, {bot_mode}). Silent trading is off.", bot_mode)
         flash(f"Created the {SCANNER_PRESET_NAME} bot "
-              f"({SCANNER_DISPLAY}, paper). Turn silent trading on when "
-              f"you are ready — it only trades within its rules and "
-              f"limits.")
+              f"({SCANNER_DISPLAY}, {bot_mode}). Turn silent trading on "
+              f"when you are ready — it only trades within its rules "
+              f"and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
     @app.route("/bots/preset/clyde", methods=["POST"])
@@ -5370,18 +5398,24 @@ def register_routes(app: Flask) -> None:
     def bot_preset_clyde():
         """Create the Clyde preset bot.
 
-        Paper mode, silent off. One per user — if a Clyde bot
-        already exists, go to it instead of making a duplicate.
+        Creates in the session's current mode (paper or real),
+        silent off. One per user per mode — if a Clyde bot already
+        exists in this mode, go to it instead of making a duplicate.
         Stop loss 4% (Clyde's hard number, on the bot row), buy
         size 15% and max 3 open trades (the preset defaults).
+        The stored name carries the mode suffix (Clydedemobot /
+        Clyderealsol), never shown.
         """
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
+        bot_mode = _bot_mode(db, user["id"])
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-            "AND name = ?",
-            (user["id"], CLYDE_CATEGORY, CLYDE_PRESET_NAME)).fetchone()
+            "AND name = ? AND mode = ?",
+            (user["id"], CLYDE_CATEGORY,
+             suffixed_name(CLYDE_PRESET_NAME, bot_mode),
+             bot_mode)).fetchone()
         if existing:
             flash("You already have a Clyde bot.")
             return redirect(url_for("bot_detail", bot_id=existing["id"]))
@@ -5390,17 +5424,18 @@ def register_routes(app: Flask) -> None:
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform) "
-            "VALUES (?, ?, 'bold', '[]', 15, ?, 'paper', 0, 3, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', 15, ?, ?, 0, 3, ?, ?, ?, "
             "'pump.fun')",
-            (user["id"], CLYDE_PRESET_NAME, CLYDE_STOP_LOSS_PCT,
+            (user["id"], suffixed_name(CLYDE_PRESET_NAME, bot_mode),
+             CLYDE_STOP_LOSS_PCT, bot_mode,
              hash_token(token), CLYDE_CATEGORY,
              json.dumps(clyde_ruleset())))
         db.commit()
         _log(app, user["id"], "bot_create",
              f"Created bot '{CLYDE_PRESET_NAME}' (Clyde preset, "
-             f"paper). Silent trading is off.", "paper")
+             f"{bot_mode}). Silent trading is off.", bot_mode)
         flash(f"Created the {CLYDE_PRESET_NAME} bot (Clyde preset, "
-              f"paper). Turn silent trading on when you are ready — "
+              f"{bot_mode}). Turn silent trading on when you are ready — "
               f"it only trades within its rules and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
@@ -5409,20 +5444,25 @@ def register_routes(app: Flask) -> None:
     def bot_preset_gnat():
         """Create the Gnat preset bot.
 
-        Paper mode, silent off. One per user — if a Gnat bot
-        already exists, go to it instead of making a duplicate.
+        Creates in the session's current mode (paper or real),
+        silent off. One per user per mode — if a Gnat bot already
+        exists in this mode, go to it instead of making a duplicate.
         Stop loss 18% (Gnat's hard number, on the bot row), buy
         size 18% (the fallback cap — the loop buys a fixed 0.25
         SOL when a live SOL price exists) and max 3 open trades
-        (the preset defaults).
+        (the preset defaults). The stored name carries the mode
+        suffix (Gnatdemobot / Gnatrealsol), never shown.
         """
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
+        bot_mode = _bot_mode(db, user["id"])
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-            "AND name = ?",
-            (user["id"], GNAT_CATEGORY, GNAT_PRESET_NAME)).fetchone()
+            "AND name = ? AND mode = ?",
+            (user["id"], GNAT_CATEGORY,
+             suffixed_name(GNAT_PRESET_NAME, bot_mode),
+             bot_mode)).fetchone()
         if existing:
             flash("You already have a Gnat bot.")
             return redirect(url_for("bot_detail", bot_id=existing["id"]))
@@ -5431,17 +5471,18 @@ def register_routes(app: Flask) -> None:
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform) "
-            "VALUES (?, ?, 'bold', '[]', ?, ?, 'paper', 0, 3, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', ?, ?, ?, 0, 3, ?, ?, ?, "
             "'pump.fun')",
-            (user["id"], GNAT_PRESET_NAME, GNAT_BUY_SIZE_PCT,
-             GNAT_STOP_LOSS_PCT, hash_token(token), GNAT_CATEGORY,
+            (user["id"], suffixed_name(GNAT_PRESET_NAME, bot_mode),
+             GNAT_BUY_SIZE_PCT,
+             GNAT_STOP_LOSS_PCT, bot_mode, hash_token(token), GNAT_CATEGORY,
              json.dumps(gnat_ruleset())))
         db.commit()
         _log(app, user["id"], "bot_create",
              f"Created bot '{GNAT_PRESET_NAME}' (Gnat preset, "
-             f"paper). Silent trading is off.", "paper")
+             f"{bot_mode}). Silent trading is off.", bot_mode)
         flash(f"Created the {GNAT_PRESET_NAME} bot (Gnat preset, "
-              f"paper). Turn silent trading on when you are ready — "
+              f"{bot_mode}). Turn silent trading on when you are ready — "
               f"it only trades within its rules and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
@@ -5450,8 +5491,9 @@ def register_routes(app: Flask) -> None:
     def bot_preset_pit():
         """Create the Pit Sweeper preset bot.
 
-        Paper mode, silent off. One per user — if a Pit bot
-        already exists, go to it instead of making a duplicate.
+        Creates in the session's current mode (paper or real),
+        silent off. One per user per mode — if a Pit bot already
+        exists in this mode, go to it instead of making a duplicate.
         The bot is created on the active shared-brain version
         (1.0 first, then 1.1, 1.2...) and its name tag carries
         that version; its stored rules are that version's snapshot.
@@ -5460,15 +5502,18 @@ def register_routes(app: Flask) -> None:
         live SOL price exists. Stop loss 4.9% is the trigger from
         the versioned rules; the realized loss can reach about
         -9.9% at 5% exit slippage — that is stated on the preset,
-        never promised away.
+        never promised away. The stored name carries the mode suffix
+        after the version tag ("Pit Sweeper v1.0demobot"), never shown.
         """
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
+        bot_mode = _bot_mode(db, user["id"])
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-            "AND name LIKE ?",
-            (user["id"], PIT_CATEGORY, f"{PIT_PRESET_NAME}%")).fetchone()
+            "AND name LIKE ? AND mode = ?",
+            (user["id"], PIT_CATEGORY, f"{PIT_PRESET_NAME}%",
+             bot_mode)).fetchone()
         if existing:
             flash("You already have a Pit Sweeper bot.")
             return redirect(url_for("bot_detail", bot_id=existing["id"]))
@@ -5483,19 +5528,21 @@ def register_routes(app: Flask) -> None:
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform, "
             "preset_version, bankroll_sol) "
-            "VALUES (?, ?, 'bold', '[]', ?, ?, 'paper', 0, 1, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', ?, ?, ?, 0, 1, ?, ?, ?, "
             "'pump.fun', ?, ?)",
-            (user["id"], f"{PIT_PRESET_NAME} v{version}",
-             PIT_BUY_SIZE_PCT, PIT_STOP_LOSS_PCT, hash_token(token),
+            (user["id"],
+             suffixed_name(f"{PIT_PRESET_NAME} v{version}", bot_mode),
+             PIT_BUY_SIZE_PCT, PIT_STOP_LOSS_PCT, bot_mode,
+             hash_token(token),
              PIT_CATEGORY, json.dumps(active_rules),
              version, PIT_BANKROLL_SOL))
         db.commit()
         _log(app, user["id"], "bot_create",
              f"Created bot '{PIT_PRESET_NAME} v{version}' (Pit Sweeper "
-             f"preset, paper, 0.20 SOL bankroll cap). Silent trading "
-             f"is off.", "paper")
+             f"preset, {bot_mode}, 0.20 SOL bankroll cap). Silent trading "
+             f"is off.", bot_mode)
         flash(f"Created the {PIT_PRESET_NAME} v{version} bot (Pit "
-              f"Sweeper preset, paper). Turn silent trading on when "
+              f"Sweeper preset, {bot_mode}). Turn silent trading on when "
               f"you are ready — it only trades within its rules and "
               f"limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
@@ -5505,22 +5552,27 @@ def register_routes(app: Flask) -> None:
     def bot_preset_middy():
         """Create the Middy preset bot.
 
-        Paper mode, silent off. One per user — if a Middy bot
-        already exists, go to it instead of making a duplicate.
+        Creates in the session's current mode (paper or real),
+        silent off. One per user per mode — if a Middy bot already
+        exists in this mode, go to it instead of making a duplicate.
         Stop loss 5.5% (Middy's hard number, on the bot row), buy
         size 20% of balance per trade and max 2 open trades (the
         preset defaults). Paper first: the $20 of real money
         James set aside stays put until paper results verify
         actual profit — nothing here funds or enables real
-        trading.
+        trading. The stored name carries the mode suffix
+        (Middydemobot / Middyrealsol), never shown.
         """
         _csrf_check()
         user = _current_user(app)
         db = _db(app)
+        bot_mode = _bot_mode(db, user["id"])
         existing = db.execute(
             "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-            "AND name = ?",
-            (user["id"], MIDDY_CATEGORY, MIDDY_PRESET_NAME)).fetchone()
+            "AND name = ? AND mode = ?",
+            (user["id"], MIDDY_CATEGORY,
+             suffixed_name(MIDDY_PRESET_NAME, bot_mode),
+             bot_mode)).fetchone()
         if existing:
             flash("You already have a Middy bot.")
             return redirect(url_for("bot_detail", bot_id=existing["id"]))
@@ -5529,17 +5581,18 @@ def register_routes(app: Flask) -> None:
             "INSERT INTO bots (user_id, name, strategy, coins, "
             "buy_size_pct, stop_loss_pct, mode, silent, max_open_trades, "
             "api_token_hash, category, rules_json, platform) "
-            "VALUES (?, ?, 'bold', '[]', ?, ?, 'paper', 0, 2, ?, ?, ?, "
+            "VALUES (?, ?, 'bold', '[]', ?, ?, ?, 0, 2, ?, ?, ?, "
             "'pump.fun')",
-            (user["id"], MIDDY_PRESET_NAME, MIDDY_BUY_SIZE_PCT,
-             MIDDY_STOP_LOSS_PCT, hash_token(token), MIDDY_CATEGORY,
+            (user["id"], suffixed_name(MIDDY_PRESET_NAME, bot_mode),
+             MIDDY_BUY_SIZE_PCT,
+             MIDDY_STOP_LOSS_PCT, bot_mode, hash_token(token), MIDDY_CATEGORY,
              json.dumps(middy_ruleset())))
         db.commit()
         _log(app, user["id"], "bot_create",
              f"Created bot '{MIDDY_PRESET_NAME}' (Middy preset, "
-             f"paper). Silent trading is off.", "paper")
+             f"{bot_mode}). Silent trading is off.", bot_mode)
         flash(f"Created the {MIDDY_PRESET_NAME} bot (Middy preset, "
-              f"paper). Turn silent trading on when you are ready — "
+              f"{bot_mode}). Turn silent trading on when you are ready — "
               f"it only trades within its rules and limits.")
         return redirect(url_for("bot_detail", bot_id=cur.lastrowid))
 
@@ -5613,7 +5666,6 @@ def register_routes(app: Flask) -> None:
             abort(404)
         if request.method == "POST":
             _csrf_check()
-            name = (request.form.get("name") or "").strip() or bot["name"]
             # Strategy and category are no longer editable — the
             # pickers are gone (bots are built by builderBot, and
             # the Trenches/Scanner categories come from their
@@ -5622,6 +5674,17 @@ def register_routes(app: Flask) -> None:
             mode = (request.form.get("mode") or bot["mode"]).lower()
             if mode not in ("paper", "real"):
                 mode = bot["mode"]
+            # The name the form shows is the plain display name (the
+            # stored mode suffix is stripped at render). Put the
+            # suffix back for a preset bot, in the (possibly new)
+            # mode, so an edit — or a mode switch — never silently
+            # drops it; a custom name is stored exactly as typed.
+            typed = (request.form.get("name") or "").strip()
+            base = preset_base_name(typed or bot["name"])
+            if base is not None:
+                name = suffixed_name(base, mode)
+            else:
+                name = typed or bot["name"]
             platform = bot["platform"] or "pump.fun"
             category = bot["category"] or ""
             rules_json = bot["rules_json"]
@@ -5706,11 +5769,11 @@ def register_routes(app: Flask) -> None:
             _log(app, user["id"],
                  "silent_on" if want else "silent_off",
                  f"Silent trading turned "
-                 f"{'ON' if want else 'OFF'} for bot '{bot['name']}' "
+                 f"{'ON' if want else 'OFF'} for bot '{display_bot_name(bot['name'])}' "
                  f"({bot['mode']}).", bot["mode"])
             flash("Silent trading turned "
                   + ("ON" if want else "OFF")
-                  + f" for '{bot['name']}'.")
+                  + f" for '{display_bot_name(bot['name'])}'.")
             return redirect(url_for("bot_detail", bot_id=bot_id))
         try:
             want = int(request.args.get("to", "1"))
@@ -5743,7 +5806,7 @@ def register_routes(app: Flask) -> None:
                    (_now(), bot_id, user["id"]))
         db.commit()
         _log(app, user["id"], "rules_clear",
-             f"Cleared custom rules for bot '{bot['name']}' — back to "
+             f"Cleared custom rules for bot '{display_bot_name(bot['name'])}' — back to "
              f"standard signals.", bot["mode"])
         flash("Custom rules cleared — the bot is back to standard signals.")
         return redirect(url_for("bot_detail", bot_id=bot_id))
@@ -5842,8 +5905,8 @@ def register_routes(app: Flask) -> None:
         _delete_bot(db, user["id"], bot_id)
         db.commit()
         _log(app, user["id"], "bot_delete",
-             f"Deleted bot '{bot['name']}'.", bot["mode"])
-        flash(f"Bot '{bot['name']}' deleted permanently.")
+             f"Deleted bot '{display_bot_name(bot['name'])}'.", bot["mode"])
+        flash(f"Bot '{display_bot_name(bot['name'])}' deleted permanently.")
         return redirect(url_for("bots"))
 
     @app.route("/bots/<int:bot_id>/suggest", methods=["POST"])
@@ -6021,10 +6084,10 @@ def register_routes(app: Flask) -> None:
                             user["id"]))
                 db.commit()
                 _log(app, user["id"], "rules_set",
-                     f"Set custom rules for bot '{bot['name']}' "
+                     f"Set custom rules for bot '{display_bot_name(bot['name'])}' "
                      f"(assistant).", bot["mode"])
                 return jsonify({"reply":
-                    f"Done — bot '{bot['name']}' now follows these "
+                    f"Done — bot '{display_bot_name(bot['name'])}' now follows these "
                     f"rules:\n{summarize_rules(cleaned)}\n\n"
                     f"It will never trade outside them or its limits."})
             pending_clear = session.pop("pending_rules_clear", None)
@@ -6040,19 +6103,20 @@ def register_routes(app: Flask) -> None:
                            (_now(), bot["id"], user["id"]))
                 db.commit()
                 _log(app, user["id"], "rules_clear",
-                     f"Cleared custom rules for bot '{bot['name']}' "
+                     f"Cleared custom rules for bot '{display_bot_name(bot['name'])}' "
                      f"(assistant).", bot["mode"])
                 return jsonify({"reply":
-                    f"Done — bot '{bot['name']}' is back to the standard "
+                    f"Done — bot '{display_bot_name(bot['name'])}' is back to the standard "
                     f"signals."})
             pending_scanner = session.pop("pending_scanner", None)
             if pending_scanner:
                 db = _db(app)
+                bot_mode = _bot_mode(db, user["id"])
                 existing = db.execute(
                     "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-                    "AND rules_json LIKE ?",
+                    "AND rules_json LIKE ? AND mode = ?",
                     (user["id"], SCANNER_CATEGORY,
-                     '%"kind": "scanner"%')).fetchone()
+                     '%"kind": "scanner"%', bot_mode)).fetchone()
                 if existing:
                     return jsonify({"reply":
                         f"You already have a {SCANNER_PRESET_NAME} bot "
@@ -6069,18 +6133,20 @@ def register_routes(app: Flask) -> None:
                     "buy_size_pct, stop_loss_pct, mode, silent, "
                     "max_open_trades, api_token_hash, category, "
                     "rules_json, platform) "
-                    "VALUES (?, ?, 'bold', '[]', 15, 7, 'paper', 0, 3, ?, "
+                    "VALUES (?, ?, 'bold', '[]', 15, 7, ?, 0, 3, ?, "
                     "?, ?, 'pump.fun')",
-                    (user["id"], SCANNER_PRESET_NAME, hash_token(token),
+                    (user["id"],
+                     suffixed_name(SCANNER_PRESET_NAME, bot_mode), bot_mode,
+                     hash_token(token),
                      SCANNER_CATEGORY, json.dumps(cleaned)))
                 db.commit()
                 _log(app, user["id"], "bot_create",
                      f"Created bot '{SCANNER_PRESET_NAME}' "
-                     f"({SCANNER_DISPLAY} preset, paper) via assistant.",
-                     "paper")
+                     f"({SCANNER_DISPLAY} preset, {bot_mode}) via assistant.",
+                     bot_mode)
                 return jsonify({"reply":
                     f"Done — created the {SCANNER_PRESET_NAME} bot "
-                    f"({SCANNER_DISPLAY} sniper, paper):\n"
+                    f"({SCANNER_DISPLAY} sniper, {bot_mode}):\n"
                     f"{summarize_rules(cleaned)}\n\n"
                     f"Silent trading is off. Say \"turn on silent "
                     f"trading for {SCANNER_PRESET_NAME}\" when you want "
@@ -6099,7 +6165,7 @@ def register_routes(app: Flask) -> None:
                     return jsonify({"reply":
                         f"Silent trading is already "
                         f"{'ON' if want else 'OFF'} for "
-                        f"'{bot['name']}'. Nothing changed."})
+                        f"'{display_bot_name(bot['name'])}'. Nothing changed."})
                 db.execute("UPDATE bots SET silent = ?, updated_at = ? "
                            "WHERE id = ? AND user_id = ?",
                            (want, _now(), bot_id, user["id"]))
@@ -6107,11 +6173,11 @@ def register_routes(app: Flask) -> None:
                 _log(app, user["id"],
                      "silent_on" if want else "silent_off",
                      f"Silent trading turned "
-                     f"{'ON' if want else 'OFF'} for bot '{bot['name']}' "
+                     f"{'ON' if want else 'OFF'} for bot '{display_bot_name(bot['name'])}' "
                      f"(assistant).", bot["mode"])
                 return jsonify({"reply":
                     f"Done — silent trading is now "
-                    f"{'ON' if want else 'OFF'} for bot '{bot['name']}'. "
+                    f"{'ON' if want else 'OFF'} for bot '{display_bot_name(bot['name'])}'. "
                     f"It trades on its own within your limits, and every "
                     f"trade is logged on your dashboard."})
             pending = session.pop("pending_delete_bot", None)
@@ -6124,8 +6190,8 @@ def register_routes(app: Flask) -> None:
                     _delete_bot(db, user["id"], pending)
                     db.commit()
                     _log(app, user["id"], "bot_delete",
-                         f"Deleted bot '{bot['name']}' (assistant).", bot["mode"])
-                    return jsonify({"reply": f"Done — bot '{bot['name']}' "
+                         f"Deleted bot '{display_bot_name(bot['name'])}' (assistant).", bot["mode"])
+                    return jsonify({"reply": f"Done — bot '{display_bot_name(bot['name'])}' "
                                              "is deleted."})
                 return jsonify({"reply": "That bot is already gone."})
             return jsonify({"reply": "Nothing is waiting for confirmation."})
@@ -6174,7 +6240,7 @@ def register_routes(app: Flask) -> None:
                 return jsonify({"reply":
                     "You have no bots yet. Say \"create bot\" and I will "
                     "make one for you."})
-            lines = [f"- {b['name']} ({b['strategy']}, "
+            lines = [f"- {display_bot_name(b['name'])} ({b['strategy']}, "
                      f"{', '.join(json.loads(b['coins']))})" for b in bots]
             return jsonify({"reply": "Your bots:\n" + "\n".join(lines)})
 
@@ -6200,9 +6266,9 @@ def register_routes(app: Flask) -> None:
 
         if intent == "bot_edit":
             db = _db(app)
-            bot = db.execute(
-                "SELECT * FROM bots WHERE user_id = ? AND name LIKE ?",
-                (user["id"], "%" + parsed["bot_name"] + "%")).fetchone()
+            bot = _find_bot_by_name(
+                db, user["id"], parsed["bot_name"],
+                mode=_bot_mode(db, user["id"]))
             if not bot:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{parsed['bot_name']}'. "
@@ -6211,7 +6277,7 @@ def register_routes(app: Flask) -> None:
             if not fields:
                 return jsonify({"reply":
                     "What should I change? For example: \"edit bot "
-                    f"{bot['name']} strategy to bold\" or \"stop loss 5%\"."})
+                    f"{display_bot_name(bot['name'])} strategy to bold\" or \"stop loss 5%\"."})
             sets, vals = [], []
             if "strategy" in fields:
                 sets.append("strategy = ?")
@@ -6229,23 +6295,23 @@ def register_routes(app: Flask) -> None:
                        " WHERE id = ? AND user_id = ?", vals)
             db.commit()
             _log(app, user["id"], "bot_edit",
-                 f"Edited bot '{bot['name']}' via assistant.", bot["mode"])
+                 f"Edited bot '{display_bot_name(bot['name'])}' via assistant.", bot["mode"])
             return jsonify({"reply":
-                f"Done — bot '{bot['name']}' updated: " +
+                f"Done — bot '{display_bot_name(bot['name'])}' updated: " +
                 ", ".join(f"{k} = {v}" for k, v in fields.items()) + "."})
 
         if intent == "bot_delete":
             db = _db(app)
-            bot = db.execute(
-                "SELECT * FROM bots WHERE user_id = ? AND name LIKE ?",
-                (user["id"], "%" + parsed["bot_name"] + "%")).fetchone()
+            bot = _find_bot_by_name(
+                db, user["id"], parsed["bot_name"],
+                mode=_bot_mode(db, user["id"]))
             if not bot:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{parsed['bot_name']}'. "
                     f"Say \"show my bots\" to see them."})
             session["pending_delete_bot"] = bot["id"]
             return jsonify({"reply":
-                f"Are you sure you want to delete bot '{bot['name']}'? "
+                f"Are you sure you want to delete bot '{display_bot_name(bot['name'])}'? "
                 f"Reply \"yes\" to delete it, or \"no\" to keep it."})
 
         if intent == "rules_propose":
@@ -6272,7 +6338,8 @@ def register_routes(app: Flask) -> None:
                 return jsonify({"reply":
                     "Which bot should follow these rules? Say \"bot "
                     "<name> scan ...\" — or \"show my bots\" to see them."})
-            bot = _find_bot_by_name(db, user["id"], bot_name)
+            bot = _find_bot_by_name(db, user["id"], bot_name,
+                               mode=_bot_mode(db, user["id"]))
             if not bot:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{bot_name}'. "
@@ -6287,7 +6354,7 @@ def register_routes(app: Flask) -> None:
             session["pending_rules"] = {"bot_id": bot["id"],
                                         "rules": cleaned}
             return jsonify({"reply":
-                f"Here is what I understood for bot '{bot['name']}':\n"
+                f"Here is what I understood for bot '{display_bot_name(bot['name'])}':\n"
                 f"{summary}\n\n"
                 f"The bot will only trade inside these rules, and never "
                 f"outside its limits (buy size {bot['buy_size_pct']}%, "
@@ -6304,7 +6371,8 @@ def register_routes(app: Flask) -> None:
                     "Which bot should get the rug sell rule? Say "
                     "\"sell everything if the dev starts selling for "
                     "<bot name>\" — or \"show my bots\" to see them."})
-            bot = _find_bot_by_name(db, user["id"], bot_name)
+            bot = _find_bot_by_name(db, user["id"], bot_name,
+                               mode=_bot_mode(db, user["id"]))
             if not bot:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{bot_name}'. "
@@ -6312,15 +6380,15 @@ def register_routes(app: Flask) -> None:
             rules, rules_err = load_rules(bot)
             if rules_err:
                 return jsonify({"reply":
-                    f"Bot '{bot['name']}' has stored rules I can't "
+                    f"Bot '{display_bot_name(bot['name'])}' has stored rules I can't "
                     f"read ({rules_err}) — it makes no trades until "
                     f"they are fixed. Ask me to set new rules, or "
                     f"remove them."})
             if rules is None:
                 return jsonify({"reply":
-                    f"Bot '{bot['name']}' has no custom rules yet — "
+                    f"Bot '{display_bot_name(bot['name'])}' has no custom rules yet — "
                     f"it uses the standard signals. Set its trading "
-                    f"rules first (for example: \"bot {bot['name']} "
+                    f"rules first (for example: \"bot {display_bot_name(bot['name'])} "
                     f"scan pump.fun, buy when a coin gains 5% in 5 "
                     f"minutes\"), then add the rug sell rule. Nothing "
                     f"was changed."})
@@ -6337,7 +6405,7 @@ def register_routes(app: Flask) -> None:
             session["pending_rules"] = {"bot_id": bot["id"],
                                         "rules": cleaned}
             return jsonify({"reply":
-                f"Here is what I understood for bot '{bot['name']}':\n"
+                f"Here is what I understood for bot '{display_bot_name(bot['name'])}':\n"
                 f"{summary}\n\n"
                 f"The bot will only trade inside these rules, and never "
                 f"outside its limits (buy size {bot['buy_size_pct']}%, "
@@ -6355,7 +6423,8 @@ def register_routes(app: Flask) -> None:
                     "\"set the buy filter for <bot name>: min volume "
                     "$1000, min signal 5%\" — or \"show my bots\" to "
                     "see them."})
-            bot = _find_bot_by_name(db, user["id"], bot_name)
+            bot = _find_bot_by_name(db, user["id"], bot_name,
+                               mode=_bot_mode(db, user["id"]))
             if not bot:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{bot_name}'. "
@@ -6363,15 +6432,15 @@ def register_routes(app: Flask) -> None:
             rules, rules_err = load_rules(bot)
             if rules_err:
                 return jsonify({"reply":
-                    f"Bot '{bot['name']}' has stored rules I can't "
+                    f"Bot '{display_bot_name(bot['name'])}' has stored rules I can't "
                     f"read ({rules_err}) — it makes no trades until "
                     f"they are fixed. Ask me to set new rules, or "
                     f"remove them."})
             if rules is None:
                 return jsonify({"reply":
-                    f"Bot '{bot['name']}' has no custom rules yet — "
+                    f"Bot '{display_bot_name(bot['name'])}' has no custom rules yet — "
                     f"it uses the standard signals. Set its trading "
-                    f"rules first (for example: \"bot {bot['name']} "
+                    f"rules first (for example: \"bot {display_bot_name(bot['name'])} "
                     f"scan pump.fun, buy when a coin gains 5% in 5 "
                     f"minutes\"), then set the buy filter. Nothing "
                     f"was changed."})
@@ -6387,7 +6456,7 @@ def register_routes(app: Flask) -> None:
             session["pending_rules"] = {"bot_id": bot["id"],
                                         "rules": cleaned}
             return jsonify({"reply":
-                f"Here is what I understood for bot '{bot['name']}':\n"
+                f"Here is what I understood for bot '{display_bot_name(bot['name'])}':\n"
                 f"{summary}\n\n"
                 f"The bot will only trade inside these rules, and never "
                 f"outside its limits (buy size {bot['buy_size_pct']}%, "
@@ -6400,7 +6469,8 @@ def register_routes(app: Flask) -> None:
             db = _db(app)
             bot_name = parsed.get("bot_name")
             if bot_name:
-                bot = _find_bot_by_name(db, user["id"], bot_name)
+                bot = _find_bot_by_name(db, user["id"], bot_name,
+                               mode=_bot_mode(db, user["id"]))
                 if not bot:
                     return jsonify({"reply":
                         f"I couldn't find a bot called '{bot_name}'. "
@@ -6408,12 +6478,12 @@ def register_routes(app: Flask) -> None:
                 rules, err = load_rules(bot)
                 if err:
                     return jsonify({"reply":
-                        f"Bot '{bot['name']}' has stored rules I can't "
+                        f"Bot '{display_bot_name(bot['name'])}' has stored rules I can't "
                         f"read ({err}) — it makes no trades until they "
                         f"are fixed. Ask me to set new rules, or remove "
                         f"them."})
                 return jsonify({"reply":
-                    f"Rules for '{bot['name']}':\n"
+                    f"Rules for '{display_bot_name(bot['name'])}':\n"
                     f"{summarize_rules(rules)}"})
             bots = db.execute(
                 "SELECT * FROM bots WHERE user_id = ?",
@@ -6426,13 +6496,13 @@ def register_routes(app: Flask) -> None:
             for b in bots:
                 rules, err = load_rules(b)
                 if err:
-                    lines.append(f"- {b['name']}: stored rules are broken "
+                    lines.append(f"- {display_bot_name(b['name'])}: stored rules are broken "
                                  f"({err}) — no trades.")
                 elif rules:
-                    lines.append(f"- {b['name']}:\n{summarize_rules(rules)}")
+                    lines.append(f"- {display_bot_name(b['name'])}:\n{summarize_rules(rules)}")
                 else:
                     lines.append(
-                        f"- {b['name']}: standard signals (buy +2% in "
+                        f"- {display_bot_name(b['name'])}: standard signals (buy +2% in "
                         f"24h, sell −5% in 24h).")
             return jsonify({"reply": "\n".join(lines)})
 
@@ -6442,7 +6512,8 @@ def register_routes(app: Flask) -> None:
             if not bot_name:
                 return jsonify({"reply":
                     "Which bot? Say \"remove rules for <bot name>\"."})
-            bot = _find_bot_by_name(db, user["id"], bot_name)
+            bot = _find_bot_by_name(db, user["id"], bot_name,
+                               mode=_bot_mode(db, user["id"]))
             if not bot:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{bot_name}'. "
@@ -6450,23 +6521,24 @@ def register_routes(app: Flask) -> None:
             rules, _err = load_rules(bot)
             if rules is None:
                 return jsonify({"reply":
-                    f"Bot '{bot['name']}' has no custom rules — it "
+                    f"Bot '{display_bot_name(bot['name'])}' has no custom rules — it "
                     f"already uses the standard signals."})
             session["pending_rules_clear"] = bot["id"]
             return jsonify({"reply":
-                f"Remove the custom rules from '{bot['name']}' and go "
+                f"Remove the custom rules from '{display_bot_name(bot['name'])}' and go "
                 f"back to the standard signals? Reply \"yes\" to remove "
                 f"them, or \"no\" to keep them."})
 
         if intent == "preset_create":
             preset = parsed.get("preset") or "trenches"
+            db = _db(app)
+            bot_mode = _bot_mode(db, user["id"])
             if preset == "scanner":
-                db = _db(app)
                 existing = db.execute(
                     "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-                    "AND rules_json LIKE ?",
+                    "AND rules_json LIKE ? AND mode = ?",
                     (user["id"], SCANNER_CATEGORY,
-                     '%"kind": "scanner"%')).fetchone()
+                     '%"kind": "scanner"%', bot_mode)).fetchone()
                 if existing:
                     return jsonify({"reply":
                         f"You already have a {SCANNER_PRESET_NAME} bot "
@@ -6475,16 +6547,15 @@ def register_routes(app: Flask) -> None:
                     "rules": scanner_ruleset()}
                 return jsonify({"reply":
                     f"Here is the {SCANNER_PRESET_NAME} bot "
-                    f"({SCANNER_DISPLAY} sniper, paper):\n"
+                    f"({SCANNER_DISPLAY} sniper, {bot_mode}):\n"
                     f"{summarize_rules(scanner_ruleset())}\n\n"
                     f"Silent trading is off. Reply \"yes\" to create "
                     f"it, or \"no\" to leave things as they are."})
-            db = _db(app)
             existing = db.execute(
                 "SELECT id FROM bots WHERE user_id = ? AND category = ? "
-                "AND rules_json LIKE ?",
+                "AND rules_json LIKE ? AND mode = ?",
                 (user["id"], TRENCHES_CATEGORY,
-                 '%"kind": "trenches"%')).fetchone()
+                 '%"kind": "trenches"%', bot_mode)).fetchone()
             if existing:
                 return jsonify({"reply":
                     "You already have a Trenches bot (Memecoin build). "
@@ -6495,17 +6566,19 @@ def register_routes(app: Flask) -> None:
                 "buy_size_pct, stop_loss_pct, mode, silent, "
                 "max_open_trades, api_token_hash, category, rules_json, "
                 "platform) "
-                "VALUES (?, ?, 'bold', '[]', 20, 7, 'paper', 0, 3, ?, ?, ?, "
+                "VALUES (?, ?, 'bold', '[]', 20, 7, ?, 0, 3, ?, ?, ?, "
                 "'pump.fun')",
-                (user["id"], TRENCHES_PRESET_NAME, hash_token(token),
+                (user["id"],
+                 suffixed_name(TRENCHES_PRESET_NAME, bot_mode), bot_mode,
+                 hash_token(token),
                  TRENCHES_CATEGORY, json.dumps(trenches_ruleset())))
             db.commit()
             _log(app, user["id"], "bot_create",
                  f"Created bot '{TRENCHES_PRESET_NAME}' (Memecoin build "
-                 f"preset, paper) via assistant.", "paper")
+                 f"preset, {bot_mode}) via assistant.", bot_mode)
             return jsonify({"reply":
                 f"Created the {TRENCHES_PRESET_NAME} bot (Memecoin "
-                f"build, paper):\n{summarize_rules(trenches_ruleset())}"
+                f"build, {bot_mode}):\n{summarize_rules(trenches_ruleset())}"
                 f"\n\nSilent trading is off. Say \"turn on silent "
                 f"trading for {TRENCHES_PRESET_NAME}\" when you want it "
                 f"to trade on its own within these rules.",
@@ -6519,7 +6592,7 @@ def register_routes(app: Flask) -> None:
                 return jsonify({"reply":
                     "You have no bots yet. Say \"create bot\" and I will "
                     "make one for you."})
-            lines = [f"- {b['name']} ({b['mode']}): silent "
+            lines = [f"- {display_bot_name(b['name'])} ({b['mode']}): silent "
                      f"{'ON' if b['silent'] else 'OFF'}" for b in bots]
             return jsonify({"reply": "Silent trading:\n" + "\n".join(lines)
                             + "\n\nSilent is off by default. Say \"turn on "
@@ -6534,9 +6607,9 @@ def register_routes(app: Flask) -> None:
                     f"{'on' if want else 'off'} silent trading for "
                     "<bot name>\" — or \"show my bots\" to see them."})
             db = _db(app)
-            bot = db.execute(
-                "SELECT * FROM bots WHERE user_id = ? AND name LIKE ?",
-                (user["id"], "%" + parsed["bot_name"] + "%")).fetchone()
+            bot = _find_bot_by_name(
+                db, user["id"], parsed["bot_name"],
+                mode=_bot_mode(db, user["id"]))
             if not bot:
                 return jsonify({"reply":
                     f"I couldn't find a bot called '{parsed['bot_name']}'. "
@@ -6544,7 +6617,7 @@ def register_routes(app: Flask) -> None:
             if int(bot["silent"]) == want:
                 return jsonify({"reply":
                     f"Silent trading is already "
-                    f"{'ON' if want else 'OFF'} for '{bot['name']}'."})
+                    f"{'ON' if want else 'OFF'} for '{display_bot_name(bot['name'])}'."})
             if want == 0:
                 # Turning off is the safe direction: apply at once.
                 db.execute("UPDATE bots SET silent = 0, updated_at = ? "
@@ -6552,15 +6625,15 @@ def register_routes(app: Flask) -> None:
                            (_now(), bot["id"], user["id"]))
                 db.commit()
                 _log(app, user["id"], "silent_off",
-                     f"Silent trading turned OFF for bot '{bot['name']}' "
+                     f"Silent trading turned OFF for bot '{display_bot_name(bot['name'])}' "
                      f"(assistant).", bot["mode"])
                 return jsonify({"reply":
-                    f"Done — silent trading is OFF for '{bot['name']}'. "
+                    f"Done — silent trading is OFF for '{display_bot_name(bot['name'])}'. "
                     f"The loop stops for it right away."})
             # Turning ON always needs a confirm first.
             session["pending_silent"] = [bot["id"], 1]
             return jsonify({"reply":
-                f"Turn on silent trading for '{bot['name']}' "
+                f"Turn on silent trading for '{display_bot_name(bot['name'])}' "
                 f"({bot['mode']})? It will trade on its own within your "
                 f"limits — buy size {bot['buy_size_pct']}%, stop loss "
                 f"{bot['stop_loss_pct']}%, max "
