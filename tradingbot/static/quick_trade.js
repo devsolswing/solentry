@@ -56,6 +56,37 @@
       el.textContent = val + ' ' + qtCoin.symbol + ' ≈ ' + qtCur + (val * qtCoin.price_usd).toFixed(2) + ' at the live price.';
     }
   }
+  function qtFmtExitPrice(v) {
+    if (!(v > 0)) return '';
+    if (v >= 0.01) return '$' + v.toFixed(4);
+    return '$' + v.toPrecision(4);
+  }
+  /* Stop loss / take profit readback on the buy form: next to each
+     % input, the trigger as both the target coin price and the P&L
+     % off the live price (qtCoin.price_usd). The exact trigger is
+     priced off the executed average cost when the buy fills and
+     shown on the result page; this is the live-price preview. */
+  function qtExitReadback() {
+    function one(boxId, pctId, outId, below) {
+      var box = document.getElementById(boxId);
+      var pctInput = document.getElementById(pctId);
+      var out = document.getElementById(outId);
+      if (!box || !pctInput || !out) return;
+      pctInput.disabled = !box.checked;
+      var pct = parseFloat(pctInput.value);
+      if (!box.checked || isNaN(pct) || pct <= 0) { out.textContent = ''; return; }
+      var dir = below ? 'below' : 'above';
+      var price = qtCoin && qtCoin.price_usd != null ? parseFloat(qtCoin.price_usd) : null;
+      if (!(price > 0)) {
+        out.textContent = pct + '% ' + dir + ' the price paid — priced when the buy fills';
+        return;
+      }
+      var target = below ? price * (1 - pct / 100) : price * (1 + pct / 100);
+      out.textContent = 'Sells at ' + qtFmtExitPrice(target) + ' (' + pct + '% ' + dir + ' the live price)';
+    }
+    one('quick-trade-sl', 'quick-trade-sl-pct', 'quick-trade-exit-sl', true);
+    one('quick-trade-tp', 'quick-trade-tp-pct', 'quick-trade-exit-tp', false);
+  }
   function qtSelect(r) {
     qtCoin = r;
     document.getElementById('quick-trade-name').textContent = r.name;
@@ -93,6 +124,7 @@
     qtSelected.classList.remove('hidden');
     qtResults.innerHTML = '';
     qtAmountKind();
+    qtExitReadback();
   }
 
   /* One small Solana tag when the coin has a Solana presence;
@@ -165,6 +197,11 @@
   });
   qtBuyAmount.addEventListener('input', qtEquiv);
   qtSellAmount.addEventListener('input', qtEquiv);
+  ['quick-trade-sl', 'quick-trade-sl-pct', 'quick-trade-tp', 'quick-trade-tp-pct'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', qtExitReadback);
+  });
+  qtExitReadback();
 
   /* A link can open the popup directly: /wallet?trade=buy, or the
      coins page with ?trade=sell — used by the home BUY/SELL buttons

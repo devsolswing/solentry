@@ -51,10 +51,12 @@ from .db import init_db
 from .coin_meta import (ensure_coin_meta, get_coin_meta, metadata_pda,
                         parse_metadata_account)
 from .devnet_watchlist import active_mints, enrich_scan
-from .executor import (_skip, execute_real_trade, is_curve_complete,
-                       pending_signature_for, reconcile_pending_trades)
+from .executor import (_skip, execute_real_trade, fix_for_skip_reason,
+                       is_curve_complete, pending_signature_for,
+                       reconcile_pending_trades)
 from . import gate_fuel as gate_fuel_mod
 from . import pit as pit_mod
+from .user_exits import clear_user_exit, user_exit_reason
 from .jupiter_executor import execute_jupiter_swap
 from .ledger import record_trade
 from .paper import (InsufficientCash, InsufficientHolding, paper_bankroll,
@@ -4015,6 +4017,227 @@ def _fast_exit_loop(db_path: str, cfg, feed, rpc_factory=None,
                   f"({action.get('reason', '')})", flush=True)
 
 
+def _remove_user_holding(db, user_id: int, coin: str, amount: float) -> None:
+    """Take `amount` out of real_holdings after a loop-fired user
+    exit sold it — the mirror of routes._remove_real_holding,
+    kept here so the loop does not import the route module. The
+    exit always sells the whole holding, so this normally deletes
+    the row; a partial amount shrinks it instead."""
+    row = db.execute(
+        "SELECT amount FROM real_holdings WHERE user_id = ? "
+        "AND coin_id = ?",
+        (user_id, coin)).fetchone()
+    if not row:
+        return
+    remaining = float(row["amount"]) - amount
+    if remaining <= 0:
+        db.execute("DELETE FROM real_holdings WHERE user_id = ? "
+                   "AND coin_id = ?", (user_id, coin))
+    else:
+        db.execute("UPDATE real_holdings SET amount = ? "
+                   "WHERE user_id = ? AND coin_id = ?",
+                   (remaining, user_id, coin))
+    db.commit()
+
+
+def _fire_user_exit(db, cfg, rpc_factory, real_executor, feed,
+                    prices_data, user_id: int, coin: str, mode: str,
+                    amount: float, price: float, reason: str, row,
+                    decision_price_as_of, sol_price_usd):
+    """Sell a User holding whose stop loss / take profit fired.
+    Returns one outcome action dict. Paper sells through the
+    ledger; real sells through the same executor the bots use
+    (venue by curve, signing bot) with the same fuel gates as a
+    bot sell — fuel, then the last-credit reserve. A failed sell
+    logs the reason, the fix, and the transaction ID — or says
+    plainly there is none when the trade never reached the chain.
+    The exit row is cleared only when the holding is fully sold
+    (or already gone); a failed sell keeps its rule so the next
+    pass retries it."""
+    label = "stop loss" if reason == "stop_loss" else "take profit"
+    if mode == "paper":
+        try:
+            usd = paper_sell(db, user_id, coin, amount, price, _now(),
+                             bot_id=None,
+                             exit_reason=f"user {label}")
+        except InsufficientHolding:
+            clear_user_exit(db, user_id, coin, mode)
+            _log(db, user_id, "user_exit",
+                 f"Your {label} for {coin} fired, but the holding "
+                 f"was already gone — rule cleared.", "paper")
+            return {"action": "skip", "coin": coin,
+                    "reason": "holding already gone"}
+        except Exception as exc:
+            _log(db, user_id, "user_exit",
+                 f"Your {label} for {coin} fired, but the paper "
+                 f"sell failed — {str(exc)[:120]}. Fix: try selling "
+                 f"it by hand from the coin page.", "paper")
+            return {"action": "skip", "coin": coin,
+                    "reason": f"paper sell failed: {str(exc)[:80]}"}
+        clear_user_exit(db, user_id, coin, mode)
+        _log(db, user_id, "user_exit",
+             f"Your {label} for {coin} fired — sold {amount:.4f} "
+             f"for ${usd:.2f} (paper).", "paper")
+        return {"action": "sell", "coin": coin, "amount": amount,
+                "usd": usd, "reason": f"user {label}"}
+    # Real: the same gates as a bot sell. A sweep sell is the only
+    # spender of the last credit, so an ordinary user-exit sell at
+    # fuel == 1 waits for the sweep — which exits this holding
+    # anyway.
+    if not gate_fuel_mod.enforce_fuel_gate(db, user_id):
+        _log(db, user_id, "user_exit",
+             f"Your {label} for {coin} fired, but the sell is "
+             f"skipped — out of $GATE fuel (0 trades left). Buy a "
+             f"$GATE package to resume.", "real")
+        return {"action": "skip", "coin": coin, "reason": "out of fuel"}
+    if gate_fuel_mod.exit_all_pending(db, user_id):
+        _log(db, user_id, "user_exit",
+             f"Your {label} for {coin} fired, but the sell is "
+             f"skipped — your last $GATE trade is reserved to exit "
+             f"all positions at once.", "real")
+        return {"action": "skip", "coin": coin,
+                "reason": "last trade reserved"}
+    result = _call_real_executor(
+        real_executor, None, user_id, coin, "sell", amount, price,
+        db, cfg, decision_price_as_of=decision_price_as_of,
+        sol_price_usd=sol_price_usd)
+    if result.get("status") != "executed":
+        why = result.get("reason", "real execution failed")
+        sig = result.get("signature")
+        tx_note = (f"Transaction: {sig}." if sig else
+                   "No transaction reached the chain — there is no "
+                   "transaction ID.")
+        _log(db, user_id, "user_exit",
+             f"Your {label} for {coin} fired, but the sell failed "
+             f"— {why}. Fix: {fix_for_skip_reason(why)} {tx_note}",
+             "real")
+        return {"action": "skip", "coin": coin, "reason": why}
+    sol_received = result.get("sol_received")
+    try:
+        sol_received = (float(sol_received)
+                        if sol_received is not None else None)
+    except (TypeError, ValueError):
+        sol_received = None
+    exec_price = None
+    pnl_usd = None
+    if sol_received is not None and sol_received > 0 and amount > 0:
+        if sol_price_usd is not None:
+            proceeds_usd = sol_received * sol_price_usd
+            exec_price = proceeds_usd / amount
+            try:
+                avg = float(row["entry_price"])
+            except (TypeError, ValueError):
+                avg = None
+            if avg is not None:
+                pnl_usd = proceeds_usd - amount * avg
+    # Ledger row (bot None = a manual trade) so the exit shows in
+    # the Closed list, then one fuel credit for the executed trade.
+    trade_id = record_trade(
+        db, user_id, None, coin, "sell", amount,
+        exec_price if exec_price is not None else price,
+        (exec_price * amount if exec_price is not None
+         else amount * price),
+        pnl_usd=pnl_usd, exit_reason=f"user {label}", mode="real",
+        now=_now(), signature=result.get("signature"),
+        sol_amount=sol_received)
+    gate_fuel_mod.consume_fuel(db, user_id, trade_id,
+                               result.get("signature"))
+    # The holding itself leaves real_holdings here: the executor
+    # sells the coins but never touches the holdings table (the
+    # manual sell route removes it explicitly, and so must this
+    # exit — otherwise the sold holding would keep showing on
+    # Home). A bookkeeping failure here never un-sells the trade.
+    try:
+        _remove_user_holding(db, user_id, coin, amount)
+    except Exception as exc:  # bookkeeping only, never breaks the exit
+        print(f"[silent-loop] user-exit holding removal failed: {exc}",
+              flush=True)
+    clear_user_exit(db, user_id, coin, mode)
+    sold_line = (f"Your {label} for {coin} fired — sold "
+                 f"{amount:.4f}")
+    if sol_received is not None:
+        sold_line += f" for {sol_received:.4f} SOL"
+    _log(db, user_id, "user_exit",
+         sold_line + f". Signature: "
+         f"{str(result.get('signature', ''))[:12]}... Signing bot: "
+         f"{result.get('signing_bot', '')}.", "real")
+    return {"action": "sell", "coin": coin, "amount": amount,
+            "reason": f"user {label}", "trade_id": trade_id,
+            "signature": result.get("signature")}
+
+
+def _check_user_exits(db, cfg, rpc_factory, real_executor, feed=None,
+                      prices_data=None, trenches_data=None,
+                      decision_price_as_of=None) -> list:
+    """One pass over every User stop loss / take profit row — for
+    EVERY user with a row, not only users with a silent bot: User
+    buys happen exactly when no bot is running, so these exits
+    must not wait for a bot. Prices come from the loop's own
+    resolver (feed tick first, else one batched chain read); a
+    coin with no live price is never sold blind — it waits for
+    the next pass. Runs on the loop cadence, not the tick-driven
+    fast-exit thread: a User exit fires within one loop pass of
+    its trigger. Returns outcome dicts in the same shape as the
+    per-bot outcomes (bot_id None, name \"User exits\")."""
+    rows = db.execute(
+        "SELECT * FROM user_exits ORDER BY user_id, mode, coin_id"
+        ).fetchall()
+    if not rows:
+        return []
+    coins = [r["coin_id"] for r in rows]
+    try:
+        prices = _chain_price_usd(coins, feed, cfg, rpc_factory)
+    except Exception:
+        prices = {}
+    sol_price = _live_sol_price_usd(feed, prices_data)
+    grouped: dict = {}
+    for row in rows:
+        grouped.setdefault((row["user_id"], row["mode"]), []).append(row)
+    outcomes = []
+    for (user_id, mode), user_rows in grouped.items():
+        actions = []
+        unpriced = 0
+        for row in user_rows:
+            coin = row["coin_id"]
+            price = prices.get(coin)
+            if price is None or price <= 0:
+                unpriced += 1
+                continue
+            reason = user_exit_reason(row, price)
+            if reason is None:
+                continue
+            table = ("paper_holdings" if mode == "paper"
+                     else "real_holdings")
+            held_row = db.execute(
+                f"SELECT amount FROM {table} WHERE user_id = ? "
+                f"AND coin_id = ?",
+                (user_id, coin)).fetchone()
+            amount = (float(held_row["amount"])
+                      if held_row else 0.0)
+            if amount <= 0:
+                # Exit set but nothing held — a stale rule from a
+                # manual sell that already cleared the holding.
+                clear_user_exit(db, user_id, coin, mode)
+                actions.append({"action": "skip", "coin": coin,
+                                "reason": "exit set but nothing "
+                                "held — rule cleared"})
+                continue
+            actions.append(_fire_user_exit(
+                db, cfg, rpc_factory, real_executor, feed,
+                prices_data, user_id, coin, mode, amount, price,
+                reason, row, decision_price_as_of, sol_price))
+        if unpriced:
+            actions.append(
+                {"action": "skip",
+                 "reason": f"no live price for {unpriced} coin(s) "
+                 f"with an exit set"})
+        if actions:
+            outcomes.append({"bot_id": None, "bot_name": "User exits",
+                             "user_id": user_id, "mode": mode,
+                             "actions": actions, "error": None})
+    return outcomes
+
+
 def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
              rpc_factory=None, real_executor=None,
              trenches_fetcher=None, feed=None,
@@ -4173,6 +4396,18 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
             _log(db, _uid, "silent_skip",
                  f"Exit-all sweep failed — {str(_exc)[:120]}. No trade "
                  f"was made.", "real")
+    # User exits (buy-flow rebuild, 2026-11-26): stop loss / take
+    # profit on hand-bought holdings, checked for EVERY user with
+    # a rule — not only users with a silent bot evaluated above.
+    # A failed check never breaks the loop.
+    try:
+        outcomes.extend(_check_user_exits(
+            db, cfg, rpc_factory, real_executor, feed=feed,
+            prices_data=prices_data, trenches_data=trenches_data,
+            decision_price_as_of=decision_price_as_of))
+    except Exception as exc:  # a failed user-exit pass never stops the loop
+        print(f"[silent-loop] user-exit check failed: {exc}",
+              flush=True)
     _record_snapshots(db, cfg, prices_data, trenches_data, rpc_factory,
                       {o["user_id"] for o in outcomes})
     # builderBot reviews each evaluated bot's trade ledger: a losing

@@ -62,6 +62,7 @@ from .config import Config
 from .executor import (execute_real_trade, fix_for_skip_reason,
                        is_curve_complete, send_and_confirm)
 from .jupiter_executor import execute_jupiter_swap
+from .user_exits import set_user_exit
 from .paper import (PAPER_BUY_HAIRCUT_PCT, InsufficientCash,
                     InsufficientHolding, paper_buy as ledger_buy,
                     paper_sell as ledger_sell)
@@ -1120,6 +1121,71 @@ def _parse_buy_amount(app, form, price, sol_price_usd):
             return None, None, "SOL price unavailable right now."
         return usd / sol_price_usd, usd, None
     return 0.0, None, None
+
+
+def _parse_exit_fields(form):
+    """(stop_loss_pct, take_profit_pct, error) from the buy form's
+    stop loss / take profit checkboxes. The % is the move off the
+    price paid: stop loss is the drop %, take profit the gain %.
+    Take profit is ALWAYS a positive profit % (James, 2026-11-26):
+    a zero or negative number is refused here — a loss can never
+    be stored as a take profit. A checkbox left unticked means
+    that exit is not set."""
+    sl_pct = None
+    tp_pct = None
+    if form.get("stop_loss"):
+        raw = (form.get("stop_loss_pct") or "").strip()
+        try:
+            sl_pct = float(raw)
+        except ValueError:
+            return None, None, "Stop loss must be a number."
+        if sl_pct <= 0:
+            return None, None, (
+                "Stop loss must be a positive % below the price paid.")
+    if form.get("take_profit"):
+        raw = (form.get("take_profit_pct") or "").strip()
+        try:
+            tp_pct = float(raw)
+        except ValueError:
+            return None, None, "Take profit must be a number."
+        if tp_pct <= 0:
+            return None, None, (
+                "Take profit must be a positive % — a loss can never "
+                "be a take profit.")
+    return sl_pct, tp_pct, None
+
+
+def _store_user_exit_for_buy(db, user_id: int, coin_id: str, mode: str,
+                             entry_price, sl_pct, tp_pct):
+    """Store the stop loss / take profit set on a buy, and return
+    the note lines for the result page. The triggers are priced
+    off the EXECUTED average cost (the holding's merged average
+    after this buy), never the mark price. Nothing is stored when
+    neither exit was ticked, or when no entry price exists to base
+    the triggers on."""
+    if sl_pct is None and tp_pct is None:
+        return []
+    if entry_price is None or entry_price <= 0:
+        return ["Stop loss / take profit were not set — no entry "
+                "price to base them on."]
+    try:
+        row = set_user_exit(db, user_id, coin_id, mode, entry_price,
+                            sl_pct, tp_pct)
+    except ValueError as exc:
+        return [f"Stop loss / take profit were not set — {exc}"]
+    if row is None:
+        return []
+    lines = []
+    if sl_pct is not None:
+        lines.append(
+            f"Stop loss set: sells at {fmt_price_sig(row['stop_price'])} "
+            f"({sl_pct:g}% below the {fmt_price_sig(entry_price)} paid).")
+    if tp_pct is not None:
+        lines.append(
+            f"Take profit set: sells at "
+            f"{fmt_price_sig(row['take_profit_price'])} "
+            f"({tp_pct:g}% above the {fmt_price_sig(entry_price)} paid).")
+    return lines
 
 
 def _trade_failure_lines(result, side: str):
@@ -3861,6 +3927,12 @@ def register_routes(app: Flask) -> None:
             # Paper buys price from the resolved feed-tick price
             # (helius stream) — the fill rate comes from the single
             # source, never a Jupiter quote.
+            sl_pct, tp_pct, exit_error = _parse_exit_fields(
+                request.form)
+            if exit_error:
+                return _coin_result(
+                    "Nothing was bought", [exit_error], False,
+                    coin_id_resolved, label)
             result = _paper_buy_for(app, user, coin_id_resolved, usd,
                                     request.form.get("bot_id") or "")
             if not result["ok"]:
@@ -3880,6 +3952,18 @@ def register_routes(app: Flask) -> None:
                     lines.append(
                         f"Bot '{result['bot']['name']}' is looking "
                         f"after this coin.")
+                else:
+                    lines.append("User buy — no bot watching this coin.")
+            # Stop loss / take profit off the executed average cost.
+            held = db.execute(
+                "SELECT avg_price FROM paper_holdings WHERE user_id = ? "
+                "AND coin_id = ?",
+                (user["id"], coin_id_resolved)).fetchone()
+            entry_price = (float(held["avg_price"])
+                           if held else None)
+            lines.extend(_store_user_exit_for_buy(
+                db, user["id"], coin_id_resolved, "paper", entry_price,
+                sl_pct, tp_pct))
             return _coin_result(
                 "Bought" if result["ok"] else "Nothing was bought",
                 lines, result["ok"], coin_id_resolved, label)
@@ -3906,6 +3990,11 @@ def register_routes(app: Flask) -> None:
             return _coin_result(
                 "Nothing was bought", ["Amount must be more than 0."],
                 False, coin_id_resolved, label)
+        sl_pct, tp_pct, exit_error = _parse_exit_fields(request.form)
+        if exit_error:
+            return _coin_result(
+                "Nothing was bought", [exit_error], False,
+                coin_id_resolved, label)
         # A Jupiter-routed coin trades through the Jupiter executor
         # (mainnet, gated behind James's go-ahead); anything else
         # is a pump.fun mint and trades through the pump.fun
@@ -4020,6 +4109,7 @@ def register_routes(app: Flask) -> None:
         gate_fuel_mod.consume_fuel(
             db, user["id"], None, result.get("signature"))
         coin_amount = float(result.get("coin_amount") or 0)
+        _exit_lines = []
         # Cost basis from the SOL the chain actually took, when the
         # executor reported it — the amount asked for is not what
         # landed (slippage + network fee).
@@ -4036,6 +4126,11 @@ def register_routes(app: Flask) -> None:
         if coin_amount > 0:
             _record_real_holding(db, user["id"], coin_id_resolved,
                                  coin_amount, avg_price)
+            # Stop loss / take profit off the executed average cost
+            # (the holding's merged average after this buy).
+            _exit_lines = _store_user_exit_for_buy(
+                db, user["id"], coin_id_resolved, "real", avg_price,
+                sl_pct, tp_pct)
             # First time this coin is held: fetch + store its
             # official logo (see the paper-buy hook above). Best
             # effort — never blocks the trade.
@@ -4062,6 +4157,9 @@ def register_routes(app: Flask) -> None:
                  f"{amount_sol:.4f} SOL {venue_label}.",
                  f"Signature: {result.get('signature', '')}",
                  f"Signing bot: {result.get('signing_bot', '')}."]
+        if bot is None:
+            lines.append("User buy — no bot watching this coin.")
+        lines.extend(_exit_lines)
         if new_sol is not None:
             lines.append(f"New wallet balance: {new_sol:.4f} SOL.")
         return _coin_result("Bought", lines, True, coin_id_resolved, label)

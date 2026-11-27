@@ -147,6 +147,33 @@ CREATE TABLE IF NOT EXISTS real_holdings (
     FOREIGN KEY (user_id) REFERENCES users (id)
 );
 
+-- User exits (buy-flow rebuild, 2026-11-26): the stop loss / take
+-- profit a user sets on a hand-bought (User) holding — one row per
+-- (user, coin, mode). The loop watches these holdings even when no
+-- bot is running: a live price at or beyond a trigger sells the
+-- whole holding. stop_loss_pct / take_profit_pct are the % off the
+-- entry price the user typed (take profit is always positive — the
+-- route refuses a negative one); stop_price / take_profit_price are
+-- the trigger prices in USD, computed from the executed average
+-- cost at buy time and recomputed when a later buy moves the
+-- average. A NULL pct means that exit is not set. The row is
+-- deleted when the holding is fully sold (manual sell or loop exit).
+CREATE TABLE IF NOT EXISTS user_exits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    coin_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    stop_loss_pct REAL,
+    take_profit_pct REAL,
+    stop_price REAL,
+    take_profit_price REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, coin_id, mode),
+    FOREIGN KEY (user_id) REFERENCES users (id)
+);
+
 -- Coin identity + logos, one row per mint (pump.fun-only app): the
 -- coin's real official name + ticker and its official logo URL,
 -- fetched once (on purchase, or lazily on render of a held row) from

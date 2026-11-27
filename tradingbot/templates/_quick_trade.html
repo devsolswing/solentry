@@ -46,6 +46,14 @@
           </select>
         </label>
         {% endif %}
+        <label><input type="checkbox" name="stop_loss" value="1" id="quick-trade-sl"> Stop loss
+          <input type="number" name="stop_loss_pct" step="any" min="0" placeholder="5" id="quick-trade-sl-pct">
+          <span class="muted small" id="quick-trade-exit-sl"></span>
+        </label>
+        <label><input type="checkbox" name="take_profit" value="1" id="quick-trade-tp"> Take profit
+          <input type="number" name="take_profit_pct" step="any" min="0" placeholder="10" id="quick-trade-tp-pct">
+          <span class="muted small" id="quick-trade-exit-tp"></span>
+        </label>
         <button class="btn big" type="submit" id="quick-trade-buy-btn" disabled>Buy</button>
       </form>
       <h3>Sell</h3>
