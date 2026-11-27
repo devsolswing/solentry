@@ -32,6 +32,10 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>Amount ({{ 'CAD $' if mode == 'paper' else '$' }}) <input id="quick-trade-buy-amount" type="number" name="usd" step="any" min="0" placeholder="0" required></label>
         {% set pct_buttons = pct_buttons_quick %}{% set pct_buttons_target = "usd" %}{% include "_pct_buttons.html" %}
+        {# Batch 5: the homepage buy popup is manual-only — no bot
+           picker at all here, not even a "no bot" option. The
+           coins page (manual_buy_only unset) keeps the picker. #}
+        {% if not (manual_buy_only is defined and manual_buy_only) %}
         {% if mode == 'paper' %}
         <label>Bot to look after this coin (optional)
           <select name="bot_id">
@@ -47,6 +51,7 @@
           </select>
         </label>
         {% endif %}
+        {% endif %}
         <label><input type="checkbox" name="stop_loss" value="1" id="quick-trade-sl"> Stop loss
           <input type="number" name="stop_loss_pct" step="any" min="0" placeholder="5" id="quick-trade-sl-pct">
           <span class="muted small" id="quick-trade-exit-sl"></span>
@@ -55,6 +60,10 @@
           <input type="number" name="take_profit_pct" step="any" min="0" placeholder="10" id="quick-trade-tp-pct">
           <span class="muted small" id="quick-trade-exit-tp"></span>
         </label>
+        {# Batch 5: manual-trade warning, homepage popup only. #}
+        {% if manual_buy_only is defined and manual_buy_only %}
+        <p class="muted small"><strong>Manual trade — this one is on you.</strong> Be careful of rugs: a new coin can go to zero fast.</p>
+        {% endif %}
         <button class="btn big" type="submit" id="quick-trade-buy-btn" disabled>Buy</button>
       </form>
       <h3>Sell</h3>

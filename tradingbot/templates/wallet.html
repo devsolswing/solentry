@@ -175,7 +175,10 @@
     <span class="muted small">Fresh pump.fun tokens by 1h gain — tap to trade them →</span>
   </a>
 </div>
-{% include "_quick_trade.html" %}
+{# Batch 5: the homepage buy popup is manual-only — no bot picker
+   on its buy form, and a plain rug warning near the Buy button.
+   The coins page keeps the picker (manual_buy_only unset there). #}
+{% with manual_buy_only=True %}{% include "_quick_trade.html" %}{% endwith %}
 {# Receive window: your app wallet address + copy. Opens from the
    Receive button on the home page; a separate window, not a page. #}
 <div class="overlay hidden" id="home-receive-overlay" role="dialog" aria-label="Receive SOL">
