@@ -1,5 +1,13 @@
 {% extends "base.html" %}
 {% block title %}Trenches — SolEntry{% endblock %}
+{# 30s meta-refresh BACKSTOP: if the live JS below is stale or dead
+   (the 2026-11-26 freeze — the page rendered once and never
+   updated because its 5s poll never fired on the phone), the page
+   still reloads with fresh server rows every 30s instead of sitting
+   frozen. live.js removes this tag the moment its poll starts, so
+   with working JS the 5s in-place poll owns freshness and the page
+   never reloads on its own. #}
+{% block extra_head %}<meta http-equiv="refresh" content="30">{% endblock %}
 {% block body_class %}fit-screen trenches-theme{% endblock %}
 {% block content %}
 <div class="home-screen trenches-screen">
@@ -14,7 +22,7 @@
   </div>
 
   <h1 class="trenches-title">🔥 Trenches</h1>
-  <p class="muted small">Fresh pump.fun / PumpSwap tokens — top 10 by 1-hour gain. Tap one for the same Buy / Sell / Sell all popup as any other coin. The list refreshes live every 5 seconds. <strong>{{ mode_label }}</strong></p>
+  <p class="muted small">Fresh pump.fun / PumpSwap tokens — top 10 by 5-minute gain. Tap one for the same Buy / Sell / Sell all popup as any other coin. The list refreshes live every 5 seconds. <strong>{{ mode_label }}</strong></p>
 
   <div class="coin-list-panel trenches-panel">
     <div class="coin-list trenches-list" data-trenches-list>

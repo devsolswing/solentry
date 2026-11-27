@@ -6,7 +6,7 @@ import os
 import secrets
 from datetime import timedelta
 
-from flask import Flask, g
+from flask import Flask, g, url_for
 
 from .config import Config, load_dotenv
 from .db import init_db
@@ -31,6 +31,30 @@ def create_app(config: Config | None = None) -> Flask:
     cfg = config or Config()
     app = Flask(__name__, template_folder="templates",
                 static_folder="static")
+    # Cache-busting for the app shell (JS + CSS): the file's mtime
+    # rides on the URL (?v=<mtime>), so a deploy can never leave a
+    # phone running stale JS — the URL changes exactly when the
+    # file does, and the browser caches normally in between. The
+    # 2026-11-26 Trenches freeze was a page whose 5s poll never
+    # fired on the phone while the server side was correct; a stale
+    # cached live.js is the prime suspect, and this makes it
+    # impossible by construction. Templates use
+    # {{ static_url('live.js') }} instead of url_for('static', ...)
+    # for the shell files.
+    _static_mtimes: dict = {}
+
+    def _static_url(filename: str) -> str:
+        try:
+            path = os.path.join(app.static_folder, filename)
+            mtime = _static_mtimes.get(filename)
+            if mtime is None:
+                mtime = int(os.path.getmtime(path))
+                _static_mtimes[filename] = mtime
+            return url_for("static", filename=filename, v=mtime)
+        except Exception:
+            return url_for("static", filename=filename)
+
+    app.jinja_env.globals["static_url"] = _static_url
     app.config["SECRET_KEY"] = cfg.session_secret or os.urandom(32).hex()
     # Session cookies: HttpOnly (no JS access), SameSite=Lax (no
     # cross-site posting), Secure over HTTPS (Railway serves HTTPS).

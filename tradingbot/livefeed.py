@@ -101,6 +101,16 @@ class LiveFeed:
         self._pending: dict = {}
         # mint -> subscriber count (browsers watching it).
         self._mint_subs: dict = {}
+        # Mints the server itself watches (the current trenches-scan
+        # candidates), set by the silent loop / the trenches page —
+        # NOT refcounted: one replaceable set, so the stream keeps
+        # ticking the coins on the Trenches page even when no
+        # browser is watching them. Before this, the stream watched
+        # held + browser-watched mints only, and with no browser on
+        # the page and quiet holdings it delivered nothing for an
+        # hour (2026-11-26: 39x "no stream data for 45s") while the
+        # fresh coins the page shows were never subscribed at all.
+        self._server_watched: set = {}
         # Optional tick listener: set by the silent loop so a tick
         # that crosses a stop can trigger the sell path at once
         # (tick-driven exits, tuning build 2026-11-15). The
@@ -366,6 +376,18 @@ class LiveFeed:
     def watched_mints(self) -> set:
         with self._lock:
             return set(self._mint_subs)
+
+    def set_server_watched(self, mints) -> None:
+        """Replace the server-watched mint set (see __init__).
+        The caller passes the current trenches-scan candidates;
+        an empty list clears the set. Never raises."""
+        with self._lock:
+            self._server_watched = {m for m in (mints or []) if m}
+
+    def server_watched_mints(self) -> set:
+        """The server-watched mints (trenches candidates), or empty."""
+        with self._lock:
+            return set(self._server_watched)
 
     # --- sanitizers (silent loop + page renders) --------------------------
     def sanitize_trenches(self, data: dict | None) -> dict | None:

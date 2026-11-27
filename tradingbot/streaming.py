@@ -529,22 +529,47 @@ class HeliusStream:
         return base + self._api_key
 
     def _desired_mints(self) -> set:
-        """Held mints (bot positions + paper holdings) plus
-        browser-watched mints — the stream-what-you-hold set.
-        Capped, deterministically, so a pathological set cannot
-        open unbounded subscriptions."""
-        mints = set(self._feed.watched_mints())
+        """Held mints (bot positions + paper holdings) first, then
+        browser-watched mints, then the server-watched trenches
+        candidates — the stream-what-you-hold set, plus the coins
+        on the Trenches page. Capped, deterministically, so a
+        pathological set cannot open unbounded subscriptions. The
+        cap cuts the lowest-priority tier first: held mints are
+        never crowded out by the candidate set (the old code cut
+        alphabetically, so a churn of fresh coins could drop a
+        held coin's subscription). Before the server-watched tier
+        existed, the stream watched held + browser-watched only —
+        with no browser on the page and quiet holdings it
+        delivered nothing for an hour (2026-11-26: 39x "no stream
+        data for 45s") while the fresh coins the page shows were
+        never subscribed at all.
+        """
         try:
-            mints |= set(self._feed._held_mints_from_db())
+            held = set(self._feed._held_mints_from_db())
         except Exception as exc:
             log.warning("[helius-stream] held-mints read failed: %s",
                         exc)
-        if len(mints) > self._max_mints:
+            held = set()
+        watched = set(self._feed.watched_mints())
+        server = set()
+        getter = getattr(self._feed, "server_watched_mints", None)
+        if callable(getter):
+            try:
+                server = set(getter())
+            except Exception:
+                server = set()
+        ordered = sorted(held)
+        ordered += sorted(watched - held)
+        ordered += sorted(server - held - watched)
+        if len(ordered) > self._max_mints:
             log.warning("[helius-stream] %d mints wanted, capping "
-                        "stream subscriptions at %d",
-                        len(mints), self._max_mints)
-            mints = set(sorted(mints)[:self._max_mints])
-        return mints
+                        "stream subscriptions at %d (held %d, "
+                        "watched %d, server %d)",
+                        len(ordered), self._max_mints, len(held),
+                        len(watched - held),
+                        len(server - held - watched))
+            ordered = ordered[:self._max_mints]
+        return set(ordered)
 
     def _rpc_client(self):
         if self._rpc_factory is not None:
@@ -945,8 +970,10 @@ class HeliusStream:
                 if now - self._last_message_at > \
                         WATCHDOG_SILENCE_SECONDS:
                     raise ConnectionError(
-                        "no stream data for %.0fs"
-                        % WATCHDOG_SILENCE_SECONDS)
+                        "no stream data for %.0fs "
+                        "(%d curve + %d pool subscriptions)"
+                        % (WATCHDOG_SILENCE_SECONDS,
+                           len(self._subs), len(self._pools)))
                 if now >= next_refresh_at:
                     self._refresh_subscriptions(ws)
                     next_refresh_at = now + SUBSCRIPTION_REFRESH_SECONDS

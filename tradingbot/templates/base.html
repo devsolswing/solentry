@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}SolEntry{% endblock %}</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="{{ static_url('style.css') }}">
+{% block extra_head %}{% endblock %}
 {# PWA: Android Chrome offers "Install app"; the app then opens
    full-screen (standalone) like a native app. Theme color matches
    the dark-red topbar (#1a0805); gold stays #ffd700 in the CSS. #}
@@ -105,12 +106,12 @@ if ("serviceWorker" in navigator) {
 </footer>
 {% endif %}
 {% endblock %}
-<script src="{{ url_for('static', filename='copy.js') }}"></script>
-<script src="{{ url_for('static', filename='ui.js') }}"></script>
-<script src="{{ url_for('static', filename='quick_trade.js') }}"></script>
-<script src="{{ url_for('static', filename='coin_tick.js') }}"></script>
-<script src="{{ url_for('static', filename='chart.js') }}"></script>
-<script src="{{ url_for('static', filename='live.js') }}"></script>
+<script src="{{ static_url('copy.js') }}"></script>
+<script src="{{ static_url('ui.js') }}"></script>
+<script src="{{ static_url('quick_trade.js') }}"></script>
+<script src="{{ static_url('coin_tick.js') }}"></script>
+<script src="{{ static_url('chart.js') }}"></script>
+<script src="{{ static_url('live.js') }}"></script>
 {# $GATE fuel popups (James, 2026-11-23): included whenever the page
    carries the bundles — homepage, wallet page, bots page, and the
    no-fuel result page. Hidden until opened. #}

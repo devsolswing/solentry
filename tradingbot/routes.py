@@ -1210,24 +1210,42 @@ def _reprice_trenches_rows(app, rows: list,
     return out
 
 
+def _set_server_watched(app, rows) -> None:
+    """Tell the live feed to watch the current trenches rows, so
+    the Helius stream subscribes them and ticks them live even
+    when no browser is watching (see
+    LiveFeed.set_server_watched). Best-effort: a missing feed or
+    a failure never breaks the page render — the poll-path chain
+    read still prices the rows."""
+    try:
+        feed = app.config.get("LIVE_FEED") if app is not None else None
+        setter = getattr(feed, "set_server_watched", None)
+        if callable(setter):
+            setter([r.get("mint") for r in (rows or [])
+                    if r.get("mint")])
+    except Exception:
+        pass
+
+
 def _trenches_list(app=None, drop_unpriced: bool = True) -> tuple[list, str | None]:
     """Top trenches rows: [{mint, symbol, name, price_usd,
-    change_1h_pct, price_display, sparkline_svg}], best 1-hour gain
-    first, at most 10. Returns (rows, error). The scan's order is
-    its own 1-hour-gain ranking (discovery order); the prices, 1h
-    changes and sparklines on the rows are the single source (see
-    _reprice_trenches_rows). Without `app` the raw scan rows are
-    returned (name/symbol lookup only — _trenches_entry never shows
-    a price). drop_unpriced=False keeps a row neither source can
-    price (reading "no data") — the live list refresh uses that,
-    so a stall cannot yank rows off the page; the page render
-    drops unpriced rows."""
+    change_1h_pct, change_5m_pct, price_display, sparkline_svg}],
+    best 5-minute gain first, at most 10. Returns (rows, error).
+    The scan's order is its own 5-minute-gain ranking (discovery
+    order); the prices, 1h changes and sparklines on the rows are
+    the single source (see _reprice_trenches_rows). Without `app`
+    the raw scan rows are returned (name/symbol lookup only —
+    _trenches_entry never shows a price). drop_unpriced=False
+    keeps a row neither source can price (reading "no data") —
+    the live list refresh uses that, so a stall cannot yank rows
+    off the page; the page render drops unpriced rows."""
     now = time.time()
     if (_TRENCHES_CACHE["rows"] is not None
             and now - _TRENCHES_CACHE["at"] < 120):
         cached = _TRENCHES_CACHE["rows"]
         if app is None:
             return cached, _TRENCHES_CACHE["error"]
+        _set_server_watched(app, cached)
         return (_reprice_trenches_rows(app, cached,
                                        drop_unpriced=drop_unpriced),
                 _TRENCHES_CACHE["error"])
@@ -1235,6 +1253,11 @@ def _trenches_list(app=None, drop_unpriced: bool = True) -> tuple[list, str | No
         scan = fetch_trenches_scan()
     except Exception as exc:
         scan = {"candidates": [], "error": str(exc)[:160]}
+    if scan.get("error"):
+        # The scan is the ONLY discovery path for the Trenches
+        # list: a failure here is never silent — it is the reason
+        # the page shows "unavailable" instead of coins.
+        log.warning("[trenches-feed] scan failed: %s", scan["error"])
     rows = []
     for entry in scan.get("candidates") or []:
         rows.append({
@@ -1243,17 +1266,30 @@ def _trenches_list(app=None, drop_unpriced: bool = True) -> tuple[list, str | No
             "name": entry.get("name") or entry["symbol"],
             "price_usd": entry["price_usd"],
             "change_1h_pct": entry.get("change_1h_pct"),
+            "change_5m_pct": entry.get("change_5m_pct"),
         })
+    # Rank by the 5-minute gain — what is moving NOW — not the
+    # 1-hour gain: a coin that pumped hours ago kept a big 1h
+    # figure and held its slot for an hour (2026-11-26 live data:
+    # a coin at +488% 1h with a +0.6% 5m sat #2), so fresh coins
+    # that had not pumped yet never appeared. The bot buys on the
+    # same 5-minute gain (TRENCHES_RULES: gain_5m_pct, 3.4%), so
+    # the page and the bot now agree on what is hot. A coin with
+    # no 5-minute figure (no trades in 5 minutes) sorts last.
     rows.sort(key=lambda r: (
-        r["change_1h_pct"] is None,
-        -(r["change_1h_pct"] or 0.0)))
+        r["change_5m_pct"] is None,
+        -(r["change_5m_pct"] or 0.0)))
     rows = rows[:10]
     error = scan.get("error")
+    if not rows and not error:
+        log.warning("[trenches-feed] scan returned zero candidates "
+                    "with no error — the list is empty, not broken")
     _TRENCHES_CACHE["at"] = now
     _TRENCHES_CACHE["rows"] = rows
     _TRENCHES_CACHE["error"] = error
     if app is None:
         return rows, error
+    _set_server_watched(app, rows)
     return _reprice_trenches_rows(app, rows,
                                  drop_unpriced=drop_unpriced), error
 
@@ -1725,7 +1761,14 @@ def register_routes(app: Flask) -> None:
 
     @app.route("/sw.js")
     def service_worker():
-        return app.send_static_file("sw.js")
+        # The service worker IS the update mechanism for the whole
+        # app shell: it must never be served stale. Flask's static
+        # default (12h max-age) let a phone run an old worker for
+        # up to ~24h after a deploy, and the old worker kept
+        # serving its cached shell. No-store, always fresh.
+        resp = make_response(app.send_static_file("sw.js"))
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.route("/")
     def index():

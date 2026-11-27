@@ -311,6 +311,12 @@
     if (trenchesTimer) { clearInterval(trenchesTimer); trenchesTimer = null; }
   }
   if (trenchesList) {
+    /* The page carries a 30s meta-refresh backstop so it can never
+       sit frozen when this script is stale or dead. The poll is
+       running now, so the backstop is removed — the 5s poll owns
+       freshness from here and the page never reloads on its own. */
+    var staleMeta = document.querySelector('meta[http-equiv="refresh"]');
+    if (staleMeta) staleMeta.remove();
     startTrenchesPoll();
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) stopTrenchesPoll();

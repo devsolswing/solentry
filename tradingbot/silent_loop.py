@@ -4019,6 +4019,26 @@ def run_once(db: sqlite3.Connection, cfg: Config, price_fetcher=None,
         prices_data = feed.sanitize_prices_data(prices_data)
         if trenches_data is not None:
             trenches_data = feed.sanitize_trenches(trenches_data)
+        # Server-watch the surviving scan candidates: the Helius
+        # stream subscribes them and ticks them live even when no
+        # browser is watching. Before this, the stream watched
+        # held + browser-watched mints only, and with no browser
+        # on the page and quiet holdings it delivered nothing for
+        # an hour (2026-11-26: 39x "no stream data for 45s") while
+        # the fresh coins the page shows were never subscribed.
+        # Candidates that could not be priced are already dropped,
+        # so only coins with a real price are watched. A missing
+        # setter (old feed fakes in tests) is a no-op.
+        setter = getattr(feed, "set_server_watched", None)
+        if callable(setter) and trenches_data is not None:
+            try:
+                setter([(c or {}).get("mint")
+                        for c in (trenches_data.get("candidates")
+                                  or [])
+                        if (c or {}).get("mint")])
+            except Exception as exc:  # never break the loop pass
+                print(f"[silent-loop] server-watch update failed: "
+                      f"{exc}", flush=True)
     # Pending-trade reconciliation (mainnet fix): re-check every
     # unconfirmed sent signature via getTransaction before this
     # pass settles anything. A failure here never breaks the loop.
